@@ -71,7 +71,7 @@ Conventions & gotchas:
 Rough layout: `app/(app)/` (customer), `app/admin/` (backoffice), `components/ui/` (shadcn), `components/charts/` (Tremor), `lib/format/`, `lib/i18n/`, `styles/globals.css` (tokens).
 
 ## Environments
-Production + persistent staging (synthetic data only) + ephemeral per-PR previews. Trunk-based on `main`; merge → staging, prod requires manual promote. CI gate: lint + test (GitHub Actions) + local pre-push hook. Backups: Railway native + nightly `pg_dump` to S3 (30-day rolling).
+Production + persistent staging (synthetic data only) + ephemeral per-PR previews. **`dev` is the integration branch: `feat/*` branches off `dev` and merges back into `dev`** (agent-merged once checks pass, no per-ticket human review). `main` is the trunk that Railway/Vercel deploy to STAGING; it only receives merges from `dev` per completed epic, reviewed (by another AI or Semi if requested) and merged by the owner — never by the agent. Prod requires manual promote. CI gate: lint + test (GitHub Actions) + local pre-push hook. Backups: Railway native + nightly `pg_dump` to S3 (30-day rolling). See `flux.md` for the full process.
 
 ## Docs (planning source of truth, in this workspace)
 `PRD.md` · `data model.md` · `design guide.md` · architecture decisions (`docs/map.md`, `docs/architecture-report.md`, `docs/issues/*`). Read the relevant one before changing behavior in that area.
