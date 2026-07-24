@@ -10,4 +10,4 @@ export const adminGuard = new Elysia({ name: 'admin.guard' })
     // TODO: verify WorkOS session in the "Macha Internal" org, resolve staff tier.
     return { staffId: '' as string, tier: 'staff' as 'staff' | 'super_admin' };
   })
-  .as('plugin');
+  .as('global');
