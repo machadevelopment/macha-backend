@@ -1,0 +1,36 @@
+{
+  "name": "macha-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Macha Finance — CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "bun build src/index.ts --target bun --outdir dist",
+    "start": "bun run dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "bun test",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:seed": "bun run scripts/seed.ts"
+  },
+  "dependencies": {
+    "elysia": "^1.1.0",
+    "drizzle-orm": "^0.33.0",
+    "postgres": "^3.4.4",
+    "jose": "^5.9.0",
+    "pg-boss": "^10.1.5",
+    "ioredis": "^5.4.1",
+    "@aws-sdk/client-s3": "^3.637.0",
+    "@aws-sdk/s3-request-presigner": "^3.637.0",
+    "resend": "^4.0.0",
+    "@sentry/bun": "^8.26.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.24.0",
+    "@types/bun": "^1.1.6",
+    "typescript": "^5.5.4",
+    "eslint": "^9.9.0"
+  }
+}
