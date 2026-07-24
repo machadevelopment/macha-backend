@@ -20,10 +20,10 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
     const token = await verifyToken(auth.slice(7));
     // Placeholder: real resolution happens in F2 (see TODO above).
     return {
-      userId: '' as string,        // users.id
-      companyId: '' as string,     // resolved company_users.company_id
+      userId: '' as string, // users.id
+      companyId: '' as string, // resolved company_users.company_id
       role: 'member' as 'owner' | 'admin' | 'member',
       workosUserId: token.sub,
     };
   })
-  .as('plugin');
+  .as('global');

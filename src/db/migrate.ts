@@ -14,7 +14,9 @@ if (!url) throw new Error('DATABASE_URL is not set');
 
 const sql = postgres(url, { max: 1 });
 
-const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+const files = readdirSync(dir)
+  .filter((f) => f.endsWith('.sql'))
+  .sort();
 for (const f of files) {
   const body = readFileSync(join(dir, f), 'utf8');
   process.stdout.write(`applying ${f} ... `);

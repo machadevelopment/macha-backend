@@ -10,6 +10,8 @@
     "start": "bun run dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "bun test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
@@ -28,9 +30,13 @@
     "@sentry/bun": "^8.26.0"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.24.0",
+    "@eslint/js": "^10.0.1",
     "@types/bun": "^1.1.6",
+    "drizzle-kit": "^0.24.0",
+    "eslint": "^9.9.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
     "typescript": "^5.5.4",
-    "eslint": "^9.9.0"
+    "typescript-eslint": "^8.65.0"
   }
 }
