@@ -116,4 +116,4 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
       await release(false);
     }
   })
-  .as('plugin');
+  .as('global');
