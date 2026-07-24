@@ -14,6 +14,14 @@ export const reportRenderKey = (companyId: string, reportVersionId: string) =>
 export async function presignGet(key: string, expiresIn = 300): Promise<string> {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: env.s3Bucket, Key: key }), { expiresIn });
 }
-export async function presignPut(key: string, contentType: string, expiresIn = 300): Promise<string> {
-  return getSignedUrl(s3, new PutObjectCommand({ Bucket: env.s3Bucket, Key: key, ContentType: contentType }), { expiresIn });
+export async function presignPut(
+  key: string,
+  contentType: string,
+  expiresIn = 300,
+): Promise<string> {
+  return getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: env.s3Bucket, Key: key, ContentType: contentType }),
+    { expiresIn },
+  );
 }

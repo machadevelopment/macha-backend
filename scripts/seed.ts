@@ -7,18 +7,26 @@ import { db } from '@/db/client';
 import { companies } from '@/db/schema';
 
 async function main() {
-  const [demo] = await db.insert(companies).values({
-    workosOrgId: 'org_demo_local',
-    name: 'Demo Retail GT',
-    industry: 'retail',
-    baseCurrency: 'GTQ',
-    status: 'active',
-    locale: 'es',
-  }).returning();
+  const [demo] = await db
+    .insert(companies)
+    .values({
+      workosOrgId: 'org_demo_local',
+      name: 'Demo Retail GT',
+      industry: 'retail',
+      baseCurrency: 'GTQ',
+      status: 'active',
+      locale: 'es',
+    })
+    .returning();
 
   console.log('seeded company:', demo?.id);
   // NOTE: per-tenant ledger partitions must be provisioned separately
   // (scripts/provision_tenant.sql) before inserting transactions/invoices/bills.
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
