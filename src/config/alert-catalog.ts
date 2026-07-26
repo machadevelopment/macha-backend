@@ -14,11 +14,8 @@
 // - `spend_out_of_range` requiere al menos 3 meses de historia cargada; con menos,
 //   la regla queda inactiva y no dispara falsos positivos.
 //
-// PLACEHOLDER: los umbrales numéricos de Jose no llegaron (tabla vacía en su comentario
-// de ClickUp) y el PRD tampoco los tiene (el ticket original solo usaba letras X/Y/Z
-// como placeholder de redacción — nunca hubo cifra real documentada en ningún lado).
-// Los valores de abajo son una propuesta razonable, NO una cifra confirmada; ajustar
-// cuando Macha/Jose den los números reales — el mecanismo no se bloquea por esto.
+// Umbrales REALES aprobados por Jose (confirmados sin cambios en su revisión final;
+// la API de ClickUp había devuelto la tabla vacía la primera vez, ya se corrigió).
 export type AlertCatalogEntry = {
   ruleKey: string;
   label: string;
@@ -32,30 +29,30 @@ export const alertCatalog: AlertCatalogEntry[] = [
   {
     ruleKey: 'ar_overdue',
     label: 'Cobro vencido',
-    defaultThreshold: 30, // días
+    defaultThreshold: 60, // días
     notifyImmediately: true,
-    notes: 'Días de vencimiento de una factura por cobrar (invoices.due_date).',
+    notes: 'Factura por cobrar que pasa N días de su vencimiento (invoices.due_date).',
   },
   {
     ruleKey: 'portfolio_concentration',
     label: 'Concentración de cartera',
-    defaultThreshold: 40, // % de AR en un solo counterparty
+    defaultThreshold: 25, // % de AR en un solo counterparty
     notifyImmediately: true,
-    notes: '% de cuentas por cobrar abiertas concentradas en un solo counterparty.',
+    notes: 'Un solo cliente concentra más del % de lo que te deben (AR abierta).',
   },
   {
     ruleKey: 'revenue_drop',
     label: 'Caída de ingresos MoM',
-    defaultThreshold: 15, // % caída mes contra mes
+    defaultThreshold: 15, // % caída vs. promedio de los 3 meses anteriores
     notifyImmediately: true,
-    notes: 'Caída porcentual de revenue del mes vs. el mes anterior.',
+    notes: 'Ingresos del mes contra el promedio de los 3 meses anteriores.',
   },
   {
     ruleKey: 'margin_drop',
-    label: 'Margen bruto bajo',
-    defaultThreshold: 20, // % margen mínimo
+    label: 'Margen bajo',
+    defaultThreshold: 25, // % margen mínimo
     notifyImmediately: false,
-    notes: 'Margen bruto (revenue - cogs) / revenue por debajo del umbral.',
+    notes: 'Margen bruto del período por debajo del umbral.',
   },
   {
     ruleKey: 'spend_out_of_range',
@@ -63,15 +60,15 @@ export const alertCatalog: AlertCatalogEntry[] = [
     defaultThreshold: 40, // % desviación vs. promedio móvil de 3 meses
     notifyImmediately: false,
     notes:
-      'Reemplaza "gasto anómalo" (no determinista). Desviación vs. promedio móvil de 3 ' +
-      'meses de la misma categoría; requiere >=3 meses de historia cargada, si no la ' +
-      'regla queda inactiva.',
+      'Reemplaza "gasto anómalo" (no determinista). Una categoría de costo supera su ' +
+      'promedio de 3 meses en más del %; requiere >=3 meses de historia cargada, si no ' +
+      'la regla queda inactiva.',
   },
   {
     ruleKey: 'low_credit_balance',
     label: 'Saldo de créditos bajo',
-    defaultThreshold: 10, // % del allotment mensual restante
+    defaultThreshold: 20, // % de la asignación mensual restante
     notifyImmediately: false,
-    notes: '% del allotment mensual de créditos de insight restante.',
+    notes: 'Créditos restantes por debajo del % de la asignación mensual.',
   },
 ];
