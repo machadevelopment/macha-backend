@@ -1,12 +1,14 @@
 import { Elysia } from 'elysia';
 import { env } from '@/lib/env';
 import { health } from '@/modules/health';
+import { ingestion } from '@/modules/ingestion';
 import { startQueue } from '@/queue';
 
 // Macha Finance backend — Bun + Elysia. Tenant scoping is enforced in guards/derive
 // (see src/guards/). Admin is a separate namespace. Validation uses TypeBox (Elysia).
 export const app = new Elysia()
   .use(health)
+  .use(ingestion)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
 
