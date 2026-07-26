@@ -11,6 +11,18 @@ export const uploadKey = (companyId: string, documentId: string, ext: string) =>
 export const reportRenderKey = (companyId: string, reportVersionId: string) =>
   `companies/${companyId}/reports/${reportVersionId}.html`;
 
+/** Direct server-side upload (the backend receives the multipart file itself and
+ * relays it to S3) — as opposed to presignPut, which is for client-direct uploads. */
+export async function uploadObject(
+  key: string,
+  body: Uint8Array | Buffer,
+  contentType: string,
+): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({ Bucket: env.s3Bucket, Key: key, Body: body, ContentType: contentType }),
+  );
+}
+
 export async function presignGet(key: string, expiresIn = 300): Promise<string> {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: env.s3Bucket, Key: key }), { expiresIn });
 }
