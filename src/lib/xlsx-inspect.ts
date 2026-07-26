@@ -39,3 +39,22 @@ export function inspectXlsxWorkbook(buffer: Uint8Array): { sheetRowCounts: numbe
 
   return { sheetRowCounts };
 }
+
+/**
+ * Estimate how many Claude calls (batches) the worker (CU-868kfva8v) will make for
+ * these sheets — used at intake time (CU-868kfvaa6) to hard-block on insufficient
+ * credits BEFORE enqueueing, since the `excel` credit rule is billed per batch. A
+ * sheet at/under the threshold is one call; larger sheets split into `batchSize`
+ * chunks. Approximate: the worker's real chunking may differ slightly once
+ * `sheet_to_json` filters blank rows the dimension ref doesn't know about.
+ */
+export function estimateBatchCount(
+  sheetRowCounts: number[],
+  largeSheetRowThreshold: number,
+  batchSize: number,
+): number {
+  return sheetRowCounts.reduce((total, rows) => {
+    if (rows === 0) return total;
+    return total + (rows > largeSheetRowThreshold ? Math.ceil(rows / batchSize) : 1);
+  }, 0);
+}
