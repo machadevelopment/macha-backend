@@ -7,6 +7,8 @@ import { intakeConfig } from '@/config/intake';
 import { uploadKey, uploadObject } from '@/lib/s3';
 import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
+import { checkQueueGate } from '@/lib/rate-limit';
+import { rateLimitConfig } from '@/config/rate-limit';
 import { documents, companies } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
 
@@ -31,6 +33,7 @@ const MESSAGES = {
       `El archivo supera el máximo de filas permitidas (${limit}). Recibido: ${received}.`,
     insufficientCredits: (required: number, balance: number) =>
       `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
+    queueFull: (max: number) => `Ya tienes ${max} archivos procesándose. Espera a que terminen.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -42,6 +45,8 @@ const MESSAGES = {
       `File exceeds the maximum allowed rows (${limit}). Received: ${received}.`,
     insufficientCredits: (required: number, balance: number) =>
       `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
+    queueFull: (max: number) =>
+      `You already have ${max} files processing. Wait for them to finish.`,
   },
 } as const;
 
@@ -114,6 +119,14 @@ export const ingestion = new Elysia({ prefix: '/documents' }).use(tenantDerive).
         set.status = 402;
         return { error: msg.insufficientCredits(requiredCredits, balance) };
       }
+    }
+
+    // Gate de profundidad de cola (CU-868kfvaah, valores de CU-868kfv97f): rechazo
+    // sin subir a S3 ni encolar si ya hay demasiados jobs pesados activos/encolados.
+    const gate = await checkQueueGate(companyId, 'excel');
+    if (!gate.allowed) {
+      set.status = 429;
+      return { error: msg.queueFull(rateLimitConfig.queueGate.maxJobs), reason: 'queue_full' };
     }
 
     // All caps passed — now (and only now) persist original + create documents row.
