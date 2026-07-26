@@ -15,19 +15,23 @@
     "test": "bun test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
-    "db:seed": "bun run scripts/seed.ts"
+    "db:seed": "bun run scripts/seed.ts",
+    "provision:tenant": "bun run scripts/provision-tenant.ts"
   },
   "dependencies": {
-    "elysia": "^1.1.0",
-    "drizzle-orm": "^0.33.0",
-    "postgres": "^3.4.4",
-    "jose": "^5.9.0",
-    "pg-boss": "^10.1.5",
-    "ioredis": "^5.4.1",
+    "@anthropic-ai/sdk": "^0.115.0",
     "@aws-sdk/client-s3": "^3.637.0",
     "@aws-sdk/s3-request-presigner": "^3.637.0",
+    "@sentry/bun": "^8.26.0",
+    "drizzle-orm": "^0.33.0",
+    "elysia": "^1.1.0",
+    "fflate": "^0.8.3",
+    "ioredis": "^5.4.1",
+    "jose": "^5.9.0",
+    "pg-boss": "^10.1.5",
+    "postgres": "^3.4.4",
     "resend": "^4.0.0",
-    "@sentry/bun": "^8.26.0"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
