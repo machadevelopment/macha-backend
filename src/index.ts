@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 import { env } from '@/lib/env';
 import { health } from '@/modules/health';
+import { startQueue } from '@/queue';
 
 // Macha Finance backend — Bun + Elysia. Tenant scoping is enforced in guards/derive
 // (see src/guards/). Admin is a separate namespace. Validation uses TypeBox (Elysia).
@@ -11,3 +12,11 @@ export const app = new Elysia()
 
 console.log(`macha-backend listening on :${env.port}`);
 export type App = typeof app;
+
+// pg-boss workers run in-process with the API for MVP (PRD §5, "workers separables a
+// un servicio dedicado por cambio de configuración de despliegue cuando la capacidad
+// lo requiera"). Started after the HTTP server so a boss connection failure doesn't
+// prevent health checks from at least starting to answer.
+startQueue().catch((err) => {
+  console.error('startQueue failed:', err);
+});
