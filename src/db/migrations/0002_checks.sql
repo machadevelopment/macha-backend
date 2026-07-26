@@ -31,7 +31,12 @@ ALTER TABLE metric_rollups ADD CONSTRAINT metric_rollups_gran_chk     CHECK (gra
 ALTER TABLE chat_messages  ADD CONSTRAINT chat_messages_role_chk      CHECK (role IN ('user','assistant','tool'));
 
 ALTER TABLE ai_usage_events     ADD CONSTRAINT ai_usage_kind_chk      CHECK (kind IN ('excel','chat','insight','report_generation','excel_correction'));
-ALTER TABLE credit_transactions ADD CONSTRAINT credit_reason_chk      CHECK (reason IN ('monthly_allotment','top_up','insight_consumption'));
+
+-- CU-868kfv97x: reason se generaliza (era 'insight_consumption' fijo). El CHECK sobre
+-- action_kind (columna nueva) y la tabla credit_rules van en 0005_credits_schema.sql,
+-- junto con su creación, para no referenciar una tabla/columna que aun no existe en
+-- este punto del orden de migraciones.
+ALTER TABLE credit_transactions ADD CONSTRAINT credit_reason_chk      CHECK (reason IN ('monthly_allotment','top_up','consumption'));
 
 ALTER TABLE reports        ADD CONSTRAINT reports_frequency_chk       CHECK (frequency IN ('daily','weekly'));
 
