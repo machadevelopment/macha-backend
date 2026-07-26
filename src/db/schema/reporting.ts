@@ -67,6 +67,9 @@ export const alertRules = pgTable(
     ruleKey: text('rule_key').notNull(), // e.g. ar_overdue, margin_drop
     threshold: numeric('threshold', { precision: 18, scale: 4 }).notNull(),
     enabled: boolean('enabled').notNull().default(true),
+    // CU-868kfv993: reglas que afectan liquidez notifican por email de inmediato;
+    // el resto se acumula y se resume en el reporte periódico (evita spam de correos).
+    notifyImmediately: boolean('notify_immediately').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
