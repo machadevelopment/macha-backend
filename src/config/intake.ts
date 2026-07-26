@@ -16,6 +16,9 @@ export const intakeConfig = {
   maxFileSizeMb: Number(process.env.INTAKE_MAX_FILE_SIZE_MB ?? 10),
   /** Filas máximas por archivo (todas las hojas). */
   maxRowsPerFile: Number(process.env.INTAKE_MAX_ROWS_PER_FILE ?? 50_000),
+  /** Hojas máximas por libro. Corrección: faltaba en la primera implementación —
+   * la tabla de valores de Jose (CU-868kfv972) no llegó completa la primera vez. */
+  maxSheetsPerWorkbook: Number(process.env.INTAKE_MAX_SHEETS_PER_WORKBOOK ?? 30),
   /** A partir de cuántas filas una hoja se considera "grande" y se procesa en lotes. */
   largeSheetRowThreshold: Number(process.env.INTAKE_LARGE_SHEET_ROW_THRESHOLD ?? 5_000),
   /** Tamaño de lote para hojas grandes. */
