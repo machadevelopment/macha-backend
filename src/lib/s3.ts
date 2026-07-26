@@ -23,6 +23,14 @@ export async function uploadObject(
   );
 }
 
+/** Direct server-side download — the worker (CU-868kfva8v) reads the original Excel
+ * back from S3 to parse it; no client round trip, so a presigned URL isn't needed. */
+export async function downloadObject(key: string): Promise<Uint8Array> {
+  const res = await s3.send(new GetObjectCommand({ Bucket: env.s3Bucket, Key: key }));
+  if (!res.Body) throw new Error(`S3 object has no body: ${key}`);
+  return res.Body.transformToByteArray();
+}
+
 export async function presignGet(key: string, expiresIn = 300): Promise<string> {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: env.s3Bucket, Key: key }), { expiresIn });
 }
