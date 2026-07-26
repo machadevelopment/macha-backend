@@ -1,9 +1,9 @@
 import { Elysia } from 'elysia';
-import { drizzle } from 'drizzle-orm/postgres-js';
 import { and, eq } from 'drizzle-orm';
 import { verifyToken } from '@/lib/auth';
-import { db as rootDb, sql, schema } from '@/db/client';
+import { db as rootDb } from '@/db/client';
 import { users, companyUsers, companies } from '@/db/schema';
+import { reserveCompanyConnection } from '@/lib/db-scope';
 
 // Reserved connections are kept off the typed context (handlers never see the raw
 // pooled connection) and released via onAfterHandle/onError, keyed by the request.
@@ -76,30 +76,18 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
     }
 
     // Scope this request's queries to the resolved company via SET LOCAL, inside a
-    // transaction on a connection reserved just for this request. Cleared on
-    // commit/rollback and released back to the pool by the hooks below.
-    const reserved = await sql.reserve();
-    await reserved`begin`;
-    await reserved`select set_config('app.company_id', ${membership.companyId}, true)`;
-
-    let released = false;
-    pendingRelease.set(request, async (commit: boolean) => {
-      if (released) return;
-      released = true;
-      try {
-        if (commit) await reserved`commit`;
-        else await reserved`rollback`;
-      } finally {
-        reserved.release();
-      }
-    });
+    // transaction on a connection reserved just for this request (shared primitive
+    // with the pg-boss workers — see lib/db-scope.ts). Cleared on commit/rollback
+    // and released back to the pool by the hooks below.
+    const { db: scopedDb, commit, rollback } = await reserveCompanyConnection(membership.companyId);
+    pendingRelease.set(request, (ok: boolean) => (ok ? commit() : rollback()));
 
     return {
       userId: user.id as string,
       companyId: membership.companyId as string,
       role: membership.role,
       workosUserId: token.sub,
-      db: drizzle(reserved, { schema }),
+      db: scopedDb,
     };
   })
   .onAfterHandle(async ({ request }) => {
