@@ -23,22 +23,66 @@ async function main() {
   // NOTE: per-tenant ledger partitions must be provisioned separately
   // (scripts/provision_tenant.sql) before inserting transactions/invoices/bills.
 
-  // CU-868kfv97x: motor de créditos — SOLO insight tiene regla activa en v1, per
-  // PRD/CLAUDE.md ("excel/chat: solo visibilidad, sin cap"). Valor placeholder para
-  // que el sistema arranque, no propuesta comercial (Jose: los números se definen
-  // con datos reales de las pruebas).
-  const [insightRule] = await db
-    .insert(creditRules)
-    .values({
-      actionKind: 'insight',
-      ruleType: 'fixed',
-      creditsPerUnit: '1',
-      version: 1,
-      active: true,
-    })
-    .returning();
+  // CU-868kfv97x: motor de créditos — decisión final de Jose (reemplaza la lectura
+  // parcial anterior): las 4 acciones tienen regla PROVISIONAL activa desde ya,
+  // holgadas a propósito para que nadie choque contra el límite durante las pruebas
+  // (el bloqueo duro sigue activo). Ningún valor es final — se definen con datos
+  // reales de costo durante las pruebas. Esto supera lo que decía el PRD sobre
+  // "excel/chat sin cap en v1" (ver nota en data model.md §13 y PRD.md).
+  const [excelRule, chatRule, insightRule, reportRule] = await Promise.all([
+    db
+      .insert(creditRules)
+      .values({
+        actionKind: 'excel',
+        ruleType: 'variable',
+        creditsPerUnit: '1',
+        unit: 'batch',
+        version: 1,
+        active: true,
+      })
+      .returning(),
+    db
+      .insert(creditRules)
+      .values({
+        actionKind: 'chat',
+        ruleType: 'fixed',
+        creditsPerUnit: '1',
+        version: 1,
+        active: true,
+      })
+      .returning(),
+    db
+      .insert(creditRules)
+      .values({
+        actionKind: 'insight',
+        ruleType: 'fixed',
+        creditsPerUnit: '1',
+        version: 1,
+        active: true,
+      })
+      .returning(),
+    db
+      .insert(creditRules)
+      .values({
+        actionKind: 'report_generation',
+        ruleType: 'fixed',
+        creditsPerUnit: '2',
+        version: 1,
+        active: true,
+      })
+      .returning(),
+  ]);
 
-  console.log('seeded credit rule (insight, v1, active):', insightRule?.id);
+  console.log(
+    'seeded credit rules (v1, provisional, active): excel',
+    excelRule[0]?.id,
+    'chat',
+    chatRule[0]?.id,
+    'insight',
+    insightRule[0]?.id,
+    'report_generation',
+    reportRule[0]?.id,
+  );
 }
 
 main()
