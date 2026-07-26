@@ -9,6 +9,7 @@ import { classifySheetRows } from '@/lib/anthropic';
 import { insertStagingRows } from '@/lib/staging';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { promoteDocument } from '@/lib/promotion';
+import { getActiveCreditRule, estimateRequiredCredits, debitCredits } from '@/lib/credits';
 
 type ExcelIngestPayload = { documentId: string; companyId: string };
 
@@ -39,31 +40,40 @@ export function startExcelIngestWorker(): Promise<string> {
           db.update(documents).set({ status: 'processing' }).where(eq(documents.id, documentId)),
         );
 
-        const { templateVersion, s3Key } = await withCompanyScope(companyId, async (db) => {
-          const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
-          if (!doc) throw new Error(`document ${documentId} not found for company ${companyId}`);
+        const { templateVersion, s3Key, creditRule } = await withCompanyScope(
+          companyId,
+          async (db) => {
+            const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
+            if (!doc) throw new Error(`document ${documentId} not found for company ${companyId}`);
 
-          const [company] = await db.select().from(companies).where(eq(companies.id, companyId));
-          if (!company) throw new Error(`company ${companyId} not found`);
+            const [company] = await db.select().from(companies).where(eq(companies.id, companyId));
+            if (!company) throw new Error(`company ${companyId} not found`);
 
-          const [template] = await db
-            .select()
-            .from(industryTemplates)
-            .where(eq(industryTemplates.industry, company.industry));
-          if (!template?.currentVersionId) {
-            throw new Error(`No hay plantilla de industria configurada para "${company.industry}"`);
-          }
+            const [template] = await db
+              .select()
+              .from(industryTemplates)
+              .where(eq(industryTemplates.industry, company.industry));
+            if (!template?.currentVersionId) {
+              throw new Error(
+                `No hay plantilla de industria configurada para "${company.industry}"`,
+              );
+            }
 
-          const [templateVersion] = await db
-            .select()
-            .from(industryTemplateVersions)
-            .where(eq(industryTemplateVersions.id, template.currentVersionId));
-          if (!templateVersion) {
-            throw new Error(`Versión de plantilla ${template.currentVersionId} no encontrada`);
-          }
+            const [templateVersion] = await db
+              .select()
+              .from(industryTemplateVersions)
+              .where(eq(industryTemplateVersions.id, template.currentVersionId));
+            if (!templateVersion) {
+              throw new Error(`Versión de plantilla ${template.currentVersionId} no encontrada`);
+            }
 
-          return { templateVersion, s3Key: doc.s3Key };
-        });
+            // Frozen once per document (same pattern as fx_rate in promotion.ts) —
+            // consistent even if the rule version changes mid-processing.
+            const creditRule = await getActiveCreditRule(db, 'excel');
+
+            return { templateVersion, s3Key: doc.s3Key, creditRule };
+          },
+        );
 
         const fileBuffer = await downloadObject(s3Key);
         const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
@@ -101,6 +111,19 @@ export function startExcelIngestWorker(): Promise<string> {
                 billableUnits: batch.length,
               });
               await insertStagingRows(db, companyId, documentId, result.rows);
+
+              // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
+              // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
+              // (no bloquea ni descuenta) — mismo comportamiento que antes de F0.
+              if (creditRule) {
+                await debitCredits(db, {
+                  companyId,
+                  actionKind: 'excel',
+                  credits: estimateRequiredCredits(creditRule, 1),
+                  creditRuleId: creditRule.id,
+                  refId: documentId,
+                });
+              }
             });
 
             totalRowsProcessed += batch.length;

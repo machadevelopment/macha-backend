@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { zipSync, strToU8 } from 'fflate';
-import { inspectXlsxWorkbook } from './xlsx-inspect';
+import { inspectXlsxWorkbook, estimateBatchCount } from './xlsx-inspect';
 
 function fakeXlsx(sheetDimensions: string[]): Uint8Array {
   const files: Record<string, Uint8Array> = {};
@@ -30,5 +30,23 @@ describe('inspectXlsxWorkbook', () => {
     };
     const buf = zipSync(files);
     expect(inspectXlsxWorkbook(buf).sheetRowCounts).toEqual([99, 2]);
+  });
+});
+
+describe('estimateBatchCount', () => {
+  test('a sheet at/under the threshold is a single batch', () => {
+    expect(estimateBatchCount([100, 5000], 5000, 2000)).toBe(2);
+  });
+
+  test('a sheet over the threshold splits into ceil(rows/batchSize) batches', () => {
+    expect(estimateBatchCount([5001], 5000, 2000)).toBe(3); // ceil(5001/2000) = 3
+  });
+
+  test('empty sheets contribute zero batches', () => {
+    expect(estimateBatchCount([0, 100, 0], 5000, 2000)).toBe(1);
+  });
+
+  test('mixes small and large sheets correctly', () => {
+    expect(estimateBatchCount([100, 12000], 5000, 2000)).toBe(1 + 6); // ceil(12000/2000)=6
   });
 });

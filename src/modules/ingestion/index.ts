@@ -5,7 +5,8 @@ import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
 import { uploadKey, uploadObject } from '@/lib/s3';
-import { inspectXlsxWorkbook } from '@/lib/xlsx-inspect';
+import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
+import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { documents, companies } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
 
@@ -28,6 +29,8 @@ const MESSAGES = {
       `El libro supera el máximo de hojas permitidas (${limit}). Recibido: ${received}.`,
     tooManyRows: (limit: number, received: number) =>
       `El archivo supera el máximo de filas permitidas (${limit}). Recibido: ${received}.`,
+    insufficientCredits: (required: number, balance: number) =>
+      `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -37,6 +40,8 @@ const MESSAGES = {
       `Workbook exceeds the maximum allowed sheets (${limit}). Received: ${received}.`,
     tooManyRows: (limit: number, received: number) =>
       `File exceeds the maximum allowed rows (${limit}). Received: ${received}.`,
+    insufficientCredits: (required: number, balance: number) =>
+      `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
   },
 } as const;
 
@@ -72,6 +77,9 @@ export const ingestion = new Elysia({ prefix: '/documents' }).use(tenantDerive).
 
     // Cheap pre-check (no full parse) — only meaningful for .xlsx (OOXML zip); .xls
     // (legacy binary) and .csv fall back to the size cap above only, see xlsx-inspect.ts.
+    // Also used below to estimate the credit hard-block (CU-868kfvaa6) — the `excel`
+    // rule is billed per batch, so we need an upfront batch-count guess.
+    let estimatedBatches = 1;
     if (ext === 'xlsx') {
       const { sheetRowCounts } = inspectXlsxWorkbook(buffer);
 
@@ -86,6 +94,25 @@ export const ingestion = new Elysia({ prefix: '/documents' }).use(tenantDerive).
       if (totalRows > intakeConfig.maxRowsPerFile) {
         set.status = 413;
         return { error: msg.tooManyRows(intakeConfig.maxRowsPerFile, totalRows) };
+      }
+
+      estimatedBatches = estimateBatchCount(
+        sheetRowCounts,
+        intakeConfig.largeSheetRowThreshold,
+        intakeConfig.batchSize,
+      );
+    }
+
+    // Hard block on insufficient credits (CU-868kfvaa6, CU-868kfv97x): verify BEFORE
+    // enqueueing the AI job — no call, no consumption row, if the balance is short.
+    // No active rule for `excel` (v1 default, see scripts/seed.ts) means no cap.
+    const creditRule = await getActiveCreditRule(db, 'excel');
+    if (creditRule) {
+      const requiredCredits = estimateRequiredCredits(creditRule, estimatedBatches);
+      const balance = await getCreditBalance(db, companyId);
+      if (balance < requiredCredits) {
+        set.status = 402;
+        return { error: msg.insufficientCredits(requiredCredits, balance) };
       }
     }
 
