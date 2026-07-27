@@ -16,7 +16,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
     "db:seed": "bun run scripts/seed.ts",
-    "provision:tenant": "bun run scripts/provision-tenant.ts"
+    "provision:tenant": "bun run scripts/provision-tenant.ts",
+    "prepare": "husky"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
@@ -39,8 +40,19 @@
     "drizzle-kit": "^0.24.0",
     "eslint": "^9.9.0",
     "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.2.0",
     "prettier": "^3.9.6",
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.65.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,sql}": [
+      "prettier --write"
+    ]
   }
 }

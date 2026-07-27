@@ -6,7 +6,11 @@ import { db } from '@/db/client';
 import { companies, companyUsers, subscriptions } from '@/db/schema';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
-import { startSubscriptionCheckout, BASE_PLAN_AMOUNT_USD_CENTS, appBaseUrl } from '@/lib/billing/provider';
+import {
+  startSubscriptionCheckout,
+  BASE_PLAN_AMOUNT_USD_CENTS,
+  appBaseUrl,
+} from '@/lib/billing/provider';
 
 /**
  * CU-868kfvae1/868kfvaem: registro autoservicio — alta automática de empresa+owner

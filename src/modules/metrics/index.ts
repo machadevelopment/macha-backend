@@ -109,11 +109,19 @@ export const arAp = new Elysia().use(tenantDerive).get(
       db
         .select({ dueDate: invoices.dueDate, amountBase: invoices.amountBase })
         .from(invoices)
-        .where(and(eq(invoices.companyId, companyId), eq(invoices.status, 'open'), isNull(invoices.deletedAt))),
+        .where(
+          and(
+            eq(invoices.companyId, companyId),
+            eq(invoices.status, 'open'),
+            isNull(invoices.deletedAt),
+          ),
+        ),
       db
         .select({ dueDate: bills.dueDate, amountBase: bills.amountBase })
         .from(bills)
-        .where(and(eq(bills.companyId, companyId), eq(bills.status, 'open'), isNull(bills.deletedAt))),
+        .where(
+          and(eq(bills.companyId, companyId), eq(bills.status, 'open'), isNull(bills.deletedAt)),
+        ),
     ]);
 
     function toBuckets(rows: { dueDate: string | null; amountBase: string }[]) {

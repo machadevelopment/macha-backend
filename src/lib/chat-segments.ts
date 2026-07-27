@@ -58,7 +58,9 @@ export async function buildChatHistory(
 
   const history: Anthropic.MessageParam[] = [];
   if (closedSegments.length > 0) {
-    const summary = closedSegments.map((s) => `[Resumen segmento ${s.seq}]\n${s.handoffDoc}`).join('\n\n');
+    const summary = closedSegments
+      .map((s) => `[Resumen segmento ${s.seq}]\n${s.handoffDoc}`)
+      .join('\n\n');
     history.push({
       role: 'user',
       content: `Contexto de la conversación hasta ahora (resumido, no literal):\n${summary}`,

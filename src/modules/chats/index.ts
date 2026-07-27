@@ -52,13 +52,19 @@ export const chats_ = new Elysia({ prefix: '/chats' })
     const [chat] = await db
       .select({ id: chats.id })
       .from(chats)
-      .where(and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)));
+      .where(
+        and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)),
+      );
     if (!chat) {
       set.status = 404;
       return { error: 'Chat not found' };
     }
     return db
-      .select({ role: chatMessages.role, content: chatMessages.content, createdAt: chatMessages.createdAt })
+      .select({
+        role: chatMessages.role,
+        content: chatMessages.content,
+        createdAt: chatMessages.createdAt,
+      })
       .from(chatMessages)
       .where(and(eq(chatMessages.chatId, params.id), eq(chatMessages.companyId, companyId)))
       .orderBy(chatMessages.createdAt);
@@ -82,7 +88,9 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       const [chat] = await db
         .select({ id: chats.id })
         .from(chats)
-        .where(and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)));
+        .where(
+          and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)),
+        );
       if (!chat) {
         set.status = 404;
         return { error: 'Chat not found' };
@@ -97,7 +105,13 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       const segment = await getOrCreateActiveSegment(db, companyId, params.id);
       const history = await buildChatHistory(db, params.id, segment.id);
 
-      const result = await runChatTurn({ db, companyId, locale, history, userMessage: body.content });
+      const result = await runChatTurn({
+        db,
+        companyId,
+        locale,
+        history,
+        userMessage: body.content,
+      });
 
       await db.insert(chatMessages).values({
         companyId,

@@ -61,7 +61,11 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
         action: 'staging_row.review',
         targetTable: 'staging_rows',
         targetId: params.id,
-        metadata: { before: before.payload, after: body.payload ?? before.payload, reviewStatus: body.reviewStatus },
+        metadata: {
+          before: before.payload,
+          after: body.payload ?? before.payload,
+          reviewStatus: body.reviewStatus,
+        },
       });
 
       return { id: params.id, reviewStatus: body.reviewStatus };

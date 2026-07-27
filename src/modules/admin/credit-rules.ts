@@ -71,7 +71,12 @@ export const adminCreditRules = new Elysia({ prefix: '/admin/credit-rules' })
         ruleType: t.Union([t.Literal('fixed'), t.Literal('variable')]),
         creditsPerUnit: t.Number(),
         unit: t.Optional(
-          t.Union([t.Literal('execution'), t.Literal('batch'), t.Literal('sheet'), t.Literal('row')]),
+          t.Union([
+            t.Literal('execution'),
+            t.Literal('batch'),
+            t.Literal('sheet'),
+            t.Literal('row'),
+          ]),
         ),
       }),
     },

@@ -13,7 +13,13 @@ type ReportGeneratePayload = {
 export function startReportGenerateWorker(): Promise<string> {
   return registerWorker<ReportGeneratePayload>(QUEUES.reportGenerate, async (payload) => {
     await withCompanyScope(payload.companyId, (db) =>
-      generateReport(db, payload.companyId, payload.periodStart, payload.periodEnd, payload.frequency),
+      generateReport(
+        db,
+        payload.companyId,
+        payload.periodStart,
+        payload.periodEnd,
+        payload.frequency,
+      ),
     );
   });
 }
