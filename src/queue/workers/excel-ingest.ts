@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { eq } from 'drizzle-orm';
-import { registerWorker, QUEUES } from '@/queue';
+import { registerWorker, enqueue, QUEUES } from '@/queue';
 import { withCompanyScope } from '@/lib/db-scope';
 import { downloadObject } from '@/lib/s3';
 import { documents, companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
@@ -131,7 +131,7 @@ export function startExcelIngestWorker(): Promise<string> {
           }
         }
 
-        await withCompanyScope(companyId, async (db) => {
+        const promotedThisRun = await withCompanyScope(companyId, async (db) => {
           const promotion = await promoteDocument(db, companyId, documentId);
           if (!promotion.promoted) {
             // Filas pendientes/marcadas: queda para revisión interna (US-17). La
@@ -140,12 +140,20 @@ export function startExcelIngestWorker(): Promise<string> {
               .update(documents)
               .set({ status: 'review', rowCount: totalRowsProcessed })
               .where(eq(documents.id, documentId));
-          } else {
-            // CU-868kfvab1: cache-aside — recomputa solo los rollups que la empresa ya
-            // había visto antes; los nunca vistos se llenan perezosamente en /metrics.
-            await refreshExistingRollups(db, companyId);
+            return false;
           }
+          // CU-868kfvab1: cache-aside — recomputa solo los rollups que la empresa ya
+          // había visto antes; los nunca vistos se llenan perezosamente en /metrics.
+          await refreshExistingRollups(db, companyId);
+          return true;
         });
+
+        if (promotedThisRun) {
+          // CU-868kfvad3: evaluación de alertas tras cada Excel exitoso, desacoplada
+          // vía la cola interna (no una llamada directa) — mismo patrón que el resto
+          // de este worker.
+          await enqueue(QUEUES.alertEvaluate, { companyId, documentId });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await withCompanyScope(companyId, (db) =>

@@ -10,10 +10,13 @@ import { env } from '@/lib/env';
  * directly outside this file — that's the internal queue interface, ready to swap
  * pg-boss out later without touching call sites.
  */
-export const boss = new PgBoss(env.databaseUrl);
+// `schedule: true` enables pg-boss's own cron subsystem (CU-868kfvacg's daily tick) —
+// off by default in the string-only constructor form.
+export const boss = new PgBoss({ connectionString: env.databaseUrl, schedule: true });
 
 export const QUEUES = {
   excelIngest: 'excel.ingest',
+  reportTick: 'report.tick',
   reportGenerate: 'report.generate',
   alertEvaluate: 'alert.evaluate',
   emailSend: 'email.send',
@@ -29,6 +32,7 @@ export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
 // backoff (fallos transitorios de Resend).
 const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
   [QUEUES.excelIngest]: { retryLimit: 3, retryDelay: 30, retryBackoff: true },
+  [QUEUES.reportTick]: { retryLimit: 1, retryDelay: 60, retryBackoff: false },
   [QUEUES.reportGenerate]: { retryLimit: 2, retryDelay: 60, retryBackoff: true },
   [QUEUES.alertEvaluate]: { retryLimit: 3, retryDelay: 15, retryBackoff: false },
   [QUEUES.emailSend]: { retryLimit: 3, retryDelay: 30, retryBackoff: true },
@@ -39,6 +43,9 @@ export async function startQueue(): Promise<PgBoss> {
   for (const queue of Object.values(QUEUES)) {
     await boss.createQueue(queue);
   }
+  // Daily fan-out trigger (CU-868kfvacg) — 06:00 UTC, one singleton tick that queries
+  // which companies are due and enqueues report.generate per company.
+  await boss.schedule(QUEUES.reportTick, '0 6 * * *');
   return boss;
 }
 

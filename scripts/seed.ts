@@ -6,7 +6,8 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { companies, creditRules, industryTemplates, industryTemplateVersions } from '@/db/schema';
+import { companies, creditRules, industryTemplates, industryTemplateVersions, alertRules } from '@/db/schema';
+import { alertCatalog } from '@/config/alert-catalog';
 
 async function main() {
   const [demo] = await db
@@ -167,6 +168,20 @@ async function main() {
     .where(eq(industryTemplates.id, retailTemplate!.id));
 
   console.log('seeded industry template: retail v1', retailVersion?.id);
+
+  // CU-868kfvad3: alert_rules es por empresa (nunca global) — este catálogo
+  // (config/alert-catalog.ts, umbrales reales aprobados por Jose) es solo el default
+  // que la provisión de empresa siembra. Sin flujo de onboarding real todavía (F7),
+  // así que se siembra aquí para la empresa demo.
+  await db.insert(alertRules).values(
+    alertCatalog.map((entry) => ({
+      companyId: demo!.id,
+      ruleKey: entry.ruleKey,
+      threshold: String(entry.defaultThreshold),
+      notifyImmediately: entry.notifyImmediately,
+    })),
+  );
+  console.log('seeded alert rules for demo company:', alertCatalog.map((e) => e.ruleKey).join(', '));
 }
 
 main()

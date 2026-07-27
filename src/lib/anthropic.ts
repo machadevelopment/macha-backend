@@ -194,3 +194,43 @@ export async function generateInsightNarrative(metricsSnapshot: unknown): Promis
     model: message.model,
   };
 }
+
+const REPORT_SYSTEM_PROMPT = (locale: 'es' | 'en') =>
+  locale === 'es'
+    ? `Eres el asistente financiero de Macha Finance. Recibes las métricas exactas
+(ya calculadas por SQL) de un reporte ejecutivo periódico de una PYME. Escribe una
+narrativa ejecutiva de 3-4 párrafos: qué pasó, por qué importa, y 1-2 recomendaciones.
+NUNCA inventes ni recalcules cifras — usa solo las del snapshot. Responde en español,
+texto plano sin markdown.`
+    : `You are Macha Finance's financial assistant. You receive the exact metrics
+(already computed via SQL) for a PYME's periodic executive report. Write a 3-4
+paragraph executive narrative: what happened, why it matters, and 1-2 recommendations.
+NEVER invent or recompute figures — use only the snapshot's. Respond in English, plain
+text, no markdown.`;
+
+/** Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as insights. */
+export async function generateReportNarrative(
+  metricsSnapshot: unknown,
+  locale: 'es' | 'en',
+): Promise<InsightResult> {
+  assertZdrModel(anthropicModel);
+  const anthropic = getClient();
+
+  const stream = anthropic.messages.stream({
+    model: anthropicModel,
+    max_tokens: 2048,
+    system: REPORT_SYSTEM_PROMPT(locale),
+    messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+  });
+  const message = await stream.finalMessage();
+
+  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
+  if (!textBlock) throw new Error('Claude response had no text block');
+
+  return {
+    narrative: textBlock.text,
+    inputTokens: message.usage.input_tokens,
+    outputTokens: message.usage.output_tokens,
+    model: message.model,
+  };
+}
