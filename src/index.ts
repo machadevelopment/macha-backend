@@ -1,6 +1,12 @@
 import { Elysia } from 'elysia';
 import { env } from '@/lib/env';
 import { adminCompanies } from '@/modules/admin/companies';
+import { adminStagingRows } from '@/modules/admin/staging-rows';
+import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
+import { adminConfig } from '@/modules/admin/config';
+import { adminCreditRules } from '@/modules/admin/credit-rules';
+import { adminAlertRules } from '@/modules/admin/alert-rules';
+import { adminMonitoring } from '@/modules/admin/monitoring';
 import { chats_ } from '@/modules/chats';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
@@ -29,6 +35,12 @@ export const app = new Elysia()
   .use(chats_)
   .use(reports_)
   .use(adminCompanies)
+  .use(adminStagingRows)
+  .use(adminIndustryTemplates)
+  .use(adminConfig)
+  .use(adminCreditRules)
+  .use(adminAlertRules)
+  .use(adminMonitoring)
   .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
