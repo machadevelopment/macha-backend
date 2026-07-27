@@ -8,6 +8,7 @@ import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { insightRequests } from '@/db/schema';
+import { checkTokenBucket } from '@/lib/rate-limit';
 
 function monthStart(monthsAgo: number): string {
   const d = new Date();
@@ -25,6 +26,14 @@ export const insights = new Elysia().use(tenantDerive).post(
   '/insights',
   async ({ companyId, userId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kfvaah: 'ai' token-bucket — ver nota equivalente en modules/chats/index.ts.
+    const gate = await checkTokenBucket('ai', companyId);
+    if (!gate.allowed) {
+      set.status = 429;
+      set.headers['Retry-After'] = String(gate.retryAfterSeconds);
+      return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
+    }
 
     const creditRule = await getActiveCreditRule(db, 'insight');
     if (creditRule) {
@@ -94,6 +103,10 @@ export const insights = new Elysia().use(tenantDerive).post(
         error: t.Literal('insufficient_credits'),
         required: t.Number(),
         balance: t.Number(),
+      }),
+      429: t.Object({
+        error: t.Literal('rate_limited'),
+        retryAfterSeconds: t.Number(),
       }),
     },
   },
