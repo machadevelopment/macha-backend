@@ -1,5 +1,6 @@
 import { Elysia } from 'elysia';
 import { env } from '@/lib/env';
+import { adminCompanies } from '@/modules/admin/companies';
 import { chats_ } from '@/modules/chats';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
@@ -27,6 +28,7 @@ export const app = new Elysia()
   .use(creditsBalance)
   .use(chats_)
   .use(reports_)
+  .use(adminCompanies)
   .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
