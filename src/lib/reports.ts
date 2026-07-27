@@ -24,7 +24,12 @@ import { env } from '@/lib/env';
  * precisión en el rango real del reporte. La IA nunca ve esta query, solo su
  * resultado (regla no negociable: "la IA narra, nunca calcula").
  */
-async function computeReportMetrics(db: DB, companyId: string, periodStart: string, periodEnd: string) {
+async function computeReportMetrics(
+  db: DB,
+  companyId: string,
+  periodStart: string,
+  periodEnd: string,
+) {
   const byType = await db
     .select({ type: transactions.type, total: rawSql<string>`sum(${transactions.amountBase})` })
     .from(transactions)
@@ -44,7 +49,13 @@ async function computeReportMetrics(db: DB, companyId: string, periodStart: stri
   const [arRow] = await db
     .select({ total: rawSql<string>`coalesce(sum(${invoices.amountBase}), 0)` })
     .from(invoices)
-    .where(and(eq(invoices.companyId, companyId), eq(invoices.status, 'open'), isNull(invoices.deletedAt)));
+    .where(
+      and(
+        eq(invoices.companyId, companyId),
+        eq(invoices.status, 'open'),
+        isNull(invoices.deletedAt),
+      ),
+    );
   const [apRow] = await db
     .select({ total: rawSql<string>`coalesce(sum(${bills.amountBase}), 0)` })
     .from(bills)
@@ -96,10 +107,17 @@ export async function generateReport(
     .select()
     .from(reports)
     .where(
-      and(eq(reports.companyId, companyId), eq(reports.periodStart, periodStart), eq(reports.periodEnd, periodEnd)),
+      and(
+        eq(reports.companyId, companyId),
+        eq(reports.periodStart, periodStart),
+        eq(reports.periodEnd, periodEnd),
+      ),
     );
   if (!report) {
-    [report] = await db.insert(reports).values({ companyId, periodStart, periodEnd, frequency }).returning();
+    [report] = await db
+      .insert(reports)
+      .values({ companyId, periodStart, periodEnd, frequency })
+      .returning();
   }
 
   const [lastVersion] = await db

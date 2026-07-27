@@ -13,7 +13,10 @@ import { companies } from '@/db/schema';
  */
 export function startReportTickWorker(): Promise<string> {
   return registerWorker(QUEUES.reportTick, async () => {
-    const activeCompanies = await db.select({ id: companies.id }).from(companies).where(eq(companies.status, 'active'));
+    const activeCompanies = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .where(eq(companies.status, 'active'));
 
     const yesterday = new Date();
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);

@@ -5,6 +5,7 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { chats, chatMessages, companies } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
+import { checkTokenBucket } from '@/lib/rate-limit';
 
 /**
  * CU-868kfvabw/868kfvabq: hilos nombrados por (company_id, user_id) + orquestación
@@ -51,13 +52,19 @@ export const chats_ = new Elysia({ prefix: '/chats' })
     const [chat] = await db
       .select({ id: chats.id })
       .from(chats)
-      .where(and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)));
+      .where(
+        and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)),
+      );
     if (!chat) {
       set.status = 404;
       return { error: 'Chat not found' };
     }
     return db
-      .select({ role: chatMessages.role, content: chatMessages.content, createdAt: chatMessages.createdAt })
+      .select({
+        role: chatMessages.role,
+        content: chatMessages.content,
+        createdAt: chatMessages.createdAt,
+      })
       .from(chatMessages)
       .where(and(eq(chatMessages.chatId, params.id), eq(chatMessages.companyId, companyId)))
       .orderBy(chatMessages.createdAt);
@@ -66,10 +73,24 @@ export const chats_ = new Elysia({ prefix: '/chats' })
     '/:id/messages',
     async ({ companyId, userId, role, params, body, set, db }) => {
       assertClientCapability(role, 'chat', set);
+
+      // CU-868kfvaah: 'ai' token-bucket (chat/insight) — se descubrió en una auditoría
+      // de Calidad que checkTokenBucket() existía desde CU-868kfv97f pero ninguna ruta
+      // lo consumía todavía (el comentario original de rate-limit.ts lo decía
+      // explícito). 429 + Retry-After es la respuesta acordada con Jose.
+      const gate = await checkTokenBucket('ai', companyId);
+      if (!gate.allowed) {
+        set.status = 429;
+        set.headers['Retry-After'] = String(gate.retryAfterSeconds);
+        return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
+      }
+
       const [chat] = await db
         .select({ id: chats.id })
         .from(chats)
-        .where(and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)));
+        .where(
+          and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)),
+        );
       if (!chat) {
         set.status = 404;
         return { error: 'Chat not found' };
@@ -84,7 +105,13 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       const segment = await getOrCreateActiveSegment(db, companyId, params.id);
       const history = await buildChatHistory(db, params.id, segment.id);
 
-      const result = await runChatTurn({ db, companyId, locale, history, userMessage: body.content });
+      const result = await runChatTurn({
+        db,
+        companyId,
+        locale,
+        history,
+        userMessage: body.content,
+      });
 
       await db.insert(chatMessages).values({
         companyId,

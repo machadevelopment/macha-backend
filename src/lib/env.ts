@@ -8,6 +8,13 @@ export const env = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: Number(process.env.PORT ?? 3001),
   databaseUrl: req('DATABASE_URL'),
+  // Restricted runtime role (migration 0010) — never owns tables, so REVOKE
+  // UPDATE/DELETE on append-only ledgers actually holds (owners always bypass
+  // REVOKE, unlike RLS which FORCE can apply to them). Falls back to DATABASE_URL
+  // so single-role setups (local dev, until an operator provisions the real
+  // Railway role) keep working — the append-only guarantee only becomes real once
+  // APP_DATABASE_URL is actually set to a distinct, non-owning role.
+  appDatabaseUrl: process.env.APP_DATABASE_URL ?? req('DATABASE_URL'),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   workosJwksUrl: process.env.WORKOS_JWKS_URL ?? '',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',

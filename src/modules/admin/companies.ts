@@ -147,7 +147,9 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
     {
       body: t.Object({
         role: t.Optional(t.Union([t.Literal('owner'), t.Literal('admin'), t.Literal('member')])),
-        status: t.Optional(t.Union([t.Literal('active'), t.Literal('invited'), t.Literal('revoked')])),
+        status: t.Optional(
+          t.Union([t.Literal('active'), t.Literal('invited'), t.Literal('revoked')]),
+        ),
       }),
     },
   );

@@ -104,5 +104,7 @@ export function getSubscription(providerSubscriptionId: string): Promise<Recurre
 }
 
 export function cancelSubscription(providerSubscriptionId: string): Promise<{ message: string }> {
-  return request<{ message: string }>(`/subscriptions/${providerSubscriptionId}`, { method: 'DELETE' });
+  return request<{ message: string }>(`/subscriptions/${providerSubscriptionId}`, {
+    method: 'DELETE',
+  });
 }

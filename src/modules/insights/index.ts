@@ -2,12 +2,19 @@ import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits, debitCredits } from '@/lib/credits';
+import {
+  getActiveCreditRule,
+  getCreditBalance,
+  estimateRequiredCredits,
+  debitCredits,
+} from '@/lib/credits';
 import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
-import { insightRequests } from '@/db/schema';
+import { insightRequests, companies } from '@/db/schema';
+import { checkTokenBucket } from '@/lib/rate-limit';
+import { eq } from 'drizzle-orm';
 
 function monthStart(monthsAgo: number): string {
   const d = new Date();
@@ -25,6 +32,14 @@ export const insights = new Elysia().use(tenantDerive).post(
   '/insights',
   async ({ companyId, userId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kfvaah: 'ai' token-bucket — ver nota equivalente en modules/chats/index.ts.
+    const gate = await checkTokenBucket('ai', companyId);
+    if (!gate.allowed) {
+      set.status = 429;
+      set.headers['Retry-After'] = String(gate.retryAfterSeconds);
+      return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
+    }
 
     const creditRule = await getActiveCreditRule(db, 'insight');
     if (creditRule) {
@@ -52,7 +67,21 @@ export const insights = new Elysia().use(tenantDerive).post(
       SETTINGS_KEYS.insightPromptTemplate,
       DEFAULT_INSIGHT_PROMPT,
     );
-    const result = await generateInsightNarrative(snapshot, promptTemplate);
+    // CU-868kfvam8 (i18n transversal): la IA debe respetar el idioma de la empresa —
+    // chat (chat-orchestrator) y reportes (reports.ts) ya lo hacían, insight se había
+    // quedado con un prompt fijo en español sin importar companies.locale. El template
+    // guardado en platform_settings es un solo texto (no localizado por diseño, un
+    // admin lo edita una vez) — la instrucción de idioma se agrega aparte, después del
+    // template, para que valga sin importar lo que el admin haya escrito ahí.
+    const [company] = await db
+      .select({ locale: companies.locale })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+    const locale = company?.locale ?? 'es';
+    const localizedPrompt = `${promptTemplate}\n\n${
+      locale === 'en' ? 'Respond in English.' : 'Responde en español.'
+    }`;
+    const result = await generateInsightNarrative(snapshot, localizedPrompt);
 
     const insightRequestId = randomUUID();
     await insertAiUsageEvent(db, {
@@ -80,7 +109,7 @@ export const insights = new Elysia().use(tenantDerive).post(
       // entrada — corregido de una versión anterior que guardaba el snapshot de
       // métricas aquí por error. Ahora que el prompt es editable (platform_settings),
       // esto es lo que de verdad puede cambiar entre requests y necesita congelarse.
-      promptSnapshot: promptTemplate,
+      promptSnapshot: localizedPrompt,
       result: result.narrative,
     });
 
@@ -94,6 +123,10 @@ export const insights = new Elysia().use(tenantDerive).post(
         error: t.Literal('insufficient_credits'),
         required: t.Number(),
         balance: t.Number(),
+      }),
+      429: t.Object({
+        error: t.Literal('rate_limited'),
+        retryAfterSeconds: t.Number(),
       }),
     },
   },

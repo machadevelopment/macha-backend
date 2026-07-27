@@ -22,9 +22,15 @@ export async function getPlatformSetting<T>(db: DB, key: string, fallback: T): P
   return row ? (row.value as T) : fallback;
 }
 
-export async function getAllPlatformSettings(db: DB): Promise<{ key: string; value: unknown; updatedAt: Date }[]> {
+export async function getAllPlatformSettings(
+  db: DB,
+): Promise<{ key: string; value: unknown; updatedAt: Date }[]> {
   return db
-    .select({ key: platformSettings.key, value: platformSettings.value, updatedAt: platformSettings.updatedAt })
+    .select({
+      key: platformSettings.key,
+      value: platformSettings.value,
+      updatedAt: platformSettings.updatedAt,
+    })
     .from(platformSettings);
 }
 
@@ -34,7 +40,10 @@ export async function setPlatformSetting(
   value: unknown,
   updatedBy?: string,
 ): Promise<void> {
-  const [existing] = await db.select({ key: platformSettings.key }).from(platformSettings).where(eq(platformSettings.key, key));
+  const [existing] = await db
+    .select({ key: platformSettings.key })
+    .from(platformSettings)
+    .where(eq(platformSettings.key, key));
   if (existing) {
     await db
       .update(platformSettings)

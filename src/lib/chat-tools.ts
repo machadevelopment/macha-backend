@@ -25,8 +25,17 @@ export const CHAT_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        months: { type: 'integer', minimum: 1, maximum: 24, description: 'Cantidad de meses hacia atrás, incluyendo el actual.' },
-        type: { type: 'string', enum: ROLLUP_TYPES, description: 'Filtra a un solo tipo; omite para los 4.' },
+        months: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 24,
+          description: 'Cantidad de meses hacia atrás, incluyendo el actual.',
+        },
+        type: {
+          type: 'string',
+          enum: ROLLUP_TYPES,
+          description: 'Filtra a un solo tipo; omite para los 4.',
+        },
       },
       required: ['months'],
       additionalProperties: false,
@@ -91,7 +100,13 @@ async function toolMonthlyRollup(
 
 async function toolQueryTransactions(
   ctx: ChatToolContext,
-  input: { type?: RollupType; category?: string; dateFrom?: string; dateTo?: string; limit?: number },
+  input: {
+    type?: RollupType;
+    category?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+  },
 ): Promise<string> {
   const limit = Math.min(input.limit ?? 20, 50);
   const conditions = [eq(transactions.companyId, ctx.companyId)];
@@ -130,7 +145,13 @@ export async function executeChatTool(
     case 'query_transactions':
       return toolQueryTransactions(
         ctx,
-        input as { type?: RollupType; category?: string; dateFrom?: string; dateTo?: string; limit?: number },
+        input as {
+          type?: RollupType;
+          category?: string;
+          dateFrom?: string;
+          dateTo?: string;
+          limit?: number;
+        },
       );
     default:
       return `Unknown tool: ${name}`;

@@ -37,7 +37,13 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
         .returning();
       const [version] = await db
         .insert(industryTemplateVersions)
-        .values({ templateId: template!.id, version: 1, synonyms: body.synonyms, fewShot: body.fewShot, createdBy: staffId })
+        .values({
+          templateId: template!.id,
+          version: 1,
+          synonyms: body.synonyms,
+          fewShot: body.fewShot,
+          createdBy: staffId,
+        })
         .returning();
       await db
         .update(industryTemplates)
@@ -60,7 +66,9 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
         industry: t.String(),
         name: t.String(),
         synonyms: t.Record(t.String(), t.Array(t.String())),
-        fewShot: t.Array(t.Object({ input: t.String(), output: t.Record(t.String(), t.Unknown()) })),
+        fewShot: t.Array(
+          t.Object({ input: t.String(), output: t.Record(t.String(), t.Unknown()) }),
+        ),
       }),
     },
   )
@@ -87,7 +95,10 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
           createdBy: staffId,
         })
         .returning();
-      await db.update(industryTemplates).set({ currentVersionId: version!.id }).where(eq(industryTemplates.id, params.id));
+      await db
+        .update(industryTemplates)
+        .set({ currentVersionId: version!.id })
+        .where(eq(industryTemplates.id, params.id));
 
       await logAdminAction({
         actorStaffId: staffId,
@@ -103,7 +114,9 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
     {
       body: t.Object({
         synonyms: t.Record(t.String(), t.Array(t.String())),
-        fewShot: t.Array(t.Object({ input: t.String(), output: t.Record(t.String(), t.Unknown()) })),
+        fewShot: t.Array(
+          t.Object({ input: t.String(), output: t.Record(t.String(), t.Unknown()) }),
+        ),
       }),
     },
   );

@@ -112,7 +112,10 @@ export const reports_ = new Elysia({ prefix: '/reports' })
         .update(reportVersions)
         .set({ s3RenderKey: renderKey })
         .where(eq(reportVersions.id, newVersion!.id));
-      await db.update(reports).set({ currentVersionId: newVersion!.id }).where(eq(reports.id, report.id));
+      await db
+        .update(reports)
+        .set({ currentVersionId: newVersion!.id })
+        .where(eq(reports.id, report.id));
 
       set.status = 201;
       return { id: report.id, version: newVersion!.version };

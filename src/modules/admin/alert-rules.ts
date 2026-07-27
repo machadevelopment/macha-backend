@@ -20,7 +20,9 @@ export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:companyId
       const [before] = await db
         .select()
         .from(alertRules)
-        .where(and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)));
+        .where(
+          and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)),
+        );
       if (!before) {
         set.status = 404;
         return { error: 'Alert rule not found' };
@@ -32,7 +34,9 @@ export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:companyId
           threshold: body.threshold !== undefined ? String(body.threshold) : before.threshold,
           enabled: body.enabled ?? before.enabled,
         })
-        .where(and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)));
+        .where(
+          and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)),
+        );
 
       await logAdminAction({
         actorStaffId: staffId,

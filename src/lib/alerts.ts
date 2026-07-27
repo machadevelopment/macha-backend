@@ -1,6 +1,14 @@
 import { and, eq, gte, isNull, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { alertRules, alertEvents, invoices, transactions, companies, companyUsers, users } from '@/db/schema';
+import {
+  alertRules,
+  alertEvents,
+  invoices,
+  transactions,
+  companies,
+  companyUsers,
+  users,
+} from '@/db/schema';
 import { getOrComputeMonthlyAmount } from '@/lib/rollups';
 import { getCreditBalance } from '@/lib/credits';
 import { creditsConfig } from '@/config/credits';
@@ -23,7 +31,13 @@ async function evalArOverdue(db: DB, companyId: string, threshold: number): Prom
   const rows = await db
     .select({ dueDate: invoices.dueDate })
     .from(invoices)
-    .where(and(eq(invoices.companyId, companyId), eq(invoices.status, 'open'), isNull(invoices.deletedAt)));
+    .where(
+      and(
+        eq(invoices.companyId, companyId),
+        eq(invoices.status, 'open'),
+        isNull(invoices.deletedAt),
+      ),
+    );
 
   let maxDaysOverdue = 0;
   for (const row of rows) {
@@ -34,14 +48,24 @@ async function evalArOverdue(db: DB, companyId: string, threshold: number): Prom
   return maxDaysOverdue >= threshold ? maxDaysOverdue : null;
 }
 
-async function evalPortfolioConcentration(db: DB, companyId: string, threshold: number): Promise<number | null> {
+async function evalPortfolioConcentration(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<number | null> {
   const rows = await db
     .select({
       counterparty: invoices.counterparty,
       total: rawSql<string>`sum(${invoices.amountBase})`,
     })
     .from(invoices)
-    .where(and(eq(invoices.companyId, companyId), eq(invoices.status, 'open'), isNull(invoices.deletedAt)))
+    .where(
+      and(
+        eq(invoices.companyId, companyId),
+        eq(invoices.status, 'open'),
+        isNull(invoices.deletedAt),
+      ),
+    )
     .groupBy(invoices.counterparty);
 
   const grandTotal = rows.reduce((acc, r) => acc + Number(r.total), 0);
@@ -50,7 +74,11 @@ async function evalPortfolioConcentration(db: DB, companyId: string, threshold: 
   return maxShare >= threshold ? maxShare : null;
 }
 
-async function evalRevenueDrop(db: DB, companyId: string, threshold: number): Promise<number | null> {
+async function evalRevenueDrop(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<number | null> {
   const current = await getOrComputeMonthlyAmount(db, companyId, monthStart(0), 'revenue');
   const priors = await Promise.all(
     [1, 2, 3].map((i) => getOrComputeMonthlyAmount(db, companyId, monthStart(i), 'revenue')),
@@ -61,7 +89,11 @@ async function evalRevenueDrop(db: DB, companyId: string, threshold: number): Pr
   return dropPct >= threshold ? dropPct : null;
 }
 
-async function evalMarginDrop(db: DB, companyId: string, threshold: number): Promise<number | null> {
+async function evalMarginDrop(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<number | null> {
   const period = monthStart(0);
   const revenue = await getOrComputeMonthlyAmount(db, companyId, period, 'revenue');
   const cogs = await getOrComputeMonthlyAmount(db, companyId, period, 'cogs');
@@ -77,7 +109,11 @@ async function evalMarginDrop(db: DB, companyId: string, threshold: number): Pro
  * categoría tenga gasto en los 3 meses previos (si no, se ignora — "requiere >=3
  * meses de historia"); devuelve la MAYOR desviación entre todas las categorías.
  */
-async function evalSpendOutOfRange(db: DB, companyId: string, threshold: number): Promise<number | null> {
+async function evalSpendOutOfRange(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<number | null> {
   const periods = [0, 1, 2, 3].map(monthStart);
   const rows = await db
     .select({
@@ -95,7 +131,11 @@ async function evalSpendOutOfRange(db: DB, companyId: string, threshold: number)
         gte(transactions.date, periods[3]!),
       ),
     )
-    .groupBy(transactions.category, transactions.type, rawSql`date_trunc('month', ${transactions.date})`);
+    .groupBy(
+      transactions.category,
+      transactions.type,
+      rawSql`date_trunc('month', ${transactions.date})`,
+    );
 
   const byCategory = new Map<string, Map<string, number>>();
   for (const row of rows) {
@@ -119,7 +159,11 @@ async function evalSpendOutOfRange(db: DB, companyId: string, threshold: number)
   return maxDeviation;
 }
 
-async function evalLowCreditBalance(db: DB, companyId: string, threshold: number): Promise<number | null> {
+async function evalLowCreditBalance(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<number | null> {
   const balance = await getCreditBalance(db, companyId);
   // CU-868kfvafy criterio 1: configurable desde el panel (platform_settings), nunca
   // en código — creditsConfig.monthlyAllotment queda solo como fallback si el admin
@@ -133,7 +177,10 @@ async function evalLowCreditBalance(db: DB, companyId: string, threshold: number
   return pctRemaining < threshold ? pctRemaining : null;
 }
 
-const EVALUATORS: Record<string, (db: DB, companyId: string, threshold: number) => Promise<number | null>> = {
+const EVALUATORS: Record<
+  string,
+  (db: DB, companyId: string, threshold: number) => Promise<number | null>
+> = {
   ar_overdue: evalArOverdue,
   portfolio_concentration: evalPortfolioConcentration,
   revenue_drop: evalRevenueDrop,
@@ -148,7 +195,11 @@ const EVALUATORS: Record<string, (db: DB, companyId: string, threshold: number) 
  * alert_events (criterio 3) — incluso las que no notifican por el control de
  * repetición de 7 días (alert-catalog.ts), a diferencia de las que sí envían email.
  */
-export async function evaluateAlerts(db: DB, companyId: string, documentId?: string): Promise<void> {
+export async function evaluateAlerts(
+  db: DB,
+  companyId: string,
+  documentId?: string,
+): Promise<void> {
   const rules = await db
     .select()
     .from(alertRules)
@@ -182,7 +233,12 @@ export async function evaluateAlerts(db: DB, companyId: string, documentId?: str
 
     const [event] = await db
       .insert(alertEvents)
-      .values({ companyId, alertRuleId: rule.id, triggeredValue: String(triggeredValue), documentId })
+      .values({
+        companyId,
+        alertRuleId: rule.id,
+        triggeredValue: String(triggeredValue),
+        documentId,
+      })
       .returning();
 
     if (recent || !rule.notifyImmediately) continue; // suppressed by repeat window, or batched into the periodic report instead
