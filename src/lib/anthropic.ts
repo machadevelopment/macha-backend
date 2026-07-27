@@ -17,7 +17,7 @@ export function assertZdrModel(model: string): void {
 }
 
 let client: Anthropic | undefined;
-function getClient(): Anthropic {
+export function getClient(): Anthropic {
   client ??= new Anthropic({ apiKey: env.anthropicApiKey });
   return client;
 }
