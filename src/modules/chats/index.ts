@@ -25,15 +25,26 @@ export const chats_ = new Elysia({ prefix: '/chats' })
     '/',
     async ({ companyId, userId, role, body, set, db }) => {
       assertClientCapability(role, 'chat', set);
+      // CU-868kfvacr criterio 3 (deep-link a chat): reportVersionId opcional origina
+      // el hilo desde un reporte específico (chats.report_version_id, US-14).
       const [chat] = await db
         .insert(chats)
-        .values({ companyId, userId, title: body?.title ?? 'Nuevo chat' })
+        .values({
+          companyId,
+          userId,
+          title: body?.title ?? 'Nuevo chat',
+          reportVersionId: body?.reportVersionId,
+        })
         .returning();
       await getOrCreateActiveSegment(db, companyId, chat!.id);
       set.status = 201;
       return { id: chat!.id, title: chat!.title };
     },
-    { body: t.Optional(t.Object({ title: t.Optional(t.String()) })) },
+    {
+      body: t.Optional(
+        t.Object({ title: t.Optional(t.String()), reportVersionId: t.Optional(t.String()) }),
+      ),
+    },
   )
   .get('/:id/messages', async ({ companyId, userId, role, params, set, db }) => {
     assertClientCapability(role, 'chat', set);
