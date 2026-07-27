@@ -12,8 +12,9 @@ import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropi
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
-import { insightRequests } from '@/db/schema';
+import { insightRequests, companies } from '@/db/schema';
 import { checkTokenBucket } from '@/lib/rate-limit';
+import { eq } from 'drizzle-orm';
 
 function monthStart(monthsAgo: number): string {
   const d = new Date();
@@ -66,7 +67,21 @@ export const insights = new Elysia().use(tenantDerive).post(
       SETTINGS_KEYS.insightPromptTemplate,
       DEFAULT_INSIGHT_PROMPT,
     );
-    const result = await generateInsightNarrative(snapshot, promptTemplate);
+    // CU-868kfvam8 (i18n transversal): la IA debe respetar el idioma de la empresa —
+    // chat (chat-orchestrator) y reportes (reports.ts) ya lo hacían, insight se había
+    // quedado con un prompt fijo en español sin importar companies.locale. El template
+    // guardado en platform_settings es un solo texto (no localizado por diseño, un
+    // admin lo edita una vez) — la instrucción de idioma se agrega aparte, después del
+    // template, para que valga sin importar lo que el admin haya escrito ahí.
+    const [company] = await db
+      .select({ locale: companies.locale })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+    const locale = company?.locale ?? 'es';
+    const localizedPrompt = `${promptTemplate}\n\n${
+      locale === 'en' ? 'Respond in English.' : 'Responde en español.'
+    }`;
+    const result = await generateInsightNarrative(snapshot, localizedPrompt);
 
     const insightRequestId = randomUUID();
     await insertAiUsageEvent(db, {
@@ -94,7 +109,7 @@ export const insights = new Elysia().use(tenantDerive).post(
       // entrada — corregido de una versión anterior que guardaba el snapshot de
       // métricas aquí por error. Ahora que el prompt es editable (platform_settings),
       // esto es lo que de verdad puede cambiar entre requests y necesita congelarse.
-      promptSnapshot: promptTemplate,
+      promptSnapshot: localizedPrompt,
       result: result.narrative,
     });
 
