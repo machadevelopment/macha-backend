@@ -15,5 +15,6 @@ export const env = {
   s3Region: process.env.S3_REGION ?? 'us-east-1',
   s3Bucket: process.env.S3_BUCKET ?? '',
   resendApiKey: process.env.RESEND_API_KEY ?? '',
+  resendFromEmail: process.env.RESEND_FROM_EMAIL ?? 'notificaciones@macha.finance',
   sentryDsn: process.env.SENTRY_DSN ?? '',
 };
