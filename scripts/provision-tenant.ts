@@ -22,9 +22,14 @@ async function provisionTenant(companyId: string): Promise<void> {
 
   for (const table of LEDGER_TABLES) {
     const partitionName = `${table}_${suffix}`;
+    // No bind parameter for the value: CREATE TABLE ... PARTITION OF is DDL, and
+    // Postgres's extended query protocol can't bind parameters into DDL at all (not
+    // a type-inference issue — verified against a real instance: even an explicit
+    // ::uuid cast still errors "could not determine data type of parameter $1",
+    // because DDL isn't preparable in the first place). Safe to inline as a literal
+    // since companyId is already regex-validated above (UUID_RE) before reaching here.
     await sql.unsafe(
-      `CREATE TABLE IF NOT EXISTS "${partitionName}" PARTITION OF ${table} FOR VALUES IN ($1)`,
-      [companyId],
+      `CREATE TABLE IF NOT EXISTS "${partitionName}" PARTITION OF ${table} FOR VALUES IN ('${companyId}')`,
     );
     console.log('provisioned partition:', partitionName);
   }
