@@ -2,6 +2,7 @@ import { Elysia } from 'elysia';
 import { env } from '@/lib/env';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
+import { me } from '@/modules/me';
 import { startQueue } from '@/queue';
 import { startExcelIngestWorker } from '@/queue/workers/excel-ingest';
 
@@ -10,6 +11,7 @@ import { startExcelIngestWorker } from '@/queue/workers/excel-ingest';
 export const app = new Elysia()
   .use(health)
   .use(ingestion)
+  .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
 
