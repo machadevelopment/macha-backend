@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1785171682421,
+      "tag": "0000_peaceful_mandroid",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785180262046,
+      "tag": "0001_amusing_sally_floyd",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785182761600,
+      "tag": "0002_special_crystal",
+      "breakpoints": true
+    }
+  ]
+}

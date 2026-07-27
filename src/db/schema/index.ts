@@ -1,4 +1,4 @@
-// Barrel export — all 27 tables across domains. Import from '@/db/schema'.
+// Barrel export — all 28 tables across domains. Import from '@/db/schema'.
 export * from './companies';
 export * from './identity'; // users, company_users, staff
 export * from './dimensions'; // products, stores, fx_rates
@@ -10,3 +10,5 @@ export * from './ai'; // ai_usage_events, credit_transactions, insight_requests
 export * from './reporting'; // reports, report_versions, alert_rules, alert_events
 export * from './notifications'; // notifications
 export * from './audit'; // admin_audit_log
+export * from './settings'; // platform_settings (CU-868kfvafy)
+export * from './billing'; // subscriptions, payments (CU-868kfvae6/afy M8)

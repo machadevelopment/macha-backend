@@ -17,7 +17,7 @@ export function assertZdrModel(model: string): void {
 }
 
 let client: Anthropic | undefined;
-function getClient(): Anthropic {
+export function getClient(): Anthropic {
   client ??= new Anthropic({ apiKey: env.anthropicApiKey });
   return client;
 }
@@ -153,6 +153,86 @@ export async function classifySheetRows(params: {
 
   return {
     rows: parsed.rows,
+    inputTokens: message.usage.input_tokens,
+    outputTokens: message.usage.output_tokens,
+    model: message.model,
+  };
+}
+
+export type InsightResult = { narrative: string; inputTokens: number; outputTokens: number; model: string };
+
+// CU-868kfvafy: default prompt, used only as a fallback when the admin hasn't set
+// platform_settings['insight_prompt_template'] yet (fresh environment). The real,
+// editable catalog lives in the DB now (lib/settings.ts) — this file never reads
+// the DB itself (anthropic.ts stays a pure Claude client), the caller
+// (modules/insights/index.ts) fetches the setting and passes it in.
+export const DEFAULT_INSIGHT_PROMPT = `Eres el asistente financiero de Macha Finance. Recibes un
+snapshot de métricas (ingresos/costos/margen mensuales y antigüedad de cuentas por
+cobrar/pagar) de una PYME. Da 2-3 insights accionables y concretos para el dueño de la
+empresa, en un tono directo y profesional. No inventes cifras que no estén en el
+snapshot. Responde en texto plano, sin markdown.`;
+
+/** On-demand insight narrative (CU-868kfvabk) — the AI narrates, never calculates (CLAUDE.md/PRD). */
+export async function generateInsightNarrative(
+  metricsSnapshot: unknown,
+  systemPrompt: string = DEFAULT_INSIGHT_PROMPT,
+): Promise<InsightResult> {
+  assertZdrModel(anthropicModel);
+  const anthropic = getClient();
+
+  const stream = anthropic.messages.stream({
+    model: anthropicModel,
+    max_tokens: 1024,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+  });
+  const message = await stream.finalMessage();
+
+  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
+  if (!textBlock) throw new Error('Claude response had no text block');
+
+  return {
+    narrative: textBlock.text,
+    inputTokens: message.usage.input_tokens,
+    outputTokens: message.usage.output_tokens,
+    model: message.model,
+  };
+}
+
+const REPORT_SYSTEM_PROMPT = (locale: 'es' | 'en') =>
+  locale === 'es'
+    ? `Eres el asistente financiero de Macha Finance. Recibes las métricas exactas
+(ya calculadas por SQL) de un reporte ejecutivo periódico de una PYME. Escribe una
+narrativa ejecutiva de 3-4 párrafos: qué pasó, por qué importa, y 1-2 recomendaciones.
+NUNCA inventes ni recalcules cifras — usa solo las del snapshot. Responde en español,
+texto plano sin markdown.`
+    : `You are Macha Finance's financial assistant. You receive the exact metrics
+(already computed via SQL) for a PYME's periodic executive report. Write a 3-4
+paragraph executive narrative: what happened, why it matters, and 1-2 recommendations.
+NEVER invent or recompute figures — use only the snapshot's. Respond in English, plain
+text, no markdown.`;
+
+/** Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as insights. */
+export async function generateReportNarrative(
+  metricsSnapshot: unknown,
+  locale: 'es' | 'en',
+): Promise<InsightResult> {
+  assertZdrModel(anthropicModel);
+  const anthropic = getClient();
+
+  const stream = anthropic.messages.stream({
+    model: anthropicModel,
+    max_tokens: 2048,
+    system: REPORT_SYSTEM_PROMPT(locale),
+    messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+  });
+  const message = await stream.finalMessage();
+
+  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
+  if (!textBlock) throw new Error('Claude response had no text block');
+
+  return {
+    narrative: textBlock.text,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
     model: message.model,

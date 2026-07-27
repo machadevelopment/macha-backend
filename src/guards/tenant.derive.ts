@@ -2,7 +2,7 @@ import { Elysia } from 'elysia';
 import { and, eq } from 'drizzle-orm';
 import { verifyToken } from '@/lib/auth';
 import { db as rootDb } from '@/db/client';
-import { users, companyUsers, companies } from '@/db/schema';
+import { users, companyUsers, companies, subscriptions } from '@/db/schema';
 import { reserveCompanyConnection } from '@/lib/db-scope';
 
 // Reserved connections are kept off the typed context (handlers never see the raw
@@ -73,6 +73,22 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
     if (membership.companyStatus === 'suspended') {
       set.status = 403;
       throw new Error('Company is suspended');
+    }
+
+    // CU-868kfvaem criterio 2: efecto de la suscripción sobre el acceso, aplicado
+    // aquí (no solo en el frontend). Solo 'cancelled' bloquea — 'past_due' se deja
+    // pasar (gracia de cobro, Recurrente ya reintenta el cargo por su cuenta) y
+    // 'pending_checkout'/sin fila de subscription (empresas creadas antes de M8,
+    // o mientras el registro autoservicio todavía no completa el primer checkout)
+    // tampoco bloquean — bloquear ahí rompería el flujo de registro mismo.
+    const [subscription] = await rootDb
+      .select({ status: subscriptions.status })
+      .from(subscriptions)
+      .where(eq(subscriptions.companyId, membership.companyId))
+      .limit(1);
+    if (subscription?.status === 'cancelled') {
+      set.status = 402;
+      throw new Error('Subscription is cancelled');
     }
 
     // Scope this request's queries to the resolved company via SET LOCAL, inside a

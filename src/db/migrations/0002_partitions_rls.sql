@@ -1,11 +1,10 @@
--- Applied AFTER the drizzle-kit generated base tables.
--- drizzle-kit creates transactions/invoices/bills as plain tables; in production the
--- base tables must be declared PARTITION BY LIST (company_id). Because drizzle-kit does
--- not emit that, treat the generated tables as a template and (re)declare partitioning
--- here for a fresh DB. Per-tenant partitions are created at company provisioning, NOT here.
---
--- NOTE: on a brand-new database, prefer creating the three ledger tables directly as
--- partitioned (see scripts/provision_tenant.sql for the per-tenant PARTITION OF).
+-- Applied AFTER 0000_peaceful_mandroid.sql (drizzle-kit generated base tables) and
+-- 0001_partitioned_ledger_tables.sql (hand-written transactions/invoices/bills as
+-- PARTITION BY LIST (company_id) parents — drizzle-kit can't emit that, so those
+-- three are excluded from 0000 and created there instead). RLS below applies to
+-- both: policies on a partitioned parent propagate to every partition, so it works
+-- the same whether a table is plain or partitioned. Per-tenant partitions are
+-- created at company provisioning (scripts/provision_tenant.sql), NOT here.
 
 -- ---- Row-Level Security backstop (scoping is primarily enforced in Elysia guards) ----
 -- Enable RLS and add a company_id policy driven by a per-request GUC (app.company_id).
@@ -19,10 +18,16 @@ BEGIN
     'alert_rules','alert_events','notifications','company_users'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
-    EXECUTE format($f$
-      CREATE POLICY %I_tenant_isolation ON %I
-      USING (company_id = current_setting('app.company_id', true)::uuid);
-    $f$, t, t);
+    -- CREATE POLICY has no IF NOT EXISTS — re-running this file (migrate.ts applies
+    -- every .sql file on every invocation, see its header comment) would otherwise
+    -- fail the second time with "policy already exists".
+    BEGIN
+      EXECUTE format($f$
+        CREATE POLICY %I_tenant_isolation ON %I
+        USING (company_id = current_setting('app.company_id', true)::uuid);
+      $f$, t, t);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
   END LOOP;
 END $$;
 
