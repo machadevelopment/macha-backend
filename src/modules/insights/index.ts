@@ -2,7 +2,12 @@ import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits, debitCredits } from '@/lib/credits';
+import {
+  getActiveCreditRule,
+  getCreditBalance,
+  estimateRequiredCredits,
+  debitCredits,
+} from '@/lib/credits';
 import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';

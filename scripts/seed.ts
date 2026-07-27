@@ -178,12 +178,23 @@ async function main() {
   // que la provisión de empresa siembra. Sin flujo de onboarding real todavía (F7),
   // así que se siembra aquí para la empresa demo.
   await seedDefaultAlertRules(db, demo!.id);
-  console.log('seeded alert rules for demo company:', alertCatalog.map((e) => e.ruleKey).join(', '));
+  console.log(
+    'seeded alert rules for demo company:',
+    alertCatalog.map((e) => e.ruleKey).join(', '),
+  );
 
   // CU-868kfvafy criterio 1: siembra los valores de arranque en platform_settings —
   // desde acá el admin los edita en el panel, el código nunca vuelve a hardcodearlos.
-  await setPlatformSetting(db, SETTINGS_KEYS.creditToTokensRatio, creditsConfig.creditToTokensRatio);
-  await setPlatformSetting(db, SETTINGS_KEYS.creditMonthlyAllotment, creditsConfig.monthlyAllotment);
+  await setPlatformSetting(
+    db,
+    SETTINGS_KEYS.creditToTokensRatio,
+    creditsConfig.creditToTokensRatio,
+  );
+  await setPlatformSetting(
+    db,
+    SETTINGS_KEYS.creditMonthlyAllotment,
+    creditsConfig.monthlyAllotment,
+  );
   await setPlatformSetting(db, SETTINGS_KEYS.insightPromptTemplate, DEFAULT_INSIGHT_PROMPT);
   // CU-868kfvaet: precio provisional por crédito — sin confirmar con Jose/el owner.
   await setPlatformSetting(db, SETTINGS_KEYS.creditPriceUsdCents, 10);

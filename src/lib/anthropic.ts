@@ -159,7 +159,12 @@ export async function classifySheetRows(params: {
   };
 }
 
-export type InsightResult = { narrative: string; inputTokens: number; outputTokens: number; model: string };
+export type InsightResult = {
+  narrative: string;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+};
 
 // CU-868kfvafy: default prompt, used only as a fallback when the admin hasn't set
 // platform_settings['insight_prompt_template'] yet (fresh environment). The real,

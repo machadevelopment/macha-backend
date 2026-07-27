@@ -43,7 +43,11 @@ export async function startTopupCheckout(params: {
     amountUsdCents: params.amountUsdCents,
     successUrl: params.successUrl,
     cancelUrl: params.cancelUrl,
-    metadata: { companyId: params.companyId, kind: 'credit_topup', credits: String(params.credits) },
+    metadata: {
+      companyId: params.companyId,
+      kind: 'credit_topup',
+      credits: String(params.credits),
+    },
   });
   return { checkoutUrl: checkout.checkout_url, providerCheckoutId: checkout.id };
 }
