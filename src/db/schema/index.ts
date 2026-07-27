@@ -11,3 +11,4 @@ export * from './reporting'; // reports, report_versions, alert_rules, alert_eve
 export * from './notifications'; // notifications
 export * from './audit'; // admin_audit_log
 export * from './settings'; // platform_settings (CU-868kfvafy)
+export * from './billing'; // subscriptions, payments (CU-868kfvae6/afy M8)

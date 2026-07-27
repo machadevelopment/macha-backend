@@ -14,6 +14,7 @@ import { generateReportNarrative } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { uploadObject, reportRenderKey } from '@/lib/s3';
 import { sendReportReadyEmail } from '@/lib/email';
+import { env } from '@/lib/env';
 
 /**
  * CU-868kfvacr/868kfvacg: métricas calculadas en SQL directo sobre el ledger para el
@@ -153,7 +154,7 @@ export async function generateReport(
       locale,
       reportVersionId: version!.id,
       recipientEmail: recipient.email,
-      viewUrl: `${process.env.APP_BASE_URL ?? ''}/reports/${version!.id}`,
+      viewUrl: `${env.appBaseUrl}/reports/${version!.id}`,
     });
   }
 

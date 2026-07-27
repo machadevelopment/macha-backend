@@ -7,6 +7,9 @@ import { adminConfig } from '@/modules/admin/config';
 import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
+import { register } from '@/modules/billing/register';
+import { creditsTopup } from '@/modules/billing/credits-topup';
+import { billingWebhooks } from '@/modules/billing/webhooks';
 import { chats_ } from '@/modules/chats';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
@@ -41,6 +44,9 @@ export const app = new Elysia()
   .use(adminCreditRules)
   .use(adminAlertRules)
   .use(adminMonitoring)
+  .use(register)
+  .use(creditsTopup)
+  .use(billingWebhooks)
   .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
