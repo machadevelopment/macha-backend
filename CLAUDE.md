@@ -64,7 +64,7 @@ Conventions & gotchas:
 - **Mono rule**: all numbers, amounts, %, deltas, IDs, timestamps, and uppercase eyebrows/labels use `JetBrains Mono` (`font-mono`, `tabular-nums`); everything else uses `Inter` (`font-ui`).
 - **Color only signals state/financial semantics** (green/red delta, chips, meters), never decoration, and always as text+bg+border together.
 - **Formatting is locale-aware and centralized**: use `formatMoney/formatDate/formatPct` helpers over `Intl.*` (`es-GT`/`en-US`); always show explicit currency code (GTQ/USD). Never format inline.
-- **Component split**: Tremor Raw for charts + KPI/indicator cards; shadcn/ui for everything else. Don't use two libs for the same role.
+- **Component split**: Tremor Raw for charts + KPI/indicator cards; shadcn/ui for everything else. Don't use two libs for the same role. **Known deviation**: F1 actually installed `@tremor/react` (the classic npm package), not real Tremor Raw (copy-paste source) — decided 2026-07-27 to avoid a mid-epic chart-library migration; restyled on our own tokens. Revisit only if `@tremor/react` becomes a real blocker.
 - Auth UI is WorkOS AuthKit (hosted); the app verifies session, it does not implement login/password/email-verification.
 - Do **not** use `localStorage`/`sessionStorage` in artifacts/prototypes; use React state.
 
