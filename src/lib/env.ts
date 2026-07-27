@@ -17,4 +17,12 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY ?? '',
   resendFromEmail: process.env.RESEND_FROM_EMAIL ?? 'notificaciones@macha.finance',
   sentryDsn: process.env.SENTRY_DSN ?? '',
+  // Used to build absolute links in emails (reports/alerts, F6) and Recurrente
+  // checkout success/cancel redirects (M8) — was read as a raw process.env in F6
+  // (alerts.ts/reports.ts), centralized here now that a second consumer needs it.
+  appBaseUrl: process.env.APP_BASE_URL ?? 'http://localhost:3000',
+  // CU-868kfvae6: Recurrente (docs.recurrente.com) — single secret key auth
+  // (X-SECRET-KEY), test/live variants determine sandbox vs real charges.
+  recurrenteSecretKey: process.env.RECURRENTE_SECRET_KEY ?? '',
+  recurrenteWebhookSecret: process.env.RECURRENTE_WEBHOOK_SECRET ?? '',
 };

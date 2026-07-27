@@ -10,6 +10,11 @@ export const SETTINGS_KEYS = {
   creditToTokensRatio: 'credit_to_tokens_ratio',
   creditMonthlyAllotment: 'credit_monthly_allotment',
   insightPromptTemplate: 'insight_prompt_template',
+  // CU-868kfvaet: precio de venta por crédito (USD, en centavos) — no existe en
+  // ningún lado del data model/PRD/tickets; es una decisión de negocio real que
+  // falta confirmar con Jose/el owner. Provisional a propósito (10 centavos =
+  // $0.10/crédito), holgado como el resto de placeholders de F0.
+  creditPriceUsdCents: 'credit_price_usd_cents',
 } as const;
 
 export async function getPlatformSetting<T>(db: DB, key: string, fallback: T): Promise<T> {

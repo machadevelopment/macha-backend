@@ -6,8 +6,9 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { companies, creditRules, industryTemplates, industryTemplateVersions, alertRules } from '@/db/schema';
+import { companies, creditRules, industryTemplates, industryTemplateVersions } from '@/db/schema';
 import { alertCatalog } from '@/config/alert-catalog';
+import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { creditsConfig } from '@/config/credits';
 import { setPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
@@ -176,14 +177,7 @@ async function main() {
   // (config/alert-catalog.ts, umbrales reales aprobados por Jose) es solo el default
   // que la provisión de empresa siembra. Sin flujo de onboarding real todavía (F7),
   // así que se siembra aquí para la empresa demo.
-  await db.insert(alertRules).values(
-    alertCatalog.map((entry) => ({
-      companyId: demo!.id,
-      ruleKey: entry.ruleKey,
-      threshold: String(entry.defaultThreshold),
-      notifyImmediately: entry.notifyImmediately,
-    })),
-  );
+  await seedDefaultAlertRules(db, demo!.id);
   console.log('seeded alert rules for demo company:', alertCatalog.map((e) => e.ruleKey).join(', '));
 
   // CU-868kfvafy criterio 1: siembra los valores de arranque en platform_settings —
@@ -191,6 +185,8 @@ async function main() {
   await setPlatformSetting(db, SETTINGS_KEYS.creditToTokensRatio, creditsConfig.creditToTokensRatio);
   await setPlatformSetting(db, SETTINGS_KEYS.creditMonthlyAllotment, creditsConfig.monthlyAllotment);
   await setPlatformSetting(db, SETTINGS_KEYS.insightPromptTemplate, DEFAULT_INSIGHT_PROMPT);
+  // CU-868kfvaet: precio provisional por crédito — sin confirmar con Jose/el owner.
+  await setPlatformSetting(db, SETTINGS_KEYS.creditPriceUsdCents, 10);
   console.log('seeded platform_settings defaults');
 }
 

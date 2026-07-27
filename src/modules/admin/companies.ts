@@ -6,6 +6,7 @@ import { db } from '@/db/client';
 import { companies, companyUsers, users } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
+import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -44,6 +45,9 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         .returning();
 
       const partitions = await provisionTenantPartitions(company!.id);
+      // CU-868kfvad3 catalog — fixed while building M8 self-serve registration: this
+      // manual admin path never seeded it either, only scripts/seed.ts's demo company did.
+      await seedDefaultAlertRules(db, company!.id);
 
       await logAdminAction({
         actorStaffId: staffId,
