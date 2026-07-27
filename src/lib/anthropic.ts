@@ -158,3 +158,39 @@ export async function classifySheetRows(params: {
     model: message.model,
   };
 }
+
+export type InsightResult = { narrative: string; inputTokens: number; outputTokens: number; model: string };
+
+// CU-868kfvabk: single hardcoded prompt — the real curated catalog (super_admin,
+// data model.md §4.21 "catálogo de prompts lo cura super_admin") is F7 admin panel
+// scope, not built yet. Provisional, same "mechanism now, values later" pattern as
+// the rest of this session's placeholders.
+const INSIGHT_SYSTEM_PROMPT = `Eres el asistente financiero de Macha Finance. Recibes un
+snapshot de métricas (ingresos/costos/margen mensuales y antigüedad de cuentas por
+cobrar/pagar) de una PYME. Da 2-3 insights accionables y concretos para el dueño de la
+empresa, en un tono directo y profesional. No inventes cifras que no estén en el
+snapshot. Responde en texto plano, sin markdown.`;
+
+/** On-demand insight narrative (CU-868kfvabk) — the AI narrates, never calculates (CLAUDE.md/PRD). */
+export async function generateInsightNarrative(metricsSnapshot: unknown): Promise<InsightResult> {
+  assertZdrModel(anthropicModel);
+  const anthropic = getClient();
+
+  const stream = anthropic.messages.stream({
+    model: anthropicModel,
+    max_tokens: 1024,
+    system: INSIGHT_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+  });
+  const message = await stream.finalMessage();
+
+  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
+  if (!textBlock) throw new Error('Claude response had no text block');
+
+  return {
+    narrative: textBlock.text,
+    inputTokens: message.usage.input_tokens,
+    outputTokens: message.usage.output_tokens,
+    model: message.model,
+  };
+}
