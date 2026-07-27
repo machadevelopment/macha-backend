@@ -9,6 +9,7 @@ import { classifySheetRows } from '@/lib/anthropic';
 import { insertStagingRows } from '@/lib/staging';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { promoteDocument } from '@/lib/promotion';
+import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, estimateRequiredCredits, debitCredits } from '@/lib/credits';
 
 type ExcelIngestPayload = { documentId: string; companyId: string };
@@ -139,6 +140,10 @@ export function startExcelIngestWorker(): Promise<string> {
               .update(documents)
               .set({ status: 'review', rowCount: totalRowsProcessed })
               .where(eq(documents.id, documentId));
+          } else {
+            // CU-868kfvab1: cache-aside — recomputa solo los rollups que la empresa ya
+            // había visto antes; los nunca vistos se llenan perezosamente en /metrics.
+            await refreshExistingRollups(db, companyId);
           }
         });
       } catch (err) {
