@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
@@ -50,114 +50,157 @@ const MESSAGES = {
   },
 } as const;
 
-export const ingestion = new Elysia({ prefix: '/documents' }).use(tenantDerive).post(
-  '/',
-  async ({ body, companyId, userId, role, set, db }) => {
-    assertClientCapability(role, 'upload_excel', set);
+export const ingestion = new Elysia({ prefix: '/documents' })
+  .use(tenantDerive)
+  .post(
+    '/',
+    async ({ body, companyId, userId, role, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
 
-    const [company] = await db
-      .select({ locale: companies.locale })
-      .from(companies)
-      .where(eq(companies.id, companyId));
-    const msg = MESSAGES[company?.locale ?? 'es'];
+      const [company] = await db
+        .select({ locale: companies.locale })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+      const msg = MESSAGES[company?.locale ?? 'es'];
 
-    const file = body.file;
-    const mime = file.type;
-    const ext = ALLOWED_MIME_EXT[mime];
+      const file = body.file;
+      const mime = file.type;
+      const ext = ALLOWED_MIME_EXT[mime];
 
-    // Hard rejection at receipt, BEFORE queueing a job or persisting to S3 — none of
-    // the checks below touch S3/documents until every cap passes.
-    if (!ext) {
-      set.status = 415;
-      return { error: msg.unsupportedType(mime) };
-    }
+      // Hard rejection at receipt, BEFORE queueing a job or persisting to S3 — none of
+      // the checks below touch S3/documents until every cap passes.
+      if (!ext) {
+        set.status = 415;
+        return { error: msg.unsupportedType(mime) };
+      }
 
-    const sizeMb = file.size / (1024 * 1024);
-    if (sizeMb > intakeConfig.maxFileSizeMb) {
-      set.status = 413;
-      return { error: msg.fileTooLarge(intakeConfig.maxFileSizeMb, sizeMb) };
-    }
-
-    const buffer = new Uint8Array(await file.arrayBuffer());
-
-    // Cheap pre-check (no full parse) — only meaningful for .xlsx (OOXML zip); .xls
-    // (legacy binary) and .csv fall back to the size cap above only, see xlsx-inspect.ts.
-    // Also used below to estimate the credit hard-block (CU-868kfvaa6) — the `excel`
-    // rule is billed per batch, so we need an upfront batch-count guess.
-    let estimatedBatches = 1;
-    if (ext === 'xlsx') {
-      const { sheetRowCounts } = inspectXlsxWorkbook(buffer);
-
-      if (sheetRowCounts.length > intakeConfig.maxSheetsPerWorkbook) {
+      const sizeMb = file.size / (1024 * 1024);
+      if (sizeMb > intakeConfig.maxFileSizeMb) {
         set.status = 413;
-        return {
-          error: msg.tooManySheets(intakeConfig.maxSheetsPerWorkbook, sheetRowCounts.length),
-        };
+        return { error: msg.fileTooLarge(intakeConfig.maxFileSizeMb, sizeMb) };
       }
 
-      const totalRows = sheetRowCounts.reduce((a, b) => a + b, 0);
-      if (totalRows > intakeConfig.maxRowsPerFile) {
-        set.status = 413;
-        return { error: msg.tooManyRows(intakeConfig.maxRowsPerFile, totalRows) };
+      const buffer = new Uint8Array(await file.arrayBuffer());
+
+      // Cheap pre-check (no full parse) — only meaningful for .xlsx (OOXML zip); .xls
+      // (legacy binary) and .csv fall back to the size cap above only, see xlsx-inspect.ts.
+      // Also used below to estimate the credit hard-block (CU-868kfvaa6) — the `excel`
+      // rule is billed per batch, so we need an upfront batch-count guess.
+      let estimatedBatches = 1;
+      if (ext === 'xlsx') {
+        const { sheetRowCounts } = inspectXlsxWorkbook(buffer);
+
+        if (sheetRowCounts.length > intakeConfig.maxSheetsPerWorkbook) {
+          set.status = 413;
+          return {
+            error: msg.tooManySheets(intakeConfig.maxSheetsPerWorkbook, sheetRowCounts.length),
+          };
+        }
+
+        const totalRows = sheetRowCounts.reduce((a, b) => a + b, 0);
+        if (totalRows > intakeConfig.maxRowsPerFile) {
+          set.status = 413;
+          return { error: msg.tooManyRows(intakeConfig.maxRowsPerFile, totalRows) };
+        }
+
+        estimatedBatches = estimateBatchCount(
+          sheetRowCounts,
+          intakeConfig.largeSheetRowThreshold,
+          intakeConfig.batchSize,
+        );
       }
 
-      estimatedBatches = estimateBatchCount(
-        sheetRowCounts,
-        intakeConfig.largeSheetRowThreshold,
-        intakeConfig.batchSize,
-      );
-    }
-
-    // Hard block on insufficient credits (CU-868kfvaa6, CU-868kfv97x): verify BEFORE
-    // enqueueing the AI job — no call, no consumption row, if the balance is short.
-    // No active rule for `excel` (v1 default, see scripts/seed.ts) means no cap.
-    const creditRule = await getActiveCreditRule(db, 'excel');
-    if (creditRule) {
-      const requiredCredits = estimateRequiredCredits(creditRule, estimatedBatches);
-      const balance = await getCreditBalance(db, companyId);
-      if (balance < requiredCredits) {
-        set.status = 402;
-        return { error: msg.insufficientCredits(requiredCredits, balance) };
+      // Hard block on insufficient credits (CU-868kfvaa6, CU-868kfv97x): verify BEFORE
+      // enqueueing the AI job — no call, no consumption row, if the balance is short.
+      // No active rule for `excel` (v1 default, see scripts/seed.ts) means no cap.
+      const creditRule = await getActiveCreditRule(db, 'excel');
+      if (creditRule) {
+        const requiredCredits = estimateRequiredCredits(creditRule, estimatedBatches);
+        const balance = await getCreditBalance(db, companyId);
+        if (balance < requiredCredits) {
+          set.status = 402;
+          return { error: msg.insufficientCredits(requiredCredits, balance) };
+        }
       }
-    }
 
-    // Gate de profundidad de cola (CU-868kfvaah, valores de CU-868kfv97f): rechazo
-    // sin subir a S3 ni encolar si ya hay demasiados jobs pesados activos/encolados.
-    const gate = await checkQueueGate(companyId, 'excel');
-    if (!gate.allowed) {
-      set.status = 429;
-      return { error: msg.queueFull(rateLimitConfig.queueGate.maxJobs), reason: 'queue_full' };
-    }
+      // Gate de profundidad de cola (CU-868kfvaah, valores de CU-868kfv97f): rechazo
+      // sin subir a S3 ni encolar si ya hay demasiados jobs pesados activos/encolados.
+      const gate = await checkQueueGate(companyId, 'excel');
+      if (!gate.allowed) {
+        set.status = 429;
+        return { error: msg.queueFull(rateLimitConfig.queueGate.maxJobs), reason: 'queue_full' };
+      }
 
-    // All caps passed — now (and only now) persist original + create documents row.
-    const documentId = randomUUID();
-    const s3Key = uploadKey(companyId, documentId, ext);
-    await uploadObject(s3Key, buffer, mime);
+      // All caps passed — now (and only now) persist original + create documents row.
+      const documentId = randomUUID();
+      const s3Key = uploadKey(companyId, documentId, ext);
+      await uploadObject(s3Key, buffer, mime);
 
-    const [doc] = await db
-      .insert(documents)
-      .values({
-        id: documentId,
-        companyId,
-        uploadedBy: userId,
-        s3Key,
-        originalFilename: file.name,
-        fileSizeBytes: file.size,
-        mimeType: mime,
-        status: 'queued',
+      const [doc] = await db
+        .insert(documents)
+        .values({
+          id: documentId,
+          companyId,
+          uploadedBy: userId,
+          s3Key,
+          originalFilename: file.name,
+          fileSizeBytes: file.size,
+          mimeType: mime,
+          status: 'queued',
+        })
+        .returning();
+
+      await enqueue(QUEUES.excelIngest, { documentId, companyId });
+
+      set.status = 202;
+      return { documentId: doc!.id, status: doc!.status };
+    },
+    {
+      body: t.Object({
+        // Outer bound only (well above the real cap) so obviously-abusive uploads never
+        // reach the handler; the precise, locale-aware rejection happens inside it.
+        file: t.File({ maxSize: '50m' }),
+      }),
+    },
+  )
+  // CU-868kfva7z: list + single-document status polling for the upload UI's
+  // pipeline (queued/processing/review/promoted/failed). No separate capability
+  // gate — view_dashboard_reports covers all client roles same as upload_excel.
+  .get('/', async ({ companyId, role, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+    const rows = await db
+      .select({
+        id: documents.id,
+        originalFilename: documents.originalFilename,
+        status: documents.status,
+        rowCount: documents.rowCount,
+        flaggedCount: documents.flaggedCount,
+        errorReason: documents.errorReason,
+        createdAt: documents.createdAt,
       })
-      .returning();
-
-    await enqueue(QUEUES.excelIngest, { documentId, companyId });
-
-    set.status = 202;
-    return { documentId: doc!.id, status: doc!.status };
-  },
-  {
-    body: t.Object({
-      // Outer bound only (well above the real cap) so obviously-abusive uploads never
-      // reach the handler; the precise, locale-aware rejection happens inside it.
-      file: t.File({ maxSize: '50m' }),
-    }),
-  },
-);
+      .from(documents)
+      .where(eq(documents.companyId, companyId))
+      .orderBy(desc(documents.createdAt))
+      .limit(50);
+    return { documents: rows };
+  })
+  .get('/:id', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+    const [doc] = await db
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+    return {
+      id: doc.id,
+      originalFilename: doc.originalFilename,
+      status: doc.status,
+      rowCount: doc.rowCount,
+      flaggedCount: doc.flaggedCount,
+      errorReason: doc.errorReason,
+      createdAt: doc.createdAt,
+    };
+  });
