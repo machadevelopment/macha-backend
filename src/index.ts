@@ -3,6 +3,7 @@ import { env } from '@/lib/env';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
 import { industryTemplateDownload } from '@/modules/industry-templates';
+import { insights, creditsBalance } from '@/modules/insights';
 import { metrics, arAp } from '@/modules/metrics';
 import { me } from '@/modules/me';
 import { startQueue } from '@/queue';
@@ -16,6 +17,8 @@ export const app = new Elysia()
   .use(industryTemplateDownload)
   .use(metrics)
   .use(arAp)
+  .use(insights)
+  .use(creditsBalance)
   .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
   .listen(env.port);
