@@ -161,25 +161,29 @@ export async function classifySheetRows(params: {
 
 export type InsightResult = { narrative: string; inputTokens: number; outputTokens: number; model: string };
 
-// CU-868kfvabk: single hardcoded prompt — the real curated catalog (super_admin,
-// data model.md §4.21 "catálogo de prompts lo cura super_admin") is F7 admin panel
-// scope, not built yet. Provisional, same "mechanism now, values later" pattern as
-// the rest of this session's placeholders.
-const INSIGHT_SYSTEM_PROMPT = `Eres el asistente financiero de Macha Finance. Recibes un
+// CU-868kfvafy: default prompt, used only as a fallback when the admin hasn't set
+// platform_settings['insight_prompt_template'] yet (fresh environment). The real,
+// editable catalog lives in the DB now (lib/settings.ts) — this file never reads
+// the DB itself (anthropic.ts stays a pure Claude client), the caller
+// (modules/insights/index.ts) fetches the setting and passes it in.
+export const DEFAULT_INSIGHT_PROMPT = `Eres el asistente financiero de Macha Finance. Recibes un
 snapshot de métricas (ingresos/costos/margen mensuales y antigüedad de cuentas por
 cobrar/pagar) de una PYME. Da 2-3 insights accionables y concretos para el dueño de la
 empresa, en un tono directo y profesional. No inventes cifras que no estén en el
 snapshot. Responde en texto plano, sin markdown.`;
 
 /** On-demand insight narrative (CU-868kfvabk) — the AI narrates, never calculates (CLAUDE.md/PRD). */
-export async function generateInsightNarrative(metricsSnapshot: unknown): Promise<InsightResult> {
+export async function generateInsightNarrative(
+  metricsSnapshot: unknown,
+  systemPrompt: string = DEFAULT_INSIGHT_PROMPT,
+): Promise<InsightResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
 
   const stream = anthropic.messages.stream({
     model: anthropicModel,
     max_tokens: 1024,
-    system: INSIGHT_SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
   const message = await stream.finalMessage();

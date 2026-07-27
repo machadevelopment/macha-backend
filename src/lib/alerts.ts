@@ -4,6 +4,7 @@ import { alertRules, alertEvents, invoices, transactions, companies, companyUser
 import { getOrComputeMonthlyAmount } from '@/lib/rollups';
 import { getCreditBalance } from '@/lib/credits';
 import { creditsConfig } from '@/config/credits';
+import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { sendAlertTriggeredEmail } from '@/lib/email';
 import { alertCatalog } from '@/config/alert-catalog';
 
@@ -119,7 +120,15 @@ async function evalSpendOutOfRange(db: DB, companyId: string, threshold: number)
 
 async function evalLowCreditBalance(db: DB, companyId: string, threshold: number): Promise<number | null> {
   const balance = await getCreditBalance(db, companyId);
-  const pctRemaining = (balance / creditsConfig.monthlyAllotment) * 100;
+  // CU-868kfvafy criterio 1: configurable desde el panel (platform_settings), nunca
+  // en código — creditsConfig.monthlyAllotment queda solo como fallback si el admin
+  // nunca lo tocó (entorno recién migrado, sin seed).
+  const monthlyAllotment = await getPlatformSetting(
+    db,
+    SETTINGS_KEYS.creditMonthlyAllotment,
+    creditsConfig.monthlyAllotment,
+  );
+  const pctRemaining = (balance / monthlyAllotment) * 100;
   return pctRemaining < threshold ? pctRemaining : null;
 }
 

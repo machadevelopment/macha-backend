@@ -8,6 +8,9 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { companies, creditRules, industryTemplates, industryTemplateVersions, alertRules } from '@/db/schema';
 import { alertCatalog } from '@/config/alert-catalog';
+import { creditsConfig } from '@/config/credits';
+import { setPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
+import { DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
 
 async function main() {
   const [demo] = await db
@@ -182,6 +185,13 @@ async function main() {
     })),
   );
   console.log('seeded alert rules for demo company:', alertCatalog.map((e) => e.ruleKey).join(', '));
+
+  // CU-868kfvafy criterio 1: siembra los valores de arranque en platform_settings —
+  // desde acá el admin los edita en el panel, el código nunca vuelve a hardcodearlos.
+  await setPlatformSetting(db, SETTINGS_KEYS.creditToTokensRatio, creditsConfig.creditToTokensRatio);
+  await setPlatformSetting(db, SETTINGS_KEYS.creditMonthlyAllotment, creditsConfig.monthlyAllotment);
+  await setPlatformSetting(db, SETTINGS_KEYS.insightPromptTemplate, DEFAULT_INSIGHT_PROMPT);
+  console.log('seeded platform_settings defaults');
 }
 
 main()

@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits, debitCredits } from '@/lib/credits';
-import { generateInsightNarrative } from '@/lib/anthropic';
+import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
+import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { insightRequests } from '@/db/schema';
 
 function monthStart(monthsAgo: number): string {
@@ -44,7 +45,14 @@ export const insights = new Elysia().use(tenantDerive).post(
       }
     }
 
-    const result = await generateInsightNarrative(snapshot);
+    // CU-868kfvafy: prompt editable por super_admin (platform_settings), no
+    // hardcodeado — insight_requests.prompt_snapshot congela el que se usó.
+    const promptTemplate = await getPlatformSetting(
+      db,
+      SETTINGS_KEYS.insightPromptTemplate,
+      DEFAULT_INSIGHT_PROMPT,
+    );
+    const result = await generateInsightNarrative(snapshot, promptTemplate);
 
     const insightRequestId = randomUUID();
     await insertAiUsageEvent(db, {
@@ -68,7 +76,11 @@ export const insights = new Elysia().use(tenantDerive).post(
       id: insightRequestId,
       companyId,
       requestedBy: userId,
-      promptSnapshot: JSON.stringify(snapshot),
+      // data model.md §4.21: el texto del PROMPT (congelado), no los datos de
+      // entrada — corregido de una versión anterior que guardaba el snapshot de
+      // métricas aquí por error. Ahora que el prompt es editable (platform_settings),
+      // esto es lo que de verdad puede cambiar entre requests y necesita congelarse.
+      promptSnapshot: promptTemplate,
       result: result.narrative,
     });
 
