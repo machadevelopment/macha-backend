@@ -31,6 +31,13 @@ type InvoiceLikePayload = {
   originalCurrency: 'GTQ' | 'USD';
 };
 
+/** originalAmount * fxRate -> amountBase, como string (columna numeric — nunca
+ * float, data model §3/CLAUDE.md). Extraída como función pura para poder probar la
+ * conversión de moneda sin una fila real de staging_rows/fx_rates. */
+export function computeAmountBase(originalAmount: number, fxRate: number): string {
+  return String(originalAmount * fxRate);
+}
+
 /** Fecha vigente ≤ la fecha dada (data model §4.10): la tasa más reciente que no sea
  * posterior. Moneda == moneda base de la empresa siempre resuelve a 1 (sin fila en
  * fx_rates necesaria). */
@@ -114,7 +121,7 @@ export async function promoteDocument(
         description: p.description ?? null,
         originalAmount: String(p.originalAmount),
         originalCurrency: p.originalCurrency,
-        amountBase: String(p.originalAmount * fx.rate),
+        amountBase: computeAmountBase(p.originalAmount, fx.rate),
         fxRate: String(fx.rate),
         fxRateDate: fx.effectiveDate,
       });
@@ -130,7 +137,7 @@ export async function promoteDocument(
         dueDate: p.dueDate ?? null,
         originalAmount: String(p.originalAmount),
         originalCurrency: p.originalCurrency,
-        amountBase: String(p.originalAmount * fx.rate),
+        amountBase: computeAmountBase(p.originalAmount, fx.rate),
         fxRate: String(fx.rate),
         fxRateDate: fx.effectiveDate,
         status: 'open' as const,
