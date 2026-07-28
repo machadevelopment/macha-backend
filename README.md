@@ -43,6 +43,24 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
 
+## Modelo de IA (ZDR)
+
+El modelo de Claude usado en toda llamada a la API (`src/lib/anthropic.ts`) se lee de
+`ANTHROPIC_MODEL` (env), nunca está hardcodeado en un call site — cambiar de modelo es
+setear la variable y redesplegar, sin tocar código. `assertZdrModel()` es el gate: solo
+dispara la llamada si el modelo está en la allowlist de modelos verificados bajo el
+contrato ZDR (`claude-sonnet-5` hoy); cualquier otro valor de `ANTHROPIC_MODEL` lanza
+antes de llamar a la API, incluso si viene de config. Para habilitar un modelo nuevo hay
+que: (1) reverificar elegibilidad ZDR con Anthropic, (2) agregarlo al `Set` de
+`assertZdrModel`, (3) recién entonces apuntar `ANTHROPIC_MODEL` a él. Prueba de que el
+swap es puramente de configuración: `src/lib/anthropic.test.ts` (`anthropicModel resuelve
+desde configuración...`).
+
+**Contrato ZDR:** el trámite lo completa Anthropic directamente sobre la cuenta ya
+entregada al equipo (confirmado por Jose Bustamante, 2026-07-28) — sin acción pendiente
+de nuestro lado hoy; solo falta la confirmación formal antes de llevar Módulos 2 y 4
+(ingesta Excel, reportes) a producción real (ver CU-868kfv9at).
+
 ## Layout
 ```
 src/
