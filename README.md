@@ -44,6 +44,39 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
 
+## Verificación de aislamiento prod/no-prod (CU-868kfvaz6)
+
+- **Credenciales separadas por entorno** (criterio 1): verificado por código — cada
+  servicio externo (WorkOS, Anthropic, S3, Redis, Recurrente, Sentry) lee su valor de
+  una env var nativa de la plataforma (ver tabla arriba), sin ningún valor
+  hardcodeado ni compartido entre ambientes en el repo.
+- **Ningún secreto versionado** (criterio 3): verificado — `.gitignore` bloquea
+  `.env`/`.env.*` salvo `.env.example` (sin valores reales).
+- **Staging solo con datos sintéticos** (criterio 2): **no verificable desde este
+  entorno** — requiere inspeccionar el contenido real de la base de staging.
+  `AUDIT_TARGET_DATABASE_URL=postgres://... bun run audit:staging-data` lista
+  empresas, dominios de email y conteos de filas para revisión manual; el juicio de
+  "esto es sintético" lo da una persona, no el script. Registra el resultado en el
+  ticket de ClickUp.
+
+## Simulacro de restauración (CU-868kfvata)
+
+Verificación mensual de que los backups (`pg_dump` nocturno → S3, `CU-868kfvar3`)
+sirven de verdad, no solo que se generan:
+
+1. Provisiona un Postgres **desechable** de verificación (contenedor local o instancia
+   Railway de un solo uso) — nunca un ambiente real.
+2. `RESTORE_TARGET_DATABASE_URL=postgres://... bun run restore:drill` — descarga el
+   dump más reciente de `backups/postgres/` en S3, corre `pg_restore`, y un sanity
+   check (conteo de filas en `companies`/`transactions`/`ai_usage_events`).
+3. Registra el resultado (fecha, backup restaurado, sanity check) como comentario en
+   el ticket de ClickUp del simulacro de ese mes.
+4. Cadencia: el primero antes de la entrega (criterio de aceptación del proyecto),
+   luego mensual — agenda un recordatorio o cron externo; este repo no dispara el
+   simulacro automáticamente (a diferencia del backup, que sí es un job programado)
+   porque restaurar es intrínsecamente manual/verificado por una persona, no algo
+   para automatizar sin supervisión.
+
 ## Modelo de IA (ZDR)
 
 El modelo de Claude usado en toda llamada a la API (`src/lib/anthropic.ts`) se lee de
