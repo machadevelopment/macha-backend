@@ -4,11 +4,17 @@ import { rateLimitConfig } from '@/config/rate-limit';
 import { QUEUES } from '@/queue';
 
 // CU-868kfvaah: implementa los dos mecanismos confirmados en CU-868kfv97f (valores
-// reales, ver src/config/rate-limit.ts). Ninguna ruta consume `checkTokenBucket`
-// todavía — chat/insight (los únicos kinds del bucket "ai") y las lecturas generales
-// del bucket "read" no tienen endpoint en este repo aún (F4/F5, no arrancados).
-// `checkQueueGate` sí está en uso: el intake de Excel (CU-868kfva89) es "excel", uno
-// de los dos kinds pesados que pasan por el gate.
+// reales, ver src/config/rate-limit.ts).
+//
+// Estado real de consumo (verificado en la auditoría del 2026-07-28 — el comentario
+// anterior decía que ninguna ruta consumía el token-bucket, lo cual quedó obsoleto
+// cuando F4/F5 se implementaron):
+// - `checkQueueGate`: EN USO por el intake de Excel (CU-868kfva89).
+// - `checkTokenBucket('ai')`: EN USO por chat (modules/chats) e insight
+//   (modules/insights).
+// - `checkTokenBucket('read')`: CONFIGURADO PERO SIN CONSUMIDORES. Ninguna ruta de
+//   lectura (dashboard, /metrics, /ar-ap, polling de estado) lo aplica todavía, así
+//   que la API de lectura general no tiene rate limiting real. Tiene ticket propio.
 
 // Token-bucket atómico (Lua): evita condiciones de carrera en refill/consumo bajo
 // concurrencia — leer+escribir en dos pasos desde el cliente no sería atómico.

@@ -63,11 +63,16 @@ BEGIN
   EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO macha_app';
   EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO macha_app';
 
-  -- Covers tables added by future migrations (run by the owner role) automatically —
-  -- does NOT cover partitions macha_app creates itself at runtime (it owns those
-  -- directly, no grant needed) — those get FORCE ROW LEVEL SECURITY applied
-  -- explicitly by provisionTenantPartitions() right after creation instead
-  -- (lib/tenant-provisioning.ts).
+  -- Covers tables added by future migrations (run by the owner role) automatically.
+  -- Corrección (auditoría 2026-07-28): este comentario decía que macha_app crea las
+  -- particiones por empresa y por tanto las posee. Ya no es así —
+  -- lib/tenant-provisioning.ts abre su PROPIA conexión con el rol OWNER
+  -- (env.databaseUrl), porque ATTACH/CREATE ... PARTITION OF exige ser dueño de la
+  -- tabla padre y ningún GRANT sustituye a la propiedad. Consecuencia práctica: las
+  -- particiones las crea el mismo rol que corre esta migración, así que SÍ quedan
+  -- cubiertas por el ALTER DEFAULT PRIVILEGES de abajo. (Para las queries normales da
+  -- igual: Postgres verifica privilegios sobre la tabla padre, no sobre la partición.)
+  -- El RLS de cada partición sí se aplica explícitamente en provisionTenantPartitions().
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO macha_app;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO macha_app;
 

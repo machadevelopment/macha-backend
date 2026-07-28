@@ -295,8 +295,8 @@ Si hay que crear una tarea nueva:
 | `PRD.md` (Brief Técnico) | Especificación por módulo, reglas no negociables, plan de trabajo, criterios de aceptación. |
 | `data model.md` | Entidades, taxonomía, particionado, índices, reglas del modelo. |
 | `design guide.md` | Tokens, densidades, regla mono, formatters, color como señal. |
-| `docs/map.md` | Mapa de decisiones de arquitectura y su justificación. |
-| `docs/architecture-report.md` | Detalle consolidado de arquitectura por módulo. |
+
+> **Corrección (auditoría 2026-07-28):** esta tabla listaba `docs/map.md` y `docs/architecture-report.md`. **Ese directorio nunca existió** — nadie podía leerlos. El "por qué" de las decisiones de arquitectura vive en `PRD.md` §5 y en los comentarios de cabecera del código (verificados contra instancias reales, p. ej. `0010_force_rls_and_app_role.sql` para el bypass de RLS por ownership). Entradas eliminadas.
 
 ### TRAMPAS CONOCIDAS (imperativo — no las redescubras)
 
