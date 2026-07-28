@@ -32,4 +32,7 @@ export const env = {
   // (X-SECRET-KEY), test/live variants determine sandbox vs real charges.
   recurrenteSecretKey: process.env.RECURRENTE_SECRET_KEY ?? '',
   recurrenteWebhookSecret: process.env.RECURRENTE_WEBHOOK_SECRET ?? '',
+  // CU-868kfvar3: retención del pg_dump nocturno en S3 (segunda capa de respaldo,
+  // aparte del backup nativo de Railway — configuración de consola, no vive aquí).
+  backupRetentionDays: Number(process.env.BACKUP_RETENTION_DAYS ?? 30),
 };
