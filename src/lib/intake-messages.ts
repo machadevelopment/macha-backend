@@ -1,0 +1,40 @@
+/**
+ * CU-868kfv972: el mensaje de rechazo debe mostrar el límite y el valor recibido, en
+ * el idioma de la empresa (`companies.locale`). El backend no tiene librería de i18n
+ * (eso es del frontend, ver CLAUDE.md) — este es un diccionario mínimo, acotado a los
+ * errores de intake.
+ *
+ * Extraído de `modules/ingestion/index.ts` en CU-868kh8man: ahora también lo necesita
+ * el worker de ingesta, que es donde se validan los caps de los formatos que no se
+ * pueden inspeccionar barato en la recepción (`.xls`).
+ */
+export const INTAKE_MESSAGES = {
+  es: {
+    unsupportedType: (mime: string) =>
+      `Tipo de archivo no soportado: ${mime}. Usa .xlsx, .xls o .csv.`,
+    fileTooLarge: (limitMb: number, receivedMb: number) =>
+      `El archivo supera el tamaño máximo permitido (${limitMb} MB). Recibido: ${receivedMb.toFixed(2)} MB.`,
+    tooManySheets: (limit: number, received: number) =>
+      `El libro supera el máximo de hojas permitidas (${limit}). Recibido: ${received}.`,
+    tooManyRows: (limit: number, received: number) =>
+      `El archivo supera el máximo de filas permitidas (${limit}). Recibido: ${received}.`,
+    insufficientCredits: (required: number, balance: number) =>
+      `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
+    queueFull: (max: number) => `Ya tienes ${max} archivos procesándose. Espera a que terminen.`,
+  },
+  en: {
+    unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
+    fileTooLarge: (limitMb: number, receivedMb: number) =>
+      `File exceeds the maximum allowed size (${limitMb} MB). Received: ${receivedMb.toFixed(2)} MB.`,
+    tooManySheets: (limit: number, received: number) =>
+      `Workbook exceeds the maximum allowed sheets (${limit}). Received: ${received}.`,
+    tooManyRows: (limit: number, received: number) =>
+      `File exceeds the maximum allowed rows (${limit}). Received: ${received}.`,
+    insufficientCredits: (required: number, balance: number) =>
+      `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
+    queueFull: (max: number) =>
+      `You already have ${max} files processing. Wait for them to finish.`,
+  },
+} as const;
+
+export type IntakeLocale = keyof typeof INTAKE_MESSAGES;
