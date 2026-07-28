@@ -5,6 +5,7 @@ import { withCompanyScope } from '@/lib/db-scope';
 import { downloadObject } from '@/lib/s3';
 import { documents, companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
+import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { classifySheetRows } from '@/lib/anthropic';
 import { insertStagingRows } from '@/lib/staging';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
@@ -41,7 +42,7 @@ export function startExcelIngestWorker(): Promise<string> {
           db.update(documents).set({ status: 'processing' }).where(eq(documents.id, documentId)),
         );
 
-        const { templateVersion, s3Key, creditRule } = await withCompanyScope(
+        const { templateVersion, s3Key, creditRule, locale } = await withCompanyScope(
           companyId,
           async (db) => {
             const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
@@ -72,12 +73,42 @@ export function startExcelIngestWorker(): Promise<string> {
             // consistent even if the rule version changes mid-processing.
             const creditRule = await getActiveCreditRule(db, 'excel');
 
-            return { templateVersion, s3Key: doc.s3Key, creditRule };
+            return { templateVersion, s3Key: doc.s3Key, creditRule, locale: company.locale };
           },
         );
 
         const fileBuffer = await downloadObject(s3Key);
         const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+
+        // CU-868kh8man: backstop de caps sobre el libro YA parseado. Necesario para
+        // `.xls` (binario legacy, sin inspección barata posible en la recepción — ver
+        // modules/ingestion/index.ts) y gratis como red de seguridad para el resto:
+        // el conteo del intake sale del atributo `dimension` del XML (xlsx) o de un
+        // escaneo de bytes (csv), ambos aproximaciones que un archivo raro podría
+        // burlar. Va ANTES del bucle de hojas, así que un archivo fuera de norma no
+        // gasta ni una llamada a Claude.
+        const parsedSheetCount = workbook.SheetNames.length;
+        if (parsedSheetCount > intakeConfig.maxSheetsPerWorkbook) {
+          throw new Error(
+            INTAKE_MESSAGES[locale].tooManySheets(
+              intakeConfig.maxSheetsPerWorkbook,
+              parsedSheetCount,
+            ),
+          );
+        }
+        const parsedRowTotal = workbook.SheetNames.reduce((total, name) => {
+          const sheet = workbook.Sheets[name];
+          if (!sheet) return total;
+          const ref = sheet['!ref'];
+          if (!ref) return total;
+          const decoded = XLSX.utils.decode_range(ref);
+          return total + (decoded.e.r - decoded.s.r + 1);
+        }, 0);
+        if (parsedRowTotal > intakeConfig.maxRowsPerFile) {
+          throw new Error(
+            INTAKE_MESSAGES[locale].tooManyRows(intakeConfig.maxRowsPerFile, parsedRowTotal),
+          );
+        }
 
         let totalRowsProcessed = 0;
 

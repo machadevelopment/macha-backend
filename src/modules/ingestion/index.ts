@@ -6,6 +6,8 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
 import { uploadKey, uploadObject } from '@/lib/s3';
 import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
+import { countCsvRows } from '@/lib/csv-inspect';
+import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
@@ -18,37 +20,7 @@ const ALLOWED_MIME_EXT: Record<string, string> = {
   'text/csv': 'csv',
 };
 
-// CU-868kfv972: rejection message must show the limit and the received value, in the
-// company's locale. Backend has no i18n lib (that's a frontend concern per CLAUDE.md);
-// this is intentionally a tiny, local dictionary scoped to intake errors only.
-const MESSAGES = {
-  es: {
-    unsupportedType: (mime: string) =>
-      `Tipo de archivo no soportado: ${mime}. Usa .xlsx, .xls o .csv.`,
-    fileTooLarge: (limitMb: number, receivedMb: number) =>
-      `El archivo supera el tamaño máximo permitido (${limitMb} MB). Recibido: ${receivedMb.toFixed(2)} MB.`,
-    tooManySheets: (limit: number, received: number) =>
-      `El libro supera el máximo de hojas permitidas (${limit}). Recibido: ${received}.`,
-    tooManyRows: (limit: number, received: number) =>
-      `El archivo supera el máximo de filas permitidas (${limit}). Recibido: ${received}.`,
-    insufficientCredits: (required: number, balance: number) =>
-      `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
-    queueFull: (max: number) => `Ya tienes ${max} archivos procesándose. Espera a que terminen.`,
-  },
-  en: {
-    unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
-    fileTooLarge: (limitMb: number, receivedMb: number) =>
-      `File exceeds the maximum allowed size (${limitMb} MB). Received: ${receivedMb.toFixed(2)} MB.`,
-    tooManySheets: (limit: number, received: number) =>
-      `Workbook exceeds the maximum allowed sheets (${limit}). Received: ${received}.`,
-    tooManyRows: (limit: number, received: number) =>
-      `File exceeds the maximum allowed rows (${limit}). Received: ${received}.`,
-    insufficientCredits: (required: number, balance: number) =>
-      `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
-    queueFull: (max: number) =>
-      `You already have ${max} files processing. Wait for them to finish.`,
-  },
-} as const;
+const MESSAGES = INTAKE_MESSAGES;
 
 export const ingestion = new Elysia({ prefix: '/documents' })
   .use(tenantDerive)
@@ -82,14 +54,30 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
       const buffer = new Uint8Array(await file.arrayBuffer());
 
-      // Cheap pre-check (no full parse) — only meaningful for .xlsx (OOXML zip); .xls
-      // (legacy binary) and .csv fall back to the size cap above only, see xlsx-inspect.ts.
-      // Also used below to estimate the credit hard-block (CU-868kfvaa6) — the `excel`
-      // rule is billed per batch, so we need an upfront batch-count guess.
+      // Pre-check barato, sin parseo completo (CU-868kfv972: "parsear el libro entero
+      // para contar ya es procesar"). También alimenta el bloqueo por créditos de
+      // abajo (CU-868kfvaa6): la regla `excel` se cobra por lote, así que hace falta
+      // estimar cuántos lotes serán ANTES de encolar.
+      //
+      // CU-868kh8man: cada formato se inspecciona con lo que permite su estructura.
+      // Antes solo se validaba `.xlsx` y el resto pasaba nada más por el cap de
+      // tamaño, así que un CSV de 9 MB con cientos de miles de filas entraba entero.
       let estimatedBatches = 1;
-      if (ext === 'xlsx') {
-        const { sheetRowCounts } = inspectXlsxWorkbook(buffer);
+      let sheetRowCounts: number[] | null = null;
 
+      if (ext === 'xlsx') {
+        sheetRowCounts = inspectXlsxWorkbook(buffer).sheetRowCounts;
+      } else if (ext === 'csv') {
+        // Un CSV es una sola "hoja"; contar registros respetando comillas es barato
+        // (un escaneo de bytes) y no materializa ninguna fila.
+        sheetRowCounts = [countCsvRows(buffer)];
+      }
+      // `.xls` (binario legacy OLE2) no tiene forma barata de inspección: sus caps se
+      // aplican en el worker, después del parseo que igual tiene que hacer y ANTES de
+      // cualquier llamada a Claude (ver queue/workers/excel-ingest.ts). No queda sin
+      // validar, solo se valida más tarde.
+
+      if (sheetRowCounts) {
         if (sheetRowCounts.length > intakeConfig.maxSheetsPerWorkbook) {
           set.status = 413;
           return {
