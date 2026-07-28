@@ -1,5 +1,9 @@
 import { Elysia } from 'elysia';
+import * as Sentry from '@sentry/bun';
 import { env } from '@/lib/env';
+import { initSentry } from '@/lib/sentry';
+
+initSentry();
 import { adminCompanies } from '@/modules/admin/companies';
 import { adminStagingRows } from '@/modules/admin/staging-rows';
 import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
@@ -49,6 +53,9 @@ export const app = new Elysia()
   .use(billingWebhooks)
   .use(me)
   .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
+  .onError(({ error }) => {
+    Sentry.captureException(error);
+  })
   .listen(env.port);
 
 console.log(`macha-backend listening on :${env.port}`);
