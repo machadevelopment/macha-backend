@@ -8,6 +8,8 @@ import { uploadKey, uploadObject } from '@/lib/s3';
 import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
 import { countCsvRows } from '@/lib/csv-inspect';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
+import { revertDocument } from '@/lib/promotion';
+import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
@@ -171,6 +173,51 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       .orderBy(desc(documents.createdAt))
       .limit(50);
     return { documents: rows };
+  })
+  /**
+   * CU-868kh8nhy: expone la reversión, que existía como `revertDocument()` en
+   * lib/promotion.ts desde CU-868kfva9z pero no la alcanzaba ninguna ruta — el
+   * criterio "reversión soft-delete por document_id" estaba implementado y muerto.
+   *
+   * Atomicidad: `db` aquí ya viene dentro de una transacción por request
+   * (tenant.derive → reserveCompanyConnection abre `begin`), así que los
+   * soft-deletes de transactions/invoices/bills y el cambio de estado del documento
+   * se confirman o se revierten juntos.
+   */
+  .post('/:id/revert', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'revert_upload', set);
+
+    const [doc] = await db
+      .select({ id: documents.id, status: documents.status })
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+
+    // Idempotente: revertir dos veces no duplica efectos ni es un error para quien
+    // llama (p. ej. un doble clic o un reintento de red).
+    if (doc.status === 'reverted') {
+      return { id: doc.id, status: 'reverted' as const, alreadyReverted: true };
+    }
+
+    // Solo un documento promovido tiene filas de negocio que deshacer. Revertir uno
+    // en cola/proceso/fallido no tiene sentido y ocultaría un malentendido del
+    // usuario detrás de un 200.
+    if (doc.status !== 'promoted') {
+      set.status = 409;
+      return {
+        error: `Solo se puede revertir un documento promovido (estado actual: ${doc.status}).`,
+      };
+    }
+
+    await revertDocument(db, companyId, params.id);
+    // Las cifras del dashboard salen de metric_rollups; sin esto seguirían contando
+    // las transacciones recién soft-borradas hasta la próxima ingesta.
+    await refreshExistingRollups(db, companyId);
+
+    return { id: doc.id, status: 'reverted' as const, alreadyReverted: false };
   })
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
