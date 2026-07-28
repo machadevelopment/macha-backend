@@ -44,6 +44,21 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
 
+## Verificación de aislamiento prod/no-prod (CU-868kfvaz6)
+
+- **Credenciales separadas por entorno** (criterio 1): verificado por código — cada
+  servicio externo (WorkOS, Anthropic, S3, Redis, Recurrente, Sentry) lee su valor de
+  una env var nativa de la plataforma (ver tabla arriba), sin ningún valor
+  hardcodeado ni compartido entre ambientes en el repo.
+- **Ningún secreto versionado** (criterio 3): verificado — `.gitignore` bloquea
+  `.env`/`.env.*` salvo `.env.example` (sin valores reales).
+- **Staging solo con datos sintéticos** (criterio 2): **no verificable desde este
+  entorno** — requiere inspeccionar el contenido real de la base de staging.
+  `AUDIT_TARGET_DATABASE_URL=postgres://... bun run audit:staging-data` lista
+  empresas, dominios de email y conteos de filas para revisión manual; el juicio de
+  "esto es sintético" lo da una persona, no el script. Registra el resultado en el
+  ticket de ClickUp.
+
 ## Simulacro de restauración (CU-868kfvata)
 
 Verificación mensual de que los backups (`pg_dump` nocturno → S3, `CU-868kfvar3`)

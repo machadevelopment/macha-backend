@@ -18,6 +18,7 @@
     "db:seed": "bun run scripts/seed.ts",
     "provision:tenant": "bun run scripts/provision-tenant.ts",
     "restore:drill": "bun run scripts/restore-drill.ts",
+    "audit:staging-data": "bun run scripts/audit-staging-data.ts",
     "prepare": "husky"
   },
   "dependencies": {
