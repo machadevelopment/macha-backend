@@ -20,6 +20,7 @@ export const QUEUES = {
   reportGenerate: 'report.generate',
   alertEvaluate: 'alert.evaluate',
   emailSend: 'email.send',
+  dbBackup: 'db.backup',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
@@ -36,6 +37,8 @@ const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
   [QUEUES.reportGenerate]: { retryLimit: 2, retryDelay: 60, retryBackoff: true },
   [QUEUES.alertEvaluate]: { retryLimit: 3, retryDelay: 15, retryBackoff: false },
   [QUEUES.emailSend]: { retryLimit: 3, retryDelay: 30, retryBackoff: true },
+  // Backup fallido -> reintenta pronto en vez de esperar 24h a la próxima noche.
+  [QUEUES.dbBackup]: { retryLimit: 2, retryDelay: 300, retryBackoff: true },
 };
 
 export async function startQueue(): Promise<PgBoss> {
@@ -46,6 +49,9 @@ export async function startQueue(): Promise<PgBoss> {
   // Daily fan-out trigger (CU-868kfvacg) — 06:00 UTC, one singleton tick that queries
   // which companies are due and enqueues report.generate per company.
   await boss.schedule(QUEUES.reportTick, '0 6 * * *');
+  // Nightly pg_dump -> S3 (CU-868kfvar3), 07:00 UTC — after the report tick so the
+  // two don't contend for DB read load in the same minute.
+  await boss.schedule(QUEUES.dbBackup, '0 7 * * *');
   return boss;
 }
 
