@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { db } from '@/db/client';
@@ -28,12 +28,28 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       const conditions = [eq(stagingRows.reviewStatus, 'pending')];
       if (query.companyId) conditions.push(eq(stagingRows.companyId, query.companyId));
       if (query.documentId) conditions.push(eq(stagingRows.documentId, query.documentId));
-      return db
+      // CU-868kfvaz9: sin límite esto cargaba TODAS las filas marcadas cross-tenant
+      // en un solo fetch. Pide limit+1 para saber si hay más sin una query de COUNT
+      // aparte — patrón "load more", no paginación por cursor completa.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
         .select()
         .from(stagingRows)
-        .where(and(...conditions));
+        .where(and(...conditions))
+        .orderBy(asc(stagingRows.createdAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { rows: rows.slice(0, limit), hasMore: rows.length > limit };
     },
-    { query: t.Object({ companyId: t.Optional(t.String()), documentId: t.Optional(t.String()) }) },
+    {
+      query: t.Object({
+        companyId: t.Optional(t.String()),
+        documentId: t.Optional(t.String()),
+        limit: t.Optional(t.String()),
+        offset: t.Optional(t.String()),
+      }),
+    },
   )
   .patch(
     '/:id',
