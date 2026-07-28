@@ -14,7 +14,7 @@ import { generateReportNarrative } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { uploadObject, reportRenderKey } from '@/lib/s3';
 import { sendReportReadyEmail } from '@/lib/email';
-import { env } from '@/lib/env';
+import { reportUrl } from '@/lib/app-urls';
 
 /**
  * CU-868kfvacr/868kfvacg: métricas calculadas en SQL directo sobre el ledger para el
@@ -172,7 +172,11 @@ export async function generateReport(
       locale,
       reportVersionId: version!.id,
       recipientEmail: recipient.email,
-      viewUrl: `${env.appBaseUrl}/reports/${version!.id}`,
+      // CU-868kh8jjy: el link va al REPORTE, no a la versión — `/reports/[id]`
+      // resuelve `reports.id`, así que mandar `version.id` daba 404 en todo email.
+      // (`refId` arriba sí guarda el versionId: eso es trazabilidad de qué versión
+      // disparó el envío, no navegación.)
+      viewUrl: reportUrl(report!.id),
     });
   }
 
