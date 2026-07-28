@@ -28,6 +28,7 @@ import { startAlertEvaluateWorker } from '@/queue/workers/alert-evaluate';
 import { startReportGenerateWorker } from '@/queue/workers/report-generate';
 import { startReportTickWorker } from '@/queue/workers/report-tick';
 import { startEmailSendWorker } from '@/queue/workers/email-send';
+import { startDbBackupWorker } from '@/queue/workers/db-backup';
 
 // Macha Finance backend — Bun + Elysia. Tenant scoping is enforced in guards/derive
 // (see src/guards/). Admin is a separate namespace. Validation uses TypeBox (Elysia).
@@ -73,6 +74,7 @@ startQueue()
       startReportGenerateWorker(),
       startReportTickWorker(),
       startEmailSendWorker(),
+      startDbBackupWorker(),
     ]),
   )
   .catch((err) => {

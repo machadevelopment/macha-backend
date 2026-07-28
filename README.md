@@ -41,6 +41,7 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. |
 | `SENTRY_DSN` | Prod/staging | No-op without it (local/dev/CI never set it). |
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |
+| `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
 
 ## Modelo de IA (ZDR)
