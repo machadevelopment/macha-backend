@@ -23,10 +23,8 @@ export function reportUrl(reportId: string): string {
 
 /** Detalle de una alerta disparada. Espera `alert_events.id`.
  *
- * ⚠️ La ruta `/alerts/[id]` NO existe todavía en el frontend — se construye en
- * CU-868kh8jxf. Hasta que exista, este link resuelve a un 404. Se deja declarado aquí
- * (en vez de un template string enterrado en `alerts.ts`) precisamente para que la
- * dependencia sea visible y no vuelva a perderse de vista. */
+ * La ruta `app/(app)/alerts/[id]/page.tsx` y su endpoint `GET /alerts/:id`
+ * (`modules/alerts`) existen desde CU-868kh8jxf — el link ya no cae en un 404. */
 export function alertUrl(alertEventId: string): string {
   return `${env.appBaseUrl}/alerts/${alertEventId}`;
 }

@@ -11,6 +11,7 @@ import { adminConfig } from '@/modules/admin/config';
 import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
+import { alerts } from '@/modules/alerts';
 import { register } from '@/modules/billing/register';
 import { creditsTopup } from '@/modules/billing/credits-topup';
 import { billingWebhooks } from '@/modules/billing/webhooks';
@@ -42,6 +43,7 @@ export const app = new Elysia()
   .use(creditsBalance)
   .use(chats_)
   .use(reports_)
+  .use(alerts)
   .use(adminCompanies)
   .use(adminStagingRows)
   .use(adminIndustryTemplates)
