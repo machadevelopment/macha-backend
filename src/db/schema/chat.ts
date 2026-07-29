@@ -1,6 +1,16 @@
-import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  timestamp,
+  index,
+  uniqueIndex,
+  foreignKey,
+} from 'drizzle-orm/pg-core';
 import { companies } from './companies';
 import { users } from './identity';
+import { reportVersions } from './reporting';
 
 // 4.16 chats — named CFO assistant thread per (company_id, user_id).
 export const chats = pgTable(
@@ -20,6 +30,16 @@ export const chats = pgTable(
   },
   (t) => ({
     threadIdx: index('chats_company_user_updated_idx').on(t.companyId, t.userId, t.updatedAt),
+    // CU-868kh8uau: FK COMPUESTA (incluye company_id) — sin ella la columna aceptaba
+    // en silencio un `reports.id`, que es justo el bug que originó el ticket. Se crea
+    // en la migración cruda 0011 junto con la limpieza de las filas ya corruptas.
+    // NULL cuando el hilo no nació de un deep-link: MATCH SIMPLE no evalúa la
+    // constraint si alguna columna es NULL, así que los chats normales pasan.
+    reportVersionFk: foreignKey({
+      columns: [t.companyId, t.reportVersionId],
+      foreignColumns: [reportVersions.companyId, reportVersions.id],
+      name: 'chats_report_version_fk',
+    }),
   }),
 );
 

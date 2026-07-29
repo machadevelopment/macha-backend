@@ -2,7 +2,7 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { reports, reportVersions } from '@/db/schema';
+import { companies, reports, reportVersions } from '@/db/schema';
 import { presignGet, uploadObject, reportRenderKey } from '@/lib/s3';
 
 /**
@@ -42,11 +42,28 @@ export const reports_ = new Elysia({ prefix: '/reports' })
       .select()
       .from(reportVersions)
       .where(eq(reportVersions.id, report.currentVersionId));
+
+    // CU-868kh8rz8 criterio 2: la moneda base sale de la empresa. Antes el detalle de
+    // reporte la asumía 'GTQ' hardcodeada en el cliente, así que una empresa con
+    // baseCurrency='USD' veía sus montos etiquetados como quetzales. `metrics` no trae
+    // moneda propia (son amount_base ya convertidos), por eso viaja aparte aquí.
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
     return {
       id: report.id,
       periodStart: report.periodStart,
       periodEnd: report.periodEnd,
       frequency: report.frequency,
+      baseCurrency: company?.baseCurrency ?? 'GTQ',
+      // CU-868kh8uau: el id de la VERSIÓN actual, expuesto explícitamente. El
+      // deep-link a chat mandaba `reports.id` en el campo `reportVersionId` y, como
+      // `chats.report_version_id` no tiene FK, se persistía una referencia falsa en
+      // silencio. El cliente no puede derivar este id de ningún otro campo — si no se
+      // devuelve, no hay forma de mandar el correcto.
+      versionId: report.currentVersionId,
       version: version?.version,
       metrics: version?.metrics,
       narrative: version?.narrative,
