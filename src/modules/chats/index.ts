@@ -5,7 +5,7 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { chats, chatMessages, companies, reportVersions } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
-import { checkTokenBucket } from '@/lib/rate-limit';
+import { enforceTokenBucket } from '@/lib/rate-limit';
 
 /**
  * CU-868kfvabw/868kfvabq: hilos nombrados por (company_id, user_id) + orquestación
@@ -101,12 +101,9 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       // de Calidad que checkTokenBucket() existía desde CU-868kfv97f pero ninguna ruta
       // lo consumía todavía (el comentario original de rate-limit.ts lo decía
       // explícito). 429 + Retry-After es la respuesta acordada con Jose.
-      const gate = await checkTokenBucket('ai', companyId);
-      if (!gate.allowed) {
-        set.status = 429;
-        set.headers['Retry-After'] = String(gate.retryAfterSeconds);
-        return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
-      }
+      // CU-868kh92fz: el rechazo ahora se reporta a Sentry dentro de enforceTokenBucket.
+      const limited = await enforceTokenBucket('ai', companyId, set, 'POST /chats/:id/messages');
+      if (limited) return limited;
 
       const [chat] = await db
         .select({ id: chats.id })

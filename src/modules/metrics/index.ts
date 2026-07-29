@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { and, eq, isNull } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
+import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
 import { companies, invoices, bills } from '@/db/schema';
 
@@ -21,6 +22,11 @@ export const metrics = new Elysia().use(tenantDerive).get(
   '/metrics',
   async ({ companyId, role, query, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read` — el dashboard es justo el consumidor que motivó
+    // los valores generosos de este bucket (120 rpm / 240 burst).
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics');
+    if (limited) return limited;
 
     const [company] = await db
       .select({ baseCurrency: companies.baseCurrency })
@@ -55,19 +61,22 @@ export const metrics = new Elysia().use(tenantDerive).get(
   },
   {
     query: t.Object({ months: t.Optional(t.Numeric({ minimum: 1, maximum: 36 })) }),
-    response: t.Object({
-      baseCurrency: t.String(),
-      months: t.Array(
-        t.Object({
-          period: t.String(),
-          revenue: t.Number(),
-          cogs: t.Number(),
-          opex: t.Number(),
-          other: t.Number(),
-          margin: t.Number(),
-        }),
-      ),
-    }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        months: t.Array(
+          t.Object({
+            period: t.String(),
+            revenue: t.Number(),
+            cogs: t.Number(),
+            opex: t.Number(),
+            other: t.Number(),
+            margin: t.Number(),
+          }),
+        ),
+      }),
+      429: rateLimitedResponse,
+    },
   },
 );
 
@@ -97,6 +106,10 @@ export const arAp = new Elysia().use(tenantDerive).get(
   '/ar-ap',
   async ({ companyId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read` — misma nota que /metrics.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /ar-ap');
+    if (limited) return limited;
 
     const [company] = await db
       .select({ baseCurrency: companies.baseCurrency })
@@ -142,22 +155,25 @@ export const arAp = new Elysia().use(tenantDerive).get(
     };
   },
   {
-    response: t.Object({
-      baseCurrency: t.String(),
-      ar: t.Object({
-        current: t.Number(),
-        '1_30': t.Number(),
-        '31_60': t.Number(),
-        '61_90': t.Number(),
-        '90_plus': t.Number(),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        ar: t.Object({
+          current: t.Number(),
+          '1_30': t.Number(),
+          '31_60': t.Number(),
+          '61_90': t.Number(),
+          '90_plus': t.Number(),
+        }),
+        ap: t.Object({
+          current: t.Number(),
+          '1_30': t.Number(),
+          '31_60': t.Number(),
+          '61_90': t.Number(),
+          '90_plus': t.Number(),
+        }),
       }),
-      ap: t.Object({
-        current: t.Number(),
-        '1_30': t.Number(),
-        '31_60': t.Number(),
-        '61_90': t.Number(),
-        '90_plus': t.Number(),
-      }),
-    }),
+      429: rateLimitedResponse,
+    },
   },
 );

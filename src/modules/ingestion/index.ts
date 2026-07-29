@@ -11,7 +11,7 @@ import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { revertDocument } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
-import { checkQueueGate } from '@/lib/rate-limit';
+import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
 import { documents, companies } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
@@ -118,6 +118,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       const gate = await checkQueueGate(companyId, 'excel');
       if (!gate.allowed) {
         set.status = 429;
+        // CU-868kh92fz: el otro mecanismo de 429. Se reporta con el mismo formato que
+        // el token-bucket para poder contar ambos juntos y distinguirlos por tag.
+        reportRateLimited({
+          mechanism: 'queue_gate',
+          companyId,
+          route: 'POST /documents',
+          detail: 'excel',
+        });
         return { error: msg.queueFull(rateLimitConfig.queueGate.maxJobs), reason: 'queue_full' };
       }
 
@@ -158,6 +166,11 @@ export const ingestion = new Elysia({ prefix: '/documents' })
   // gate — view_dashboard_reports covers all client roles same as upload_excel.
   .get('/', async ({ companyId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents');
+    if (limited) return limited;
+
     const rows = await db
       .select({
         id: documents.id,
@@ -221,6 +234,13 @@ export const ingestion = new Elysia({ prefix: '/documents' })
   })
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`. Esta es LA ruta de polling de estado del pipeline
+    // de ingesta — el caso concreto que config/rate-limit.ts cita al justificar por
+    // qué el bucket `read` es generoso (120 rpm) en vez de compartir cupo con `ai`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents/:id');
+    if (limited) return limited;
+
     const [doc] = await db
       .select()
       .from(documents)
