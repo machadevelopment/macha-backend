@@ -1,0 +1,154 @@
+import { describe, expect, test, beforeAll, afterAll, mock } from 'bun:test';
+import { Elysia } from 'elysia';
+import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
+
+/**
+ * CU-868kh8zbj criterio 4: `tenant.derive` y `admin.guard` con JWT falso pero
+ * verificación REAL de membresías contra Postgres.
+ *
+ * Lo que se falsea es solo la firma del JWT (verificarla de verdad exigiría un JWKS
+ * de WorkOS vivo, que no pinta nada en un test de aislamiento). Todo lo demás —
+ * resolver workos_user_id → users → company_users, rechazar empresas suspendidas,
+ * leer la tabla `staff`— corre contra la base real. Que es justo donde puede haber
+ * una regresión de tenant-scoping.
+ *
+ * `mock.module` es seguro AQUÍ y no lo sería en los tests unitarios: la suite de
+ * integración corre en su propia invocación de `bun test` (script `test:integration`),
+ * así que el mock no puede filtrarse a los 16 archivos de `src/`.
+ */
+
+// El env debe quedar seteado ANTES de importar cualquier módulo que lea `env`:
+// src/lib/env.ts lo evalúa en el import y src/db/client.ts abre el pool ahí mismo.
+process.env.DATABASE_URL = testOwnerUrl;
+process.env.APP_DATABASE_URL = testAppUrl;
+process.env.WORKOS_JWKS_URL = 'https://example.invalid/jwks';
+
+/** El "token" es literalmente el workos_user_id — basta para ejercitar el guard. */
+mock.module('@/lib/auth', () => ({
+  verifyToken: async (token: string) => {
+    if (token === 'invalid') throw new Error('bad signature');
+    return { sub: token };
+  },
+}));
+
+const { tenantDerive } = await import('@/guards/tenant.derive');
+const { adminGuard } = await import('@/guards/admin.guard');
+const { sql } = await import('@/db/client');
+
+const app = new Elysia()
+  .use(tenantDerive)
+  .get('/whoami', ({ companyId, role }) => ({ companyId, role }))
+  .use(adminGuard)
+  .get('/admin/whoami', ({ tier }) => ({ tier }));
+
+function request(path: string, headers: Record<string, string>) {
+  return app.handle(new Request(`http://localhost${path}`, { headers }));
+}
+
+describe('guards contra Postgres real (CU-868kh8zbj)', () => {
+  let owner: ReturnType<typeof ownerConnection>;
+  let companyA: string;
+  let companyB: string;
+  let suspended: string;
+
+  beforeAll(async () => {
+    await setupTestDatabase();
+    owner = ownerConnection();
+
+    const [a] = await owner`insert into companies (workos_org_id, name, industry)
+      values ('org_g_a', 'A', 'retail') returning id`;
+    const [b] = await owner`insert into companies (workos_org_id, name, industry)
+      values ('org_g_b', 'B', 'retail') returning id`;
+    const [s] = await owner`insert into companies (workos_org_id, name, industry, status)
+      values ('org_g_s', 'S', 'retail', 'suspended') returning id`;
+    companyA = a!.id;
+    companyB = b!.id;
+    suspended = s!.id;
+
+    // miembro-de-A: pertenece solo a la empresa A.
+    const [memberA] = await owner`insert into users (workos_user_id, email)
+      values ('wos_member_a', 'a@test.local') returning id`;
+    await owner`insert into company_users (company_id, user_id, role)
+      values (${companyA}, ${memberA!.id}, 'owner')`;
+
+    // miembro-suspendida: su única empresa está suspendida.
+    const [memberS] = await owner`insert into users (workos_user_id, email)
+      values ('wos_member_s', 's@test.local') returning id`;
+    await owner`insert into company_users (company_id, user_id, role)
+      values (${suspended}, ${memberS!.id}, 'owner')`;
+
+    // staff-user: existe en `staff`, activo.
+    const [staffUser] = await owner`insert into users (workos_user_id, email)
+      values ('wos_staff', 'staff@test.local') returning id`;
+    await owner`insert into staff (user_id, tier) values (${staffUser!.id}, 'super_admin')`;
+    await owner`insert into company_users (company_id, user_id, role)
+      values (${companyA}, ${staffUser!.id}, 'member')`;
+
+    // huérfano: tiene identidad en WorkOS pero ninguna membresía activa.
+    await owner`insert into users (workos_user_id, email)
+      values ('wos_orphan', 'orphan@test.local')`;
+  });
+
+  afterAll(async () => {
+    await owner?.end();
+    await sql.end();
+  });
+
+  describe('tenant.derive', () => {
+    test('resuelve company_id y rol desde company_users, no desde el cliente', async () => {
+      const res = await request('/whoami', { authorization: 'Bearer wos_member_a' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ companyId: companyA, role: 'owner' });
+    });
+
+    test('rechaza sin bearer token', async () => {
+      const res = await request('/whoami', {});
+      expect(res.status).toBe(401);
+    });
+
+    test('rechaza un X-Company-Id de una empresa ajena', async () => {
+      // EL test del ticket: el header solo puede SELECCIONAR entre las membresías
+      // reales del usuario, nunca concederle una nueva.
+      const res = await request('/whoami', {
+        authorization: 'Bearer wos_member_a',
+        'x-company-id': companyB,
+      });
+      expect(res.status).toBe(403);
+    });
+
+    test('rechaza a una identidad sin membresía activa', async () => {
+      const res = await request('/whoami', { authorization: 'Bearer wos_orphan' });
+      expect(res.status).toBe(403);
+    });
+
+    test('rechaza a un usuario de WorkOS sin cuenta en Macha', async () => {
+      const res = await request('/whoami', { authorization: 'Bearer wos_desconocido' });
+      expect(res.status).toBe(403);
+    });
+
+    test('rechaza si la empresa está suspendida', async () => {
+      const res = await request('/whoami', { authorization: 'Bearer wos_member_s' });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('admin.guard', () => {
+    test('acepta a un usuario presente en la tabla staff y expone su tier', async () => {
+      const res = await request('/admin/whoami', { authorization: 'Bearer wos_staff' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ tier: 'super_admin' });
+    });
+
+    test('rechaza a un no-staff aunque sea miembro legítimo de una empresa', async () => {
+      // El namespace admin se gatea por `staff`, no por `company_users`: ser owner de
+      // tu propia empresa no da acceso al backoffice de Macha.
+      const res = await request('/admin/whoami', { authorization: 'Bearer wos_member_a' });
+      expect(res.status).toBe(403);
+    });
+
+    test('rechaza sin bearer token', async () => {
+      const res = await request('/admin/whoami', {});
+      expect(res.status).toBe(401);
+    });
+  });
+});
