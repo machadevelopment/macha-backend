@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { db } from '@/db/client';
@@ -15,19 +15,31 @@ import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
  */
 export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
   .use(adminGuard)
-  .get('/', async ({ tier, set }) => {
-    assertStaffCapability(tier, 'view_companies', set);
-    return db
-      .select({
-        id: companies.id,
-        name: companies.name,
-        industry: companies.industry,
-        baseCurrency: companies.baseCurrency,
-        status: companies.status,
-        createdAt: companies.createdAt,
-      })
-      .from(companies);
-  })
+  .get(
+    '/',
+    async ({ tier, query, set }) => {
+      assertStaffCapability(tier, 'view_companies', set);
+      // CU-868kh913c: sin límite esto crecía con el número de empresas cliente.
+      // Mismo patrón "load more" (limit+1) que /admin/staging-rows y /admin/documents.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
+        .select({
+          id: companies.id,
+          name: companies.name,
+          industry: companies.industry,
+          baseCurrency: companies.baseCurrency,
+          status: companies.status,
+          createdAt: companies.createdAt,
+        })
+        .from(companies)
+        .orderBy(desc(companies.createdAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { companies: rows.slice(0, limit), hasMore: rows.length > limit };
+    },
+    { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
+  )
   .post(
     '/',
     async ({ staffId, tier, body, set }) => {

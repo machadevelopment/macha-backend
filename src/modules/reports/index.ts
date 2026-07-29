@@ -14,26 +14,38 @@ import { presignGet, uploadObject, reportRenderKey } from '@/lib/s3';
  */
 export const reports_ = new Elysia({ prefix: '/reports' })
   .use(tenantDerive)
-  .get('/', async ({ companyId, role, set, db }) => {
-    assertClientCapability(role, 'view_dashboard_reports', set);
+  .get(
+    '/',
+    async ({ companyId, role, query, set, db }) => {
+      assertClientCapability(role, 'view_dashboard_reports', set);
 
-    // CU-868kh8qhp: bucket `read`.
-    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports');
-    if (limited) return limited;
+      // CU-868kh8qhp: bucket `read`.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports');
+      if (limited) return limited;
 
-    return db
-      .select({
-        id: reports.id,
-        periodStart: reports.periodStart,
-        periodEnd: reports.periodEnd,
-        frequency: reports.frequency,
-        currentVersionId: reports.currentVersionId,
-        updatedAt: reports.updatedAt,
-      })
-      .from(reports)
-      .where(eq(reports.companyId, companyId))
-      .orderBy(desc(reports.updatedAt));
-  })
+      // CU-868kh913c: sin LIMIT esto devolvía TODOS los reportes de la empresa, y el
+      // tick diario suma ~365 filas al año por empresa. Mismo patrón "load more"
+      // (limit+1) que /admin/staging-rows.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
+        .select({
+          id: reports.id,
+          periodStart: reports.periodStart,
+          periodEnd: reports.periodEnd,
+          frequency: reports.frequency,
+          currentVersionId: reports.currentVersionId,
+          updatedAt: reports.updatedAt,
+        })
+        .from(reports)
+        .where(eq(reports.companyId, companyId))
+        .orderBy(desc(reports.updatedAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { reports: rows.slice(0, limit), hasMore: rows.length > limit };
+    },
+    { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
+  )
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
 
