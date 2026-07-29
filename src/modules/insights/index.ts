@@ -13,7 +13,7 @@ import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { insightRequests, companies } from '@/db/schema';
-import { checkTokenBucket } from '@/lib/rate-limit';
+import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { eq } from 'drizzle-orm';
 
 function monthStart(monthsAgo: number): string {
@@ -34,12 +34,9 @@ export const insights = new Elysia().use(tenantDerive).post(
     assertClientCapability(role, 'view_dashboard_reports', set);
 
     // CU-868kfvaah: 'ai' token-bucket — ver nota equivalente en modules/chats/index.ts.
-    const gate = await checkTokenBucket('ai', companyId);
-    if (!gate.allowed) {
-      set.status = 429;
-      set.headers['Retry-After'] = String(gate.retryAfterSeconds);
-      return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
-    }
+    // CU-868kh92fz: el rechazo ahora se reporta a Sentry dentro de enforceTokenBucket.
+    const limited = await enforceTokenBucket('ai', companyId, set, 'POST /insights');
+    if (limited) return limited;
 
     const creditRule = await getActiveCreditRule(db, 'insight');
     if (creditRule) {
@@ -124,10 +121,7 @@ export const insights = new Elysia().use(tenantDerive).post(
         required: t.Number(),
         balance: t.Number(),
       }),
-      429: t.Object({
-        error: t.Literal('rate_limited'),
-        retryAfterSeconds: t.Number(),
-      }),
+      429: rateLimitedResponse,
     },
   },
 );
@@ -138,8 +132,19 @@ export const creditsBalance = new Elysia().use(tenantDerive).get(
   '/credits/balance',
   async ({ companyId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`. El header lo consulta en cada pantalla, así que es
+    // de los endpoints con más tráfico por sesión.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /credits/balance');
+    if (limited) return limited;
+
     const balance = await getCreditBalance(db, companyId);
     return { balance };
   },
-  { response: t.Object({ balance: t.Number() }) },
+  {
+    response: {
+      200: t.Object({ balance: t.Number() }),
+      429: rateLimitedResponse,
+    },
+  },
 );

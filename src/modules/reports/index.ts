@@ -2,7 +2,8 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { reports, reportVersions } from '@/db/schema';
+import { enforceTokenBucket } from '@/lib/rate-limit';
+import { companies, reports, reportVersions } from '@/db/schema';
 import { presignGet, uploadObject, reportRenderKey } from '@/lib/s3';
 
 /**
@@ -13,23 +14,45 @@ import { presignGet, uploadObject, reportRenderKey } from '@/lib/s3';
  */
 export const reports_ = new Elysia({ prefix: '/reports' })
   .use(tenantDerive)
-  .get('/', async ({ companyId, role, set, db }) => {
-    assertClientCapability(role, 'view_dashboard_reports', set);
-    return db
-      .select({
-        id: reports.id,
-        periodStart: reports.periodStart,
-        periodEnd: reports.periodEnd,
-        frequency: reports.frequency,
-        currentVersionId: reports.currentVersionId,
-        updatedAt: reports.updatedAt,
-      })
-      .from(reports)
-      .where(eq(reports.companyId, companyId))
-      .orderBy(desc(reports.updatedAt));
-  })
+  .get(
+    '/',
+    async ({ companyId, role, query, set, db }) => {
+      assertClientCapability(role, 'view_dashboard_reports', set);
+
+      // CU-868kh8qhp: bucket `read`.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports');
+      if (limited) return limited;
+
+      // CU-868kh913c: sin LIMIT esto devolvía TODOS los reportes de la empresa, y el
+      // tick diario suma ~365 filas al año por empresa. Mismo patrón "load more"
+      // (limit+1) que /admin/staging-rows.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
+        .select({
+          id: reports.id,
+          periodStart: reports.periodStart,
+          periodEnd: reports.periodEnd,
+          frequency: reports.frequency,
+          currentVersionId: reports.currentVersionId,
+          updatedAt: reports.updatedAt,
+        })
+        .from(reports)
+        .where(eq(reports.companyId, companyId))
+        .orderBy(desc(reports.updatedAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { reports: rows.slice(0, limit), hasMore: rows.length > limit };
+    },
+    { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
+  )
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports/:id');
+    if (limited) return limited;
+
     const [report] = await db
       .select()
       .from(reports)
@@ -42,11 +65,28 @@ export const reports_ = new Elysia({ prefix: '/reports' })
       .select()
       .from(reportVersions)
       .where(eq(reportVersions.id, report.currentVersionId));
+
+    // CU-868kh8rz8 criterio 2: la moneda base sale de la empresa. Antes el detalle de
+    // reporte la asumía 'GTQ' hardcodeada en el cliente, así que una empresa con
+    // baseCurrency='USD' veía sus montos etiquetados como quetzales. `metrics` no trae
+    // moneda propia (son amount_base ya convertidos), por eso viaja aparte aquí.
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
     return {
       id: report.id,
       periodStart: report.periodStart,
       periodEnd: report.periodEnd,
       frequency: report.frequency,
+      baseCurrency: company?.baseCurrency ?? 'GTQ',
+      // CU-868kh8uau: el id de la VERSIÓN actual, expuesto explícitamente. El
+      // deep-link a chat mandaba `reports.id` en el campo `reportVersionId` y, como
+      // `chats.report_version_id` no tiene FK, se persistía una referencia falsa en
+      // silencio. El cliente no puede derivar este id de ningún otro campo — si no se
+      // devuelve, no hay forma de mandar el correcto.
+      versionId: report.currentVersionId,
       version: version?.version,
       metrics: version?.metrics,
       narrative: version?.narrative,
@@ -55,6 +95,12 @@ export const reports_ = new Elysia({ prefix: '/reports' })
   })
   .get('/:id/view', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`. Cada llamada firma una URL de S3, así que aquí el
+    // límite además acota cuántas presigned URLs se pueden emitir por minuto.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports/:id/view');
+    if (limited) return limited;
+
     const [report] = await db
       .select({ currentVersionId: reports.currentVersionId })
       .from(reports)

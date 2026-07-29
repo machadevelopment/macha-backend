@@ -53,6 +53,9 @@ export const reportVersions = pgTable(
   (t) => ({
     versionUq: uniqueIndex('report_versions_uq').on(t.reportId, t.version),
     reportIdx: index('report_versions_company_report_idx').on(t.companyId, t.reportId),
+    // FK target for chats.(company_id, report_version_id) — CU-868kh8uau, migración 0011.
+    // Misma convención que products/stores en dimensions.ts.
+    companyIdUq: uniqueIndex('report_versions_company_id_uq').on(t.companyId, t.id),
   }),
 );
 

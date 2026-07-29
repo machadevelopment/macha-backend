@@ -15,7 +15,7 @@ import { creditsConfig } from '@/config/credits';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { sendAlertTriggeredEmail } from '@/lib/email';
 import { alertCatalog } from '@/config/alert-catalog';
-import { env } from '@/lib/env';
+import { alertUrl } from '@/lib/app-urls';
 
 const NO_REPEAT_DAYS = 7;
 
@@ -263,7 +263,7 @@ export async function evaluateAlerts(
         alertEventId: event!.id,
         ruleLabel: catalogEntry?.label ?? rule.ruleKey,
         recipientEmail: recipient.email,
-        viewUrl: `${env.appBaseUrl}/alerts/${event!.id}`,
+        viewUrl: alertUrl(event!.id),
       });
     }
   }

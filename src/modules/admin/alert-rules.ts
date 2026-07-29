@@ -7,11 +7,11 @@ import { alertRules } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 
 /** CU-868kfvafy criterio 2: umbrales de alerta por empresa (alert_rules ya es per-company, F0/F6). */
-export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:companyId/alert-rules' })
+export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:id/alert-rules' })
   .use(adminGuard)
   .get('/', async ({ tier, params, set }) => {
     assertStaffCapability(tier, 'view_companies', set);
-    return db.select().from(alertRules).where(eq(alertRules.companyId, params.companyId));
+    return db.select().from(alertRules).where(eq(alertRules.companyId, params.id));
   })
   .patch(
     '/:ruleKey',
@@ -20,9 +20,7 @@ export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:companyId
       const [before] = await db
         .select()
         .from(alertRules)
-        .where(
-          and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)),
-        );
+        .where(and(eq(alertRules.companyId, params.id), eq(alertRules.ruleKey, params.ruleKey)));
       if (!before) {
         set.status = 404;
         return { error: 'Alert rule not found' };
@@ -34,13 +32,11 @@ export const adminAlertRules = new Elysia({ prefix: '/admin/companies/:companyId
           threshold: body.threshold !== undefined ? String(body.threshold) : before.threshold,
           enabled: body.enabled ?? before.enabled,
         })
-        .where(
-          and(eq(alertRules.companyId, params.companyId), eq(alertRules.ruleKey, params.ruleKey)),
-        );
+        .where(and(eq(alertRules.companyId, params.id), eq(alertRules.ruleKey, params.ruleKey)));
 
       await logAdminAction({
         actorStaffId: staffId,
-        companyId: params.companyId,
+        companyId: params.id,
         action: 'alert_rule.update',
         targetTable: 'alert_rules',
         targetId: before.id,

@@ -6,8 +6,12 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
 import { uploadKey, uploadObject } from '@/lib/s3';
 import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
+import { countCsvRows } from '@/lib/csv-inspect';
+import { INTAKE_MESSAGES } from '@/lib/intake-messages';
+import { revertDocument } from '@/lib/promotion';
+import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
-import { checkQueueGate } from '@/lib/rate-limit';
+import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
 import { documents, companies } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
@@ -18,37 +22,7 @@ const ALLOWED_MIME_EXT: Record<string, string> = {
   'text/csv': 'csv',
 };
 
-// CU-868kfv972: rejection message must show the limit and the received value, in the
-// company's locale. Backend has no i18n lib (that's a frontend concern per CLAUDE.md);
-// this is intentionally a tiny, local dictionary scoped to intake errors only.
-const MESSAGES = {
-  es: {
-    unsupportedType: (mime: string) =>
-      `Tipo de archivo no soportado: ${mime}. Usa .xlsx, .xls o .csv.`,
-    fileTooLarge: (limitMb: number, receivedMb: number) =>
-      `El archivo supera el tamaño máximo permitido (${limitMb} MB). Recibido: ${receivedMb.toFixed(2)} MB.`,
-    tooManySheets: (limit: number, received: number) =>
-      `El libro supera el máximo de hojas permitidas (${limit}). Recibido: ${received}.`,
-    tooManyRows: (limit: number, received: number) =>
-      `El archivo supera el máximo de filas permitidas (${limit}). Recibido: ${received}.`,
-    insufficientCredits: (required: number, balance: number) =>
-      `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
-    queueFull: (max: number) => `Ya tienes ${max} archivos procesándose. Espera a que terminen.`,
-  },
-  en: {
-    unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
-    fileTooLarge: (limitMb: number, receivedMb: number) =>
-      `File exceeds the maximum allowed size (${limitMb} MB). Received: ${receivedMb.toFixed(2)} MB.`,
-    tooManySheets: (limit: number, received: number) =>
-      `Workbook exceeds the maximum allowed sheets (${limit}). Received: ${received}.`,
-    tooManyRows: (limit: number, received: number) =>
-      `File exceeds the maximum allowed rows (${limit}). Received: ${received}.`,
-    insufficientCredits: (required: number, balance: number) =>
-      `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
-    queueFull: (max: number) =>
-      `You already have ${max} files processing. Wait for them to finish.`,
-  },
-} as const;
+const MESSAGES = INTAKE_MESSAGES;
 
 export const ingestion = new Elysia({ prefix: '/documents' })
   .use(tenantDerive)
@@ -82,14 +56,30 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
       const buffer = new Uint8Array(await file.arrayBuffer());
 
-      // Cheap pre-check (no full parse) — only meaningful for .xlsx (OOXML zip); .xls
-      // (legacy binary) and .csv fall back to the size cap above only, see xlsx-inspect.ts.
-      // Also used below to estimate the credit hard-block (CU-868kfvaa6) — the `excel`
-      // rule is billed per batch, so we need an upfront batch-count guess.
+      // Pre-check barato, sin parseo completo (CU-868kfv972: "parsear el libro entero
+      // para contar ya es procesar"). También alimenta el bloqueo por créditos de
+      // abajo (CU-868kfvaa6): la regla `excel` se cobra por lote, así que hace falta
+      // estimar cuántos lotes serán ANTES de encolar.
+      //
+      // CU-868kh8man: cada formato se inspecciona con lo que permite su estructura.
+      // Antes solo se validaba `.xlsx` y el resto pasaba nada más por el cap de
+      // tamaño, así que un CSV de 9 MB con cientos de miles de filas entraba entero.
       let estimatedBatches = 1;
-      if (ext === 'xlsx') {
-        const { sheetRowCounts } = inspectXlsxWorkbook(buffer);
+      let sheetRowCounts: number[] | null = null;
 
+      if (ext === 'xlsx') {
+        sheetRowCounts = inspectXlsxWorkbook(buffer).sheetRowCounts;
+      } else if (ext === 'csv') {
+        // Un CSV es una sola "hoja"; contar registros respetando comillas es barato
+        // (un escaneo de bytes) y no materializa ninguna fila.
+        sheetRowCounts = [countCsvRows(buffer)];
+      }
+      // `.xls` (binario legacy OLE2) no tiene forma barata de inspección: sus caps se
+      // aplican en el worker, después del parseo que igual tiene que hacer y ANTES de
+      // cualquier llamada a Claude (ver queue/workers/excel-ingest.ts). No queda sin
+      // validar, solo se valida más tarde.
+
+      if (sheetRowCounts) {
         if (sheetRowCounts.length > intakeConfig.maxSheetsPerWorkbook) {
           set.status = 413;
           return {
@@ -128,6 +118,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       const gate = await checkQueueGate(companyId, 'excel');
       if (!gate.allowed) {
         set.status = 429;
+        // CU-868kh92fz: el otro mecanismo de 429. Se reporta con el mismo formato que
+        // el token-bucket para poder contar ambos juntos y distinguirlos por tag.
+        reportRateLimited({
+          mechanism: 'queue_gate',
+          companyId,
+          route: 'POST /documents',
+          detail: 'excel',
+        });
         return { error: msg.queueFull(rateLimitConfig.queueGate.maxJobs), reason: 'queue_full' };
       }
 
@@ -166,26 +164,95 @@ export const ingestion = new Elysia({ prefix: '/documents' })
   // CU-868kfva7z: list + single-document status polling for the upload UI's
   // pipeline (queued/processing/review/promoted/failed). No separate capability
   // gate — view_dashboard_reports covers all client roles same as upload_excel.
-  .get('/', async ({ companyId, role, set, db }) => {
-    assertClientCapability(role, 'view_dashboard_reports', set);
-    const rows = await db
-      .select({
-        id: documents.id,
-        originalFilename: documents.originalFilename,
-        status: documents.status,
-        rowCount: documents.rowCount,
-        flaggedCount: documents.flaggedCount,
-        errorReason: documents.errorReason,
-        createdAt: documents.createdAt,
-      })
+  .get(
+    '/',
+    async ({ companyId, role, query, set, db }) => {
+      assertClientCapability(role, 'view_dashboard_reports', set);
+
+      // CU-868kh8qhp: bucket `read`.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents');
+      if (limited) return limited;
+
+      // CU-868kh913c: antes era un `.limit(50)` fijo SIN parámetros de paginación —
+      // el cliente no podía llegar al documento 51 nunca, y nada se lo decía. Un
+      // subconjunto truncado en silencio es peor que uno lento. Mismo patrón
+      // "load more" (limit+1 para saber si hay más sin un COUNT aparte) que ya usan
+      // /admin/staging-rows y /admin/documents.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
+        .select({
+          id: documents.id,
+          originalFilename: documents.originalFilename,
+          status: documents.status,
+          rowCount: documents.rowCount,
+          flaggedCount: documents.flaggedCount,
+          errorReason: documents.errorReason,
+          createdAt: documents.createdAt,
+        })
+        .from(documents)
+        .where(eq(documents.companyId, companyId))
+        .orderBy(desc(documents.createdAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { documents: rows.slice(0, limit), hasMore: rows.length > limit };
+    },
+    { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
+  )
+  /**
+   * CU-868kh8nhy: expone la reversión, que existía como `revertDocument()` en
+   * lib/promotion.ts desde CU-868kfva9z pero no la alcanzaba ninguna ruta — el
+   * criterio "reversión soft-delete por document_id" estaba implementado y muerto.
+   *
+   * Atomicidad: `db` aquí ya viene dentro de una transacción por request
+   * (tenant.derive → reserveCompanyConnection abre `begin`), así que los
+   * soft-deletes de transactions/invoices/bills y el cambio de estado del documento
+   * se confirman o se revierten juntos.
+   */
+  .post('/:id/revert', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'revert_upload', set);
+
+    const [doc] = await db
+      .select({ id: documents.id, status: documents.status })
       .from(documents)
-      .where(eq(documents.companyId, companyId))
-      .orderBy(desc(documents.createdAt))
-      .limit(50);
-    return { documents: rows };
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+
+    // Idempotente: revertir dos veces no duplica efectos ni es un error para quien
+    // llama (p. ej. un doble clic o un reintento de red).
+    if (doc.status === 'reverted') {
+      return { id: doc.id, status: 'reverted' as const, alreadyReverted: true };
+    }
+
+    // Solo un documento promovido tiene filas de negocio que deshacer. Revertir uno
+    // en cola/proceso/fallido no tiene sentido y ocultaría un malentendido del
+    // usuario detrás de un 200.
+    if (doc.status !== 'promoted') {
+      set.status = 409;
+      return {
+        error: `Solo se puede revertir un documento promovido (estado actual: ${doc.status}).`,
+      };
+    }
+
+    await revertDocument(db, companyId, params.id);
+    // Las cifras del dashboard salen de metric_rollups; sin esto seguirían contando
+    // las transacciones recién soft-borradas hasta la próxima ingesta.
+    await refreshExistingRollups(db, companyId);
+
+    return { id: doc.id, status: 'reverted' as const, alreadyReverted: false };
   })
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`. Esta es LA ruta de polling de estado del pipeline
+    // de ingesta — el caso concreto que config/rate-limit.ts cita al justificar por
+    // qué el bucket `read` es generoso (120 rpm) en vez de compartir cupo con `ai`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents/:id');
+    if (limited) return limited;
+
     const [doc] = await db
       .select()
       .from(documents)

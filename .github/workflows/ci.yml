@@ -19,3 +19,45 @@ jobs:
       - run: bun run lint
       - run: bun run format:check
       - run: bun test
+      # CU-868khttg2: el gate incluye `build` en ambos repos. El bug que originó el
+      # ticket estaba en macha-frontend, pero la causa de fondo era el hueco del gate,
+      # no el bug: typecheck/lint/test no compilan el bundle de despliegue, y `main`
+      # despliega solo. Aquí es barato (~200ms) y cubre el mismo riesgo.
+      - run: bun run build
+
+  # CU-868kh8zbj criterio 5: los tests de integración corren EN CI o no protegen nada.
+  # Job aparte del unitario a propósito: necesita un Postgres y tarda más, y separarlo
+  # deja ver de un vistazo si lo que se rompió fue el aislamiento o el código normal.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      # El servicio nativo de Actions en vez de docker-compose.test.yml: mismo
+      # Postgres 16, sin gastar tiempo levantando compose dentro del runner. El
+      # compose existe para correr lo mismo en local.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: macha_owner
+          POSTGRES_PASSWORD: macha_test
+          POSTGRES_DB: macha_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U macha_owner -d macha_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # El runner aplica las migraciones como dueño, crea macha_app y las re-aplica
+      # para activar el GRANT/REVOKE de 0010 — el mismo orden que el despliegue real.
+      # tests/integration/preconditions.test.ts falla si el rol de la app resultara
+      # ser el dueño (criterio 6): sin esa precondición, RLS y append-only son no-ops
+      # y el resto de la suite daría verdes falsos.
+      - run: bun run test:integration
+        env:
+          TEST_DATABASE_URL: postgres://macha_owner:macha_test@localhost:55432/macha_test

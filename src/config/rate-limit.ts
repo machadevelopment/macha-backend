@@ -38,7 +38,19 @@ export const rateLimitConfig = {
 };
 
 // Respuestas de error acordadas (para T38/CU-868kfvaah):
-// - Token-bucket agotado: HTTP 429 con cabecera Retry-After.
+// - Token-bucket agotado: HTTP 429 con cabecera Retry-After. → IMPLEMENTADO.
 // - Gate de cola lleno: HTTP 429 con cuerpo que distingue el motivo (para que la UI
-//   muestre "Ya tienes 3 archivos procesándose, espera a que terminen").
-// - Ambos casos registran evento en Sentry con company_id.
+//   muestre "Ya tienes 3 archivos procesándose, espera a que terminen"). → IMPLEMENTADO.
+// - Ambos casos registran evento en Sentry con company_id. → IMPLEMENTADO en
+//   CU-868kh92fz vía `reportRateLimited()` (src/lib/rate-limit.ts). Se registra como
+//   evento de nivel WARNING, no como excepción: un rate limit que rechaza es el
+//   mecanismo funcionando, y ensuciar el feed de errores haría que se ignore.
+//   `company_id` va como tag (no en el mensaje) para que Sentry agrupe por mecanismo
+//   y permita desglosar qué empresas topan y con qué frecuencia.
+//
+// Consumo real de los buckets (CU-868kh8qhp):
+// - `ai`: chat (POST /chats/:id/messages) e insight (POST /insights).
+// - `read`: /metrics, /ar-ap, /documents (lista y polling de estado), /reports
+//   (lista, detalle y /view) y /credits/balance.
+// - `/admin/*` NO pasa por ningún bucket: es staff, no tenant, y estos se llavean por
+//   company_id. Limitar el backoffice sería otra decisión, con su propio criterio.

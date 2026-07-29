@@ -2,10 +2,10 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { chats, chatMessages, companies } from '@/db/schema';
+import { chats, chatMessages, companies, reportVersions } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
-import { checkTokenBucket } from '@/lib/rate-limit';
+import { enforceTokenBucket } from '@/lib/rate-limit';
 
 /**
  * CU-868kfvabw/868kfvabq: hilos nombrados por (company_id, user_id) + orquestación
@@ -28,6 +28,29 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       assertClientCapability(role, 'chat', set);
       // CU-868kfvacr criterio 3 (deep-link a chat): reportVersionId opcional origina
       // el hilo desde un reporte específico (chats.report_version_id, US-14).
+      //
+      // CU-868kh8uau: se valida contra `report_versions` de ESTA empresa antes de
+      // insertar. El frontend mandaba un `reports.id` en este campo y, sin FK, la
+      // referencia falsa se persistía en silencio. La FK compuesta que ahora existe
+      // (migración 0011) lo haría fallar de todas formas, pero con un error de
+      // constraint opaco: este chequeo devuelve un 400 que dice qué pasó, y de paso
+      // impide referenciar la versión de otra empresa.
+      if (body?.reportVersionId) {
+        const [version] = await db
+          .select({ id: reportVersions.id })
+          .from(reportVersions)
+          .where(
+            and(
+              eq(reportVersions.id, body.reportVersionId),
+              eq(reportVersions.companyId, companyId),
+            ),
+          );
+        if (!version) {
+          set.status = 400;
+          return { error: 'reportVersionId does not reference a report version of this company' };
+        }
+      }
+
       const [chat] = await db
         .insert(chats)
         .values({
@@ -78,12 +101,9 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       // de Calidad que checkTokenBucket() existía desde CU-868kfv97f pero ninguna ruta
       // lo consumía todavía (el comentario original de rate-limit.ts lo decía
       // explícito). 429 + Retry-After es la respuesta acordada con Jose.
-      const gate = await checkTokenBucket('ai', companyId);
-      if (!gate.allowed) {
-        set.status = 429;
-        set.headers['Retry-After'] = String(gate.retryAfterSeconds);
-        return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
-      }
+      // CU-868kh92fz: el rechazo ahora se reporta a Sentry dentro de enforceTokenBucket.
+      const limited = await enforceTokenBucket('ai', companyId, set, 'POST /chats/:id/messages');
+      if (limited) return limited;
 
       const [chat] = await db
         .select({ id: chats.id })

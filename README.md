@@ -105,14 +105,38 @@ src/
     migrate.ts      # applies raw SQL migrations in order
   guards/           # tenant.derive (auth + company_id), admin.guard (staff)
   lib/              # env, auth(JWKS), s3, anthropic(ZDR), resend
-  queue/            # pg-boss + queue names
-  modules/          # feature modules (routes + services); health/ scaffolded
+  queue/            # pg-boss + workers (excel-ingest, report-tick/generate,
+                    #   alert-evaluate, email-send, db-backup)
+  modules/          # feature modules (routes + services): ingestion, metrics,
+                    #   insights, chats, reports, me, health, billing/*, admin/*
 scripts/
   provision_tenant.sql  # per-company PARTITION OF (run at onboarding)
   seed.ts
 ```
 
-## F1 status
-Foundations only: schema, migrations, tokens-agnostic scaffolding, guards as
-placeholders (real WorkOS/tenant resolution + module logic land in F2+).
-Not yet compiled against the npm/Bun registry in this environment.
+## Estado (auditoría 2026-07-28)
+
+F1–F7 + M8 implementados y mergeados a `main` (staging). `typecheck`/`lint`/`test`
+verdes (104 tests). Guards, RLS, particionado, ingesta Excel, dashboard, chat,
+reportes/alertas, panel admin, billing Recurrente y backups nocturnos están en el
+código, no son placeholders.
+
+**Deuda conocida y verificada** (cada una con ticket en ClickUp, lista MACHA FINANCE
+2.0) — se documenta aquí porque no se infiere leyendo el código feliz:
+
+- Los emails de reporte y de alerta construyen URLs que **no resuelven** a una ruta
+  real del frontend (`/reports/{versionId}` cuando la ruta espera un `reports.id`;
+  `/alerts/{id}` no existe como ruta).
+- Los caps de filas/hojas del intake **solo se aplican a `.xlsx`** — `.csv`/`.xls`
+  pasan solo por el cap de tamaño (`lib/xlsx-inspect.ts` solo entiende OOXML).
+- `revertDocument()` (`lib/promotion.ts`) no tiene endpoint que lo exponga: la
+  reversión existe como función pero es inalcanzable desde la API.
+- El token-bucket `read` está configurado pero **ninguna ruta lo consume** (solo `ai`,
+  en chat/insight). La API de lectura general no tiene rate limiting.
+- Capacidades definidas en `lib/permissions.ts` sin endpoint: `manage_members`,
+  `change_roles`, `configure_alerts`, `delete_company`, `revert_upload` (cliente) y
+  `topup_credits` (staff).
+- `/metrics` hace N+1 (meses × 4 tipos en serie) y `/ar-ap` carga todas las facturas
+  abiertas a memoria para agrupar en JS.
+- La definición de "margen" (`revenue - cogs`) es un placeholder sin confirmar por
+  negocio — ver `modules/metrics/index.ts`.

@@ -1,0 +1,27 @@
+# Postgres efímero para los tests de integración (CU-868kh8zbj).
+#
+# Por qué docker-compose y no testcontainers: `testcontainers` npm arrastra
+# dependencias de Node (dockerode y su cadena) y la regla no negociable del proyecto
+# es no agregar libs Node-only sin verificar Bun. Un compose + el servicio `postgres`
+# de GitHub Actions cubre el mismo caso sin sumar ni una dependencia al package.json.
+#
+# Puerto 55432 a propósito: no choca con un Postgres local en 5432, así que correr los
+# tests nunca apunta por accidente a la base de desarrollo de nadie.
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: macha_owner
+      POSTGRES_PASSWORD: macha_test
+      POSTGRES_DB: macha_test
+    ports:
+      - '55432:5432'
+    # Sin volumen: la base debe nacer vacía en cada arranque. Un test de aislamiento
+    # que hereda datos de una corrida anterior no prueba nada.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U macha_owner -d macha_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
