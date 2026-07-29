@@ -18,7 +18,10 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun run format:check
-      - run: bun test
+      # `bun run test`, NO `bun test`: el CLI crudo ignora el script de package.json y
+      # barre TODO el repo, incluido tests/integration/, que necesita un Postgres que
+      # este job no tiene. El script acota a `bun test src`. (CU-868kh8zbj)
+      - run: bun run test
       # CU-868khttg2: el gate incluye `build` en ambos repos. El bug que originó el
       # ticket estaba en macha-frontend, pero la causa de fondo era el hueco del gate,
       # no el bug: typecheck/lint/test no compilan el bundle de despliegue, y `main`

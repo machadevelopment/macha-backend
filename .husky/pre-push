@@ -1,1 +1,4 @@
-bun run typecheck && bun run lint && bun test
+# `bun run test`, NO `bun test`: el CLI crudo ignora el script de package.json y barre
+# todo el repo, incluido tests/integration/, que exige un Postgres levantado
+# (`bun run test:db:up`). El script acota a `bun test src`. (CU-868kh8zbj)
+bun run typecheck && bun run lint && bun run test
