@@ -164,29 +164,41 @@ export const ingestion = new Elysia({ prefix: '/documents' })
   // CU-868kfva7z: list + single-document status polling for the upload UI's
   // pipeline (queued/processing/review/promoted/failed). No separate capability
   // gate — view_dashboard_reports covers all client roles same as upload_excel.
-  .get('/', async ({ companyId, role, set, db }) => {
-    assertClientCapability(role, 'view_dashboard_reports', set);
+  .get(
+    '/',
+    async ({ companyId, role, query, set, db }) => {
+      assertClientCapability(role, 'view_dashboard_reports', set);
 
-    // CU-868kh8qhp: bucket `read`.
-    const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents');
-    if (limited) return limited;
+      // CU-868kh8qhp: bucket `read`.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents');
+      if (limited) return limited;
 
-    const rows = await db
-      .select({
-        id: documents.id,
-        originalFilename: documents.originalFilename,
-        status: documents.status,
-        rowCount: documents.rowCount,
-        flaggedCount: documents.flaggedCount,
-        errorReason: documents.errorReason,
-        createdAt: documents.createdAt,
-      })
-      .from(documents)
-      .where(eq(documents.companyId, companyId))
-      .orderBy(desc(documents.createdAt))
-      .limit(50);
-    return { documents: rows };
-  })
+      // CU-868kh913c: antes era un `.limit(50)` fijo SIN parámetros de paginación —
+      // el cliente no podía llegar al documento 51 nunca, y nada se lo decía. Un
+      // subconjunto truncado en silencio es peor que uno lento. Mismo patrón
+      // "load more" (limit+1 para saber si hay más sin un COUNT aparte) que ya usan
+      // /admin/staging-rows y /admin/documents.
+      const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
+      const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      const rows = await db
+        .select({
+          id: documents.id,
+          originalFilename: documents.originalFilename,
+          status: documents.status,
+          rowCount: documents.rowCount,
+          flaggedCount: documents.flaggedCount,
+          errorReason: documents.errorReason,
+          createdAt: documents.createdAt,
+        })
+        .from(documents)
+        .where(eq(documents.companyId, companyId))
+        .orderBy(desc(documents.createdAt))
+        .limit(limit + 1)
+        .offset(offset);
+      return { documents: rows.slice(0, limit), hasMore: rows.length > limit };
+    },
+    { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
+  )
   /**
    * CU-868kh8nhy: expone la reversión, que existía como `revertDocument()` en
    * lib/promotion.ts desde CU-868kfva9z pero no la alcanzaba ninguna ruta — el
