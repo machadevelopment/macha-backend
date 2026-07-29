@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
+import { enforceTokenBucket } from '@/lib/rate-limit';
 import { companies, reports, reportVersions } from '@/db/schema';
 import { presignGet, uploadObject, reportRenderKey } from '@/lib/s3';
 
@@ -15,6 +16,11 @@ export const reports_ = new Elysia({ prefix: '/reports' })
   .use(tenantDerive)
   .get('/', async ({ companyId, role, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports');
+    if (limited) return limited;
+
     return db
       .select({
         id: reports.id,
@@ -30,6 +36,11 @@ export const reports_ = new Elysia({ prefix: '/reports' })
   })
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports/:id');
+    if (limited) return limited;
+
     const [report] = await db
       .select()
       .from(reports)
@@ -72,6 +83,12 @@ export const reports_ = new Elysia({ prefix: '/reports' })
   })
   .get('/:id/view', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
+
+    // CU-868kh8qhp: bucket `read`. Cada llamada firma una URL de S3, así que aquí el
+    // límite además acota cuántas presigned URLs se pueden emitir por minuto.
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports/:id/view');
+    if (limited) return limited;
+
     const [report] = await db
       .select({ currentVersionId: reports.currentVersionId })
       .from(reports)
