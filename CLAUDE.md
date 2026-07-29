@@ -22,7 +22,10 @@ bun run dev            # Elysia dev server (watch)
 bun run build          # production build
 bun run typecheck      # tsc --noEmit
 bun run lint           # eslint
-bun test               # unit/integration (bun test)
+bun test               # tests unitarios (solo src/, no tocan Postgres)
+bun run test:db:up     # Postgres efímero para integración (docker compose)
+bun run test:integration  # migraciones + rol macha_app + tests de RLS/append-only/guards
+bun run test:db:down   # baja el Postgres de test y borra su volumen
 bun run db:generate    # drizzle-kit generate (schema migrations)
 bun run db:migrate     # apply migrations
 bun run db:seed        # data/seed scripts (manual, separate from schema migrations)
