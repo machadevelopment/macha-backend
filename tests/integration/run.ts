@@ -18,9 +18,12 @@
 import { setupTestDatabase, testOwnerUrl, testAppUrl } from './setup';
 
 async function applyMigrations(): Promise<void> {
+  // stdout heredado, NO 'pipe': un pipe que nadie drena puede bloquear al hijo cuando
+  // se llena, y `await proc.exited` no resuelve nunca. Además queremos la salida de
+  // las migraciones en el log de CI para poder diagnosticar sin adivinar.
   const proc = Bun.spawn(['bun', 'run', 'src/db/migrate.ts'], {
     env: { ...process.env, DATABASE_URL: testOwnerUrl },
-    stdout: 'pipe',
+    stdout: 'inherit',
     stderr: 'inherit',
   });
   const code = await proc.exited;

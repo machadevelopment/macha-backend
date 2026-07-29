@@ -9,6 +9,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # Sin esto, un paso que se cuelga corre hasta el timeout por defecto del runner
+    # (6 horas). Pasó de verdad con el job de integración (CU-868kh8zbj).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -33,6 +36,7 @@ jobs:
   # deja ver de un vistazo si lo que se rompió fue el aislamiento o el código normal.
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       # El servicio nativo de Actions en vez de docker-compose.test.yml: mismo
       # Postgres 16, sin gastar tiempo levantando compose dentro del runner. El
