@@ -1,4 +1,5 @@
 import { Elysia, t } from 'elysia';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
@@ -139,25 +140,30 @@ export const reports_ = new Elysia({ prefix: '/reports' })
         .from(reportVersions)
         .where(eq(reportVersions.id, report.currentVersionId));
 
+      // CU-868kjc5pj: mismo patrón que lib/reports.ts — id generado aquí para poder
+      // construir la clave de S3 y subir el render ANTES de insertar, y que la fila del
+      // ledger nazca completa. El UPDATE que había aquí es `permission denied` con el
+      // rol macha_app (REVOKE UPDATE,DELETE de la migración 0010) y además contradecía
+      // el propio comentario de cabecera de este módulo sobre append-only.
+      const versionId = randomUUID();
+      const renderHtml = `<!doctype html><html><head><meta charset="utf-8"></head><body>${body.narrative.replace(/\n/g, '<br/>')}</body></html>`;
+      const renderKey = reportRenderKey(companyId, versionId);
+      await uploadObject(renderKey, Buffer.from(renderHtml, 'utf-8'), 'text/html');
+
       const [newVersion] = await db
         .insert(reportVersions)
         .values({
+          id: versionId,
           companyId,
           reportId: report.id,
           version: current!.version + 1,
           metrics: current!.metrics,
           narrative: body.narrative,
           editedBy: userId,
+          s3RenderKey: renderKey,
         })
         .returning();
 
-      const renderHtml = `<!doctype html><html><head><meta charset="utf-8"></head><body>${body.narrative.replace(/\n/g, '<br/>')}</body></html>`;
-      const renderKey = reportRenderKey(companyId, newVersion!.id);
-      await uploadObject(renderKey, Buffer.from(renderHtml, 'utf-8'), 'text/html');
-      await db
-        .update(reportVersions)
-        .set({ s3RenderKey: renderKey })
-        .where(eq(reportVersions.id, newVersion!.id));
       await db
         .update(reports)
         .set({ currentVersionId: newVersion!.id })
