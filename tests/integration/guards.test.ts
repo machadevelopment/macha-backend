@@ -39,7 +39,6 @@ mock.module('@/lib/auth', () => ({
 
 const { tenantDerive } = await import('@/guards/tenant.derive');
 const { adminGuard } = await import('@/guards/admin.guard');
-const { sql } = await import('@/db/client');
 
 const app = new Elysia()
   .use(tenantDerive)
@@ -97,7 +96,6 @@ describe('guards contra Postgres real (CU-868kh8zbj)', () => {
 
   afterAll(async () => {
     await owner?.end();
-    await sql.end();
   });
 
   describe('tenant.derive', () => {

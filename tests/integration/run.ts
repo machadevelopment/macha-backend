@@ -61,9 +61,16 @@ console.log('· re-aplicando migraciones para activar el GRANT/REVOKE de 0010');
 await applyMigrations();
 
 console.log('· corriendo los tests de integración\n');
-const tests = Bun.spawn(['bun', 'test', 'tests/integration'], {
-  env: { ...process.env, DATABASE_URL: testOwnerUrl, APP_DATABASE_URL: testAppUrl },
-  stdout: 'inherit',
-  stderr: 'inherit',
-});
+// `--preload teardown.ts`: cierra el pool compartido de src/db/client.ts UNA vez al
+// final. Antes cada archivo lo cerraba en su propio afterAll y, como bun test corre
+// todo en el mismo proceso, el primero en terminar dejaba sin conexión a los demás
+// (CU-868kjc4wa).
+const tests = Bun.spawn(
+  ['bun', 'test', '--preload', './tests/integration/teardown.ts', 'tests/integration'],
+  {
+    env: { ...process.env, DATABASE_URL: testOwnerUrl, APP_DATABASE_URL: testAppUrl },
+    stdout: 'inherit',
+    stderr: 'inherit',
+  },
+);
 process.exit(await tests.exited);
