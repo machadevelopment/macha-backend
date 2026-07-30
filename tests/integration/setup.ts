@@ -62,6 +62,27 @@ export function ownerConnection() {
 }
 
 /**
+ * Captura el error de una query que DEBE fallar y devuelve su `code` de Postgres.
+ *
+ * No se usa `await expect(promise).rejects.toMatchObject(...)`: con los objetos de
+ * error de la librería `postgres` esa combinación **cuelga indefinidamente** en Bun
+ * 1.3.14 — el proceso de `bun test` se queda colgado sin emitir un solo resultado.
+ * Reproducido en un archivo mínimo: con `.rejects` cuelga, con try/catch pasa en
+ * 106 ms. Era la causa de que el job de integración de CI corriera 30+ minutos sin
+ * salida.
+ *
+ * Devolver el código en vez de aseverar aquí deja que cada test diga qué espera.
+ */
+export async function rejectionCode(promise: Promise<unknown>): Promise<string | undefined> {
+  try {
+    await promise;
+    return undefined;
+  } catch (err) {
+    return (err as { code?: string }).code;
+  }
+}
+
+/**
  * Los 6 ledgers append-only de CLAUDE.md. Se listan aquí y no en cada test para que
  * agregar un ledger nuevo a la regla obligue a tocar un solo sitio.
  */

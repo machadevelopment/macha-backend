@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
-import { setupTestDatabase, appConnection, APPEND_ONLY_LEDGERS } from './setup';
+import { setupTestDatabase, appConnection, rejectionCode, APPEND_ONLY_LEDGERS } from './setup';
 
 /**
  * CU-868kh8zbj criterio 3: un UPDATE o DELETE sobre cada uno de los 6 ledgers
@@ -34,16 +34,16 @@ describe('ledgers append-only (CU-868kh8zbj)', () => {
 
   for (const ledger of APPEND_ONLY_LEDGERS) {
     test(`UPDATE sobre ${ledger} es rechazado`, async () => {
-      const attempt = app.unsafe(`update ${ledger} set id = id where false`);
-      // 42501 = insufficient_privilege. Se comprueba el código y no solo que falle:
-      // un error de sintaxis o de columna inexistente también "fallaría" y daría un
+      // 42501 = insufficient_privilege. Se comprueba el CÓDIGO y no solo que falle:
+      // un error de sintaxis o de tabla inexistente también "fallaría" y daría un
       // verde falso.
-      await expect(attempt).rejects.toMatchObject({ code: '42501' });
+      const code = await rejectionCode(app.unsafe(`update ${ledger} set id = id where false`));
+      expect(code).toBe('42501');
     });
 
     test(`DELETE sobre ${ledger} es rechazado`, async () => {
-      const attempt = app.unsafe(`delete from ${ledger} where false`);
-      await expect(attempt).rejects.toMatchObject({ code: '42501' });
+      const code = await rejectionCode(app.unsafe(`delete from ${ledger} where false`));
+      expect(code).toBe('42501');
     });
   }
 
