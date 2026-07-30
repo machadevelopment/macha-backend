@@ -43,11 +43,16 @@ export async function provisionTenantPartitions(companyId: string): Promise<stri
     // queries go through the parent table name and are unaffected either way.
     await ownerSql.unsafe(`ALTER TABLE "${partitionName}" ENABLE ROW LEVEL SECURITY`);
     await ownerSql.unsafe(`ALTER TABLE "${partitionName}" FORCE ROW LEVEL SECURITY`);
+    // `nullif(..., '')` no es cosmético (CU-868kj3utc, migración 0012): tras el primer
+    // `SET LOCAL app.company_id` de una conexión, el GUC no vuelve a "no seteado" al
+    // cerrar la transacción — vuelve a la CADENA VACÍA, y `''::uuid` no da NULL, lanza
+    // `invalid input syntax for type uuid: ""`. Sin el nullif, la segunda request que
+    // reutilizara esa conexión del pool se caía con un 500.
     await ownerSql.unsafe(`
       DO $do$
       BEGIN
         EXECUTE format(
-          'CREATE POLICY %I ON %I USING (company_id = current_setting(''app.company_id'', true)::uuid)',
+          'CREATE POLICY %I ON %I USING (company_id = nullif(current_setting(''app.company_id'', true), '''')::uuid)',
           '${partitionName}_tenant_isolation', '${partitionName}'
         );
       EXCEPTION WHEN duplicate_object THEN NULL;
