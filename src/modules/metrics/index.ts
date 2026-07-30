@@ -4,6 +4,7 @@ import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { getOrComputeMonthlyAmounts } from '@/lib/rollups';
+import { AGING_BUCKET_SQL, emptyAgingBuckets, type AgingBucket } from '@/lib/aging';
 import { companies, invoices, bills } from '@/db/schema';
 
 function monthStart(monthsAgo: number): string {
@@ -74,32 +75,6 @@ export const metrics = new Elysia().use(tenantDerive).get(
   },
 );
 
-const AGING_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'] as const;
-type AgingBucket = (typeof AGING_BUCKETS)[number];
-
-/**
- * CU-868kh8w6b: la clasificación por antigüedad se movió a SQL. Traduce literalmente
- * el `bucketFor()` que antes corría en JavaScript sobre TODAS las filas abiertas:
- * `due_date` nula o futura → `current`; si no, días de atraso en tramos de 30.
- *
- * `current_date - due_date` en Postgres da un entero de días entre dos `date`, que es
- * exactamente el `Math.floor((today - dueDate) / 1 día)` anterior — mismo corte en los
- * bordes (30, 60, 90), sin depender de zonas horarias ni del reloj del proceso.
- */
-const AGING_BUCKET_SQL = rawSql<AgingBucket>`
-  case
-    when due_date is null or due_date >= current_date then 'current'
-    when current_date - due_date <= 30 then '1_30'
-    when current_date - due_date <= 60 then '31_60'
-    when current_date - due_date <= 90 then '61_90'
-    else '90_plus'
-  end
-`;
-
-function emptyBuckets(): Record<AgingBucket, number> {
-  return Object.fromEntries(AGING_BUCKETS.map((b) => [b, 0])) as Record<AgingBucket, number>;
-}
-
 /**
  * AR/AP aging (criterio de US-05/F4 dashboard, MVP: totales por antigüedad). No pasa
  * por metric_rollups — a diferencia de /metrics, esto es estado vivo (invoices/bills
@@ -149,7 +124,7 @@ export const arAp = new Elysia().use(tenantDerive).get(
     ]);
 
     function toBuckets(rows: { bucket: AgingBucket; total: string }[]) {
-      const totals = emptyBuckets();
+      const totals = emptyAgingBuckets();
       for (const row of rows) totals[row.bucket] = Number(row.total);
       return totals;
     }
