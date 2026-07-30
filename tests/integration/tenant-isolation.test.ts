@@ -132,6 +132,22 @@ describe('aislamiento por RLS entre empresas (CU-868kh8zbj)', () => {
     expect(code).toBe('42501');
   });
 
+  test('tras cerrar la transacción, la MISMA conexión vuelve a no ver nada (CU-868kj3utc)', async () => {
+    // El bug más sutil del ticket, y el que rompía la segunda request de cada conexión
+    // del pool: `current_setting(x, true)` devuelve NULL solo mientras el GUC nunca se
+    // ha seteado. En cuanto una transacción hace SET LOCAL y termina, el parámetro
+    // vuelve a su valor de sesión, que para un GUC personalizado es la CADENA VACÍA —
+    // y `''::uuid` no da NULL, lanza `invalid input syntax for type uuid: ""`.
+    //
+    // Este test corre sobre `app`, la misma conexión (max: 1) que los tests de arriba
+    // ya usaron con SET LOCAL, así que el GUC YA está revertido a ''. Con la política
+    // vieja esto no devolvía [], reventaba.
+    await asCompany(companyA, (tx) => tx`select id from documents`);
+
+    const rows = await app`select id from documents`;
+    expect(rows).toEqual([]);
+  });
+
   test('el conteo total con el rol dueño confirma que las dos filas existen', async () => {
     // Cierra el círculo: los tests de arriba podrían pasar simplemente porque la
     // tabla está vacía. Esto prueba que los datos SÍ están y que lo que los oculta
