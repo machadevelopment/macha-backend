@@ -1,6 +1,6 @@
 # flux.md — Macha Finance
 
-Contrato de trabajo entre **Kenneth Ruiz** (dueño/desarrollador) ⇄ **agente ejecutor**, con **Semi** (CTO, U3 TECH) como referente de arquitectura y **Jose Bustamante** como aprobador/PM en los frenos. Define quién hace qué, en qué orden, con qué estados de ClickUp, con qué modelo de ramas y dónde están los puntos de aprobación. **Fecha de acuerdo original: 2026-07-24. Actualizado: 2026-07-24 (flujo `dev`/`main`, Semi deja la revisión por PR).** Si el flujo cambia, actualiza este archivo antes de operar bajo las nuevas reglas.
+Contrato de trabajo entre **Kenneth Ruiz** (dueño/desarrollador) ⇄ **agente ejecutor**, con **Semi** (CTO, U3 TECH) como referente de arquitectura y **Jose Bustamante** como aprobador/PM en los frenos. Define quién hace qué, en qué orden, con qué estados de ClickUp, con qué modelo de ramas y dónde están los puntos de aprobación. **Fecha de acuerdo original: 2026-07-24. Actualizado: 2026-07-30 (trabajo autónomo sobre el backlog: un ticket ya priorizado no necesita aprobación de plan aparte). Actualización previa: 2026-07-24 (flujo `dev`/`main`, Semi deja la revisión por PR).** Si el flujo cambia, actualiza este archivo antes de operar bajo las nuevas reglas.
 
 Este archivo vive en **3 lugares** (raíz del workspace, `macha-backend`, `macha-frontend`) y debe mantenerse idéntico en los tres; si el flujo cambia, actualiza las tres copias en el mismo cambio.
 
@@ -13,7 +13,7 @@ Gana sobre todo lo demás. Ante conflicto con cualquier otra sección, obedece e
 - Puedes mergear tú mismo `feat/*` → `dev` en cuanto `typecheck`/`lint`/`test` estén verdes. **Ya no hay aprobación humana por ticket individual** (Semi dejó de revisar PRs).
 - **NUNCA mergees a `main`.** Al cerrar una épica abres el PR `dev → main`, pero **no lo mergeas tú**: lo revisa la IA revisora de épica (o Semi si el dueño lo pide) y lo mergea el dueño (o a quien él delegue).
 - **NO** promuevas a producción. La promoción a prod es un paso manual y explícito del dueño.
-- **NO** ejecutes trabajo sin plan aprobado (FRENO 1 sigue vigente para decidir **qué** implementar; lo que cambió es que el merge a `dev` ya no necesita aprobación aparte).
+- **Trabajo autónomo sobre el backlog (desde 2026-07-30).** Un ticket que ya está en el backlog de ClickUp **ya tiene su alcance aprobado**: el ticket ES el plan. Puedes tomarlo, implementarlo, commitear, correr el gate y mergear a `dev` **sin pedir aprobación de plan**. FRENO 1 queda reservado para lo que el backlog no cubre: crear alcance nuevo, cambiar una decisión ya tomada, tocar arquitectura o migraciones de datos, o cuando el ticket resulte estar mal planteado — ahí sí te detienes y preguntas. Motivo del cambio: el dueño necesita poder dejar trabajo corriendo sin estar presente autorizando cada paso.
 - **NO** muevas tareas a `completed` ni `complete`. Esos estados son del dueño tras aceptación.
 - **NO** agregues dependencias/SDK sin verificar compatibilidad con Bun.
 - **NO** afirmes que "pasan los tests" si no existe test que cubra lo tocado.
@@ -42,7 +42,7 @@ Recuerda: las migraciones de schema **auto-aplican en deploy**. Un merge a `main
 | Actor | Qué hace | Qué NO hace |
 |---|---|---|
 | **Kenneth Ruiz** (dueño/dev · ClickUp `87312126`) | Da órdenes, aprueba planes **[FRENO 1]**, revisa (o delega en la IA revisora) y mergea el PR de cierre de épica `dev→main`, ejecuta la promoción a producción **[FRENO 3]**, acepta tareas y mueve `completed`/`complete`. | No delega la promoción a prod ni la aceptación final. |
-| **Agente ejecutor** | Lee contexto, planifica, implementa, commitea, corre typecheck/lint/test, abre y **mergea él mismo** los PR `feat/*→dev` sin esperar aprobación, abre (sin mergear) el PR de cierre de épica `dev→main`, marca `blocked` con causa. | No mergea `dev→main` ni toca `main` directamente. No promueve a prod. No ejecuta sin plan aprobado. No toca `completed`/`complete`. No afirma tests inexistentes. |
+| **Agente ejecutor** | Lee contexto, planifica, implementa, commitea, corre typecheck/lint/test, abre y **mergea él mismo** los PR `feat/*→dev` sin esperar aprobación, abre (sin mergear) el PR de cierre de épica `dev→main`, marca `blocked` con causa. | No mergea `dev→main` ni toca `main` directamente. No promueve a prod. No toca `completed`/`complete`. No afirma tests inexistentes. No inventa alcance fuera del backlog (para eso sigue FRENO 1). |
 | **Semi** (CTO/U3 TECH · ClickUp `75558139`) | Referente de arquitectura y de decisiones de librerías/proveedores cuando se le consulta. **Desde 2026-07-24 ya no revisa ni mergea PRs de este flujo** (ni por ticket ni, salvo que el dueño lo pida puntualmente, de épica). | Ya no es el aprobador rutinario de ningún merge en este flujo. |
 | **IA revisora (épica)** | Revisa el PR `dev→main` al cerrar una épica cuando el dueño la invoque (p. ej. `/code-review ultra`). Sustituye el rol de revisor por-ticket que antes tenía Semi, aplicado ahora a nivel de épica. | No mergea por su cuenta; el merge final a `main` lo decide el dueño. |
 | **Jose Bustamante** (PM/aprobador · ClickUp `81399431`) | Aprueba alcance/prioridad en los frenos, coordina insumos del cliente. | No revisa código ni mergea. |
@@ -315,6 +315,7 @@ Si hay que crear una tarea nueva:
 - **Valida en backend con TypeBox de Elysia** (no zod por defecto). La auth UI es **WorkOS AuthKit** (no login/password propio).
 - **En frontend:** los tokens de diseño son la fuente de verdad (light+dark) — no hardcodees hex; **Tremor Raw** para charts/KPIs y **shadcn/ui** para el resto (no los mezcles); regla mono (**JetBrains Mono** para números/IDs, **Inter** para el resto); formatters centralizados locale-aware; **nada de `localStorage`/`sessionStorage`** en prototipos.
 - **Crea siempre `feat/*` desde `dev`, nunca desde `main`.** Si `dev` no existe todavía en un repo, créala desde `main` antes de arrancar cualquier rama de tarea.
+- **Si `git push` se cuelga, es credenciales, no el hook** (CU-868khvgpy, confirmado 2026-07-30 con `GIT_TRACE=1`). El `~/.gitconfig` de la máquina fija `credential.username = kenethruiz20`; `gh auth git-credential` solo tiene credencial para `machadevelopment`, no responde para ese usuario, y git cae al askpass GUI de VS Code, que espera para siempre. Arreglo por clon: `git config --local credential.username machadevelopment` (o quitar `credential.username` del `~/.gitconfig` global). **No** lo diagnostiques otra vez como problema del hook: `--no-verify` también se colgaba.
 
 ---
 
