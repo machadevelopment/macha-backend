@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { db } from '@/db/client';
@@ -33,9 +33,19 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       // aparte — patrón "load more", no paginación por cursor completa.
       const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
       const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+      // CU-868khvzqn: se agrega `companyName` con el mismo join que /admin/documents
+      // (modules/admin/monitoring.ts). Sin él, el panel de revisión muestra el payload
+      // y los botones Aprobar/Rechazar sin decir de qué tenant es la fila: se estaban
+      // promoviendo datos a la contabilidad de un cliente sin ver cuál. El UUID no
+      // sirve — un operador no lo reconoce.
+      //
+      // `getTableColumns` mantiene el resto de la respuesta exactamente igual que el
+      // `select()` sin argumentos que había antes: solo suma la columna, no cambia la
+      // forma existente.
       const rows = await db
-        .select()
+        .select({ ...getTableColumns(stagingRows), companyName: companies.name })
         .from(stagingRows)
+        .innerJoin(companies, eq(companies.id, stagingRows.companyId))
         .where(and(...conditions))
         .orderBy(asc(stagingRows.createdAt))
         .limit(limit + 1)
