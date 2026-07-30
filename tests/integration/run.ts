@@ -15,17 +15,41 @@
  * Es un script y no un `beforeAll` global porque `bun test` no garantiza qué archivo
  * corre primero, y los tres archivos necesitan la base ya montada.
  */
+import postgres from 'postgres';
 import { setupTestDatabase, testOwnerUrl, testAppUrl } from './setup';
 
+/**
+ * Base limpia en cada corrida. El compose no monta volumen, pero eso solo garantiza
+ * el borrado cuando el contenedor se recrea — al correr dos veces seguidas contra el
+ * mismo contenedor (o contra un Postgres local), los seeds de `beforeAll` chocaban
+ * con las constraints UNIQUE de la corrida anterior y los tests fallaban en el hook,
+ * no en la aserción. Un test de aislamiento que arrastra datos previos no prueba lo
+ * que dice probar.
+ */
+async function resetSchema(): Promise<void> {
+  const owner = postgres(testOwnerUrl, { max: 1, onnotice: () => {}, connect_timeout: 10 });
+  try {
+    await owner.unsafe('drop schema if exists public cascade; create schema public;');
+  } finally {
+    await owner.end();
+  }
+}
+
 async function applyMigrations(): Promise<void> {
+  // stdout heredado, NO 'pipe': un pipe que nadie drena puede bloquear al hijo cuando
+  // se llena, y `await proc.exited` no resuelve nunca. Además queremos la salida de
+  // las migraciones en el log de CI para poder diagnosticar sin adivinar.
   const proc = Bun.spawn(['bun', 'run', 'src/db/migrate.ts'], {
     env: { ...process.env, DATABASE_URL: testOwnerUrl },
-    stdout: 'pipe',
+    stdout: 'inherit',
     stderr: 'inherit',
   });
   const code = await proc.exited;
   if (code !== 0) throw new Error(`las migraciones fallaron (exit ${code})`);
 }
+
+console.log('· reseteando el esquema public (base limpia en cada corrida)');
+await resetSchema();
 
 console.log('· aplicando migraciones con el rol dueño');
 await applyMigrations();

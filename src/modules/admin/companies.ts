@@ -108,6 +108,39 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
     },
     { body: t.Object({ status: t.Union([t.Literal('active'), t.Literal('suspended')]) }) },
   )
+  /**
+   * CU-868khvzqn criterio 2: `/admin/companies/<id>` en el frontend titulaba
+   * "EMPRESA / Detalle" y no había forma de saber en cuál estabas — desde esa pantalla
+   * se cambian roles de usuarios y umbrales de alerta. No existía endpoint de detalle:
+   * el listado `GET /admin/companies` está paginado, así que el cliente no puede
+   * resolver un id arbitrario sin barrer páginas.
+   *
+   * Devuelve exactamente los campos que la pantalla necesita para dar contexto (nombre,
+   * industria, moneda base, estado) más `locale`, que es lo que decide el idioma de los
+   * emails de esa empresa. `workosOrgId` no se expone: es un identificador del IdP y
+   * ninguna pantalla lo usa.
+   */
+  .get('/:id', async ({ tier, params, set }) => {
+    assertStaffCapability(tier, 'view_companies', set);
+    const [company] = await db
+      .select({
+        id: companies.id,
+        name: companies.name,
+        industry: companies.industry,
+        baseCurrency: companies.baseCurrency,
+        status: companies.status,
+        locale: companies.locale,
+        createdAt: companies.createdAt,
+      })
+      .from(companies)
+      .where(eq(companies.id, params.id));
+
+    if (!company) {
+      set.status = 404;
+      return { error: 'Company not found' };
+    }
+    return company;
+  })
   .get('/:id/users', async ({ tier, params, set }) => {
     assertStaffCapability(tier, 'view_companies', set);
     return db

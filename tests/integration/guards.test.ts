@@ -1,6 +1,12 @@
 import { describe, expect, test, beforeAll, afterAll, mock } from 'bun:test';
 import { Elysia } from 'elysia';
-import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
+import {
+  setupTestDatabase,
+  appConnection,
+  ownerConnection,
+  testOwnerUrl,
+  testAppUrl,
+} from './setup';
 
 /**
  * CU-868kh8zbj criterio 4: `tenant.derive` y `admin.guard` con JWT falso pero
@@ -96,9 +102,68 @@ describe('guards contra Postgres real (CU-868kh8zbj)', () => {
 
   describe('tenant.derive', () => {
     test('resuelve company_id y rol desde company_users, no desde el cliente', async () => {
+      // CU-868kj3utc: este test estuvo `.skip` mientras el guard devolvía 403 a TODO
+      // request autenticado bajo el rol `macha_app`. Corre con `APP_DATABASE_URL`
+      // apuntando a ese rol (ver arriba), que es la precondición del criterio 1.
       const res = await request('/whoami', { authorization: 'Bearer wos_member_a' });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ companyId: companyA, role: 'owner' });
+    });
+
+    test('CU-868kj3utc: sin ningún GUC seteado, company_users sigue sin devolver filas', async () => {
+      // El arreglo NO puede consistir en "dejar leer cuando no hay scoping". El modo de
+      // fallo tiene que seguir siendo ver cero filas: si una ruta nueva se saltara el
+      // guard, no debe heredar acceso a la tabla que decide quién ve qué.
+      const owner2 = ownerConnection();
+      try {
+        const [real] = await owner2`select count(*)::int as count from company_users`;
+        expect(real!.count).toBeGreaterThan(0);
+      } finally {
+        await owner2.end();
+      }
+
+      const app2 = appConnection();
+      try {
+        const [visible] = await app2`select count(*)::int as count from company_users`;
+        expect(visible!.count).toBe(0);
+      } finally {
+        await app2.end();
+      }
+    });
+
+    test('CU-868kj3utc: con app.user_id, un usuario ve SUS membresías y solo esas', async () => {
+      // La otra mitad de la política nueva (migración 0012): el GUC de identidad abre
+      // exactamente las filas del usuario, no la tabla entera. Si abriera más, el
+      // arreglo del 403 habría costado el aislamiento que 0010 vino a garantizar.
+      const owner2 = ownerConnection();
+      const [me] = await owner2`select id from users where workos_user_id = 'wos_member_a'`;
+      const [total] = await owner2`select count(*)::int as count from company_users`;
+      await owner2.end();
+      expect(total!.count).toBeGreaterThan(1); // hay membresías de otros usuarios
+
+      const app2 = appConnection();
+      try {
+        const rows = await app2.begin(async (tx) => {
+          await tx`select set_config('app.user_id', ${me!.id}, true)`;
+          return tx`select user_id from company_users`;
+        });
+        expect(rows.length).toBe(1);
+        expect((rows as unknown as { user_id: string }[])[0]!.user_id).toBe(me!.id);
+      } finally {
+        await app2.end();
+      }
+    });
+
+    test('CU-868kj3utc: dos requests seguidas funcionan igual que la primera', async () => {
+      // El guard reserva una conexión del pool y la devuelve al terminar, con el GUC
+      // `app.company_id` revertido a la cadena vacía. Con la política vieja, la
+      // siguiente request que reutilizara esa conexión se caía con un 500
+      // (`invalid input syntax for type uuid: ""`) — o sea, la app servía la primera
+      // request de cada conexión y fallaba a partir de la segunda.
+      for (let i = 0; i < 3; i++) {
+        const res = await request('/whoami', { authorization: 'Bearer wos_member_a' });
+        expect(res.status).toBe(200);
+      }
     });
 
     test('rechaza sin bearer token', async () => {
@@ -133,6 +198,10 @@ describe('guards contra Postgres real (CU-868kh8zbj)', () => {
   });
 
   describe('admin.guard', () => {
+    // Nota: en esta app de prueba `/admin/whoami` pasa ANTES por tenantDerive (está
+    // montado con `.as('global')`), así que este caso arrastraba el 403 de
+    // CU-868kj3utc. En la app real el namespace admin no cuelga del guard tenant
+    // (CU-868kfvaex); aquí el encadenado lo hace, si acaso, un test más exigente.
     test('acepta a un usuario presente en la tabla staff y expone su tier', async () => {
       const res = await request('/admin/whoami', { authorization: 'Bearer wos_staff' });
       expect(res.status).toBe(200);

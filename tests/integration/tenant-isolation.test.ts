@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
-import { setupTestDatabase, appConnection, ownerConnection } from './setup';
+import { setupTestDatabase, appConnection, ownerConnection, rejectionCode } from './setup';
 
 /**
  * CU-868kh8zbj criterio 2: tests de aislamiento que FALLEN si RLS se desactiva.
@@ -94,25 +94,58 @@ describe('aislamiento por RLS entre empresas (CU-868kh8zbj)', () => {
     expect(rows).toEqual([]);
   });
 
-  test('sin app.company_id seteado no se ve ninguna fila', async () => {
+  test('sin app.company_id seteado no se filtra ninguna fila', async () => {
     // Si un endpoint nuevo se saltara tenant.derive, el fallo debe ser "no ve nada",
     // nunca "las ve todas".
-    const rows = await app`select id from documents`;
+    //
+    // Hay DOS formas de fallar cerrado y ambas son aceptables, según si el GUC nunca
+    // se tocó en la sesión o se tocó y volvió a '' al cerrar la transacción:
+    //  - nunca tocado: current_setting(..., true) da NULL → `= NULL` filtra todo → [].
+    //  - tocado y revertido: da '' → el cast a uuid revienta con 22P02.
+    // Lo que este test prohíbe es la tercera: devolver filas.
+    let rows: unknown[] | undefined;
+    try {
+      rows = await app`select id from documents`;
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe('22P02');
+      return;
+    }
     expect(rows).toEqual([]);
   });
 
   test('no se puede insertar una fila a nombre de otra empresa', async () => {
     // WITH CHECK de la política: el aislamiento de escritura importa tanto como el
     // de lectura — sin esto, un tenant podría plantar datos en otro.
-    const attempt = asCompany(
-      companyA,
-      (tx) => tx`
-        insert into documents (company_id, uploaded_by, s3_key, original_filename,
-                               file_size_bytes, mime_type)
-        values (${companyB}, ${userId}, 'x/y', 'intruso.xlsx', 1, 'text/csv')
-      `,
+    // try/catch vía rejectionCode, no `.rejects`: ver la nota en setup.ts — esa
+    // combinación cuelga con los errores de la librería `postgres` en Bun 1.3.14.
+    const code = await rejectionCode(
+      asCompany(
+        companyA,
+        (tx) => tx`
+          insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                                 file_size_bytes, mime_type)
+          values (${companyB}, ${userId}, 'x/y', 'intruso.xlsx', 1, 'text/csv')
+        `,
+      ),
     );
-    await expect(attempt).rejects.toThrow();
+    // 42501: la política WITH CHECK rechaza la fila.
+    expect(code).toBe('42501');
+  });
+
+  test('tras cerrar la transacción, la MISMA conexión vuelve a no ver nada (CU-868kj3utc)', async () => {
+    // El bug más sutil del ticket, y el que rompía la segunda request de cada conexión
+    // del pool: `current_setting(x, true)` devuelve NULL solo mientras el GUC nunca se
+    // ha seteado. En cuanto una transacción hace SET LOCAL y termina, el parámetro
+    // vuelve a su valor de sesión, que para un GUC personalizado es la CADENA VACÍA —
+    // y `''::uuid` no da NULL, lanza `invalid input syntax for type uuid: ""`.
+    //
+    // Este test corre sobre `app`, la misma conexión (max: 1) que los tests de arriba
+    // ya usaron con SET LOCAL, así que el GUC YA está revertido a ''. Con la política
+    // vieja esto no devolvía [], reventaba.
+    await asCompany(companyA, (tx) => tx`select id from documents`);
+
+    const rows = await app`select id from documents`;
+    expect(rows).toEqual([]);
   });
 
   test('el conteo total con el rol dueño confirma que las dos filas existen', async () => {

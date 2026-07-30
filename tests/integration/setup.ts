@@ -31,7 +31,7 @@ export const testAppUrl = OWNER_URL.replace(/\/\/[^@]+@/, `//macha_app:${APP_PAS
  * detectarían nada.
  */
 export async function setupTestDatabase(): Promise<void> {
-  const owner = postgres(OWNER_URL, { max: 1, onnotice: () => {} });
+  const owner = postgres(OWNER_URL, { max: 1, onnotice: () => {}, connect_timeout: 10 });
   try {
     await owner.unsafe(`
       DO $$
@@ -47,14 +47,39 @@ export async function setupTestDatabase(): Promise<void> {
   }
 }
 
+// `connect_timeout` en todas: sin él, una URL mal apuntada deja al test colgado en
+// lugar de fallar, y en CI eso significa un job corriendo hasta el timeout del runner.
+const CONNECT_OPTS = { max: 1, onnotice: () => {}, connect_timeout: 10 } as const;
+
 /** Conexión con el rol restringido — lo que de verdad usa la app en runtime. */
 export function appConnection() {
-  return postgres(testAppUrl, { max: 1, onnotice: () => {} });
+  return postgres(testAppUrl, CONNECT_OPTS);
 }
 
 /** Conexión con el rol dueño — solo para montar datos de prueba, nunca para aserciones. */
 export function ownerConnection() {
-  return postgres(OWNER_URL, { max: 1, onnotice: () => {} });
+  return postgres(OWNER_URL, CONNECT_OPTS);
+}
+
+/**
+ * Captura el error de una query que DEBE fallar y devuelve su `code` de Postgres.
+ *
+ * No se usa `await expect(promise).rejects.toMatchObject(...)`: con los objetos de
+ * error de la librería `postgres` esa combinación **cuelga indefinidamente** en Bun
+ * 1.3.14 — el proceso de `bun test` se queda colgado sin emitir un solo resultado.
+ * Reproducido en un archivo mínimo: con `.rejects` cuelga, con try/catch pasa en
+ * 106 ms. Era la causa de que el job de integración de CI corriera 30+ minutos sin
+ * salida.
+ *
+ * Devolver el código en vez de aseverar aquí deja que cada test diga qué espera.
+ */
+export async function rejectionCode(promise: Promise<unknown>): Promise<string | undefined> {
+  try {
+    await promise;
+    return undefined;
+  } catch (err) {
+    return (err as { code?: string }).code;
+  }
 }
 
 /**

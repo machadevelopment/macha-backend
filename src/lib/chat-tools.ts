@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { and, desc, eq, gte, lte } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { reports, reportVersions, transactions } from '@/db/schema';
-import { getOrComputeMonthlyAmount, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
+import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
 
 /**
  * CU-868kfvabq: tool-use jerárquico (narrativa → drill-down por rollup → transacciones
@@ -83,18 +83,26 @@ async function toolMonthlyRollup(
   const months = Math.min(Math.max(input.months, 1), 24);
   const types = input.type ? [input.type] : ROLLUP_TYPES;
 
-  const series = [];
+  const periods: string[] = [];
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date();
     d.setUTCDate(1);
     d.setUTCMonth(d.getUTCMonth() - i);
-    const period = d.toISOString().slice(0, 10);
-    const amounts: Record<string, number> = {};
-    for (const type of types) {
-      amounts[type] = await getOrComputeMonthlyAmount(ctx.db, ctx.companyId, period, type);
-    }
-    series.push({ period, ...amounts });
+    periods.push(d.toISOString().slice(0, 10));
   }
+
+  // CU-868kh8w6b criterio 3: mismo N+1 que /metrics — hasta 24 meses × 4 tipos = 96
+  // round-trips secuenciales, y aquí dentro de un turno de chat, donde la latencia la
+  // paga el usuario esperando la respuesta del modelo. Se resuelve en 2 queries.
+  const amountsByPeriod = await getOrComputeMonthlyAmounts(ctx.db, ctx.companyId, periods, types);
+
+  const series = periods.map((period) => {
+    const all = amountsByPeriod.get(period)!;
+    // Solo los tipos pedidos: cuando la herramienta filtra por uno, devolver los 4
+    // metería en el contexto del modelo tres números que no pidió.
+    const amounts = Object.fromEntries(types.map((type) => [type, all[type]]));
+    return { period, ...amounts };
+  });
   return JSON.stringify(series);
 }
 
