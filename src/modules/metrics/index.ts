@@ -1,9 +1,9 @@
 import { Elysia, t } from 'elysia';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql as rawSql } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
-import { getOrComputeMonthlyAmount, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
+import { getOrComputeMonthlyAmounts } from '@/lib/rollups';
 import { companies, invoices, bills } from '@/db/schema';
 
 function monthStart(monthsAgo: number): string {
@@ -36,26 +36,20 @@ export const metrics = new Elysia().use(tenantDerive).get(
     const months = query.months ?? 12;
     const periods = Array.from({ length: months }, (_, i) => monthStart(months - 1 - i));
 
-    const series: Array<{
-      period: string;
-      revenue: number;
-      cogs: number;
-      opex: number;
-      other: number;
-      margin: number;
-    }> = [];
-    for (const period of periods) {
-      const amounts: Record<RollupType, number> = { revenue: 0, cogs: 0, opex: 0, other: 0 };
-      for (const type of ROLLUP_TYPES) {
-        amounts[type] = await getOrComputeMonthlyAmount(db, companyId, period, type);
-      }
+    // CU-868kh8w6b: esto era un doble bucle `periods × ROLLUP_TYPES` con un await por
+    // combinación — 48 round-trips secuenciales con el default de 12 meses y 144 con
+    // months=36. Ahora son 2 queries fijas, independientes de cuántos meses se pidan.
+    // El cache-aside de metric_rollups se conserva intacto (ver lib/rollups.ts).
+    const amountsByPeriod = await getOrComputeMonthlyAmounts(db, companyId, periods);
+
+    const series = periods.map((period) => {
+      const amounts = amountsByPeriod.get(period)!;
       // Margen bruto provisional = ingresos - costo de ventas (sin restar opex).
       // No hay una definición de "margen" confirmada por Jose todavía — placeholder
       // explícito, a ajustar cuando exista esa decisión (mismo patrón que otros
       // valores provisionales de F0).
-      const margin = amounts.revenue - amounts.cogs;
-      series.push({ period, ...amounts, margin });
-    }
+      return { period, ...amounts, margin: amounts.revenue - amounts.cogs };
+    });
 
     return { baseCurrency: company?.baseCurrency ?? 'GTQ', months: series };
   },
@@ -83,15 +77,27 @@ export const metrics = new Elysia().use(tenantDerive).get(
 const AGING_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'] as const;
 type AgingBucket = (typeof AGING_BUCKETS)[number];
 
-function bucketFor(dueDate: string | null, today: string): AgingBucket {
-  if (!dueDate || dueDate >= today) return 'current';
-  const daysOverdue = Math.floor(
-    (new Date(today).getTime() - new Date(dueDate).getTime()) / (1000 * 60 * 60 * 24),
-  );
-  if (daysOverdue <= 30) return '1_30';
-  if (daysOverdue <= 60) return '31_60';
-  if (daysOverdue <= 90) return '61_90';
-  return '90_plus';
+/**
+ * CU-868kh8w6b: la clasificación por antigüedad se movió a SQL. Traduce literalmente
+ * el `bucketFor()` que antes corría en JavaScript sobre TODAS las filas abiertas:
+ * `due_date` nula o futura → `current`; si no, días de atraso en tramos de 30.
+ *
+ * `current_date - due_date` en Postgres da un entero de días entre dos `date`, que es
+ * exactamente el `Math.floor((today - dueDate) / 1 día)` anterior — mismo corte en los
+ * bordes (30, 60, 90), sin depender de zonas horarias ni del reloj del proceso.
+ */
+const AGING_BUCKET_SQL = rawSql<AgingBucket>`
+  case
+    when due_date is null or due_date >= current_date then 'current'
+    when current_date - due_date <= 30 then '1_30'
+    when current_date - due_date <= 60 then '31_60'
+    when current_date - due_date <= 90 then '61_90'
+    else '90_plus'
+  end
+`;
+
+function emptyBuckets(): Record<AgingBucket, number> {
+  return Object.fromEntries(AGING_BUCKETS.map((b) => [b, 0])) as Record<AgingBucket, number>;
 }
 
 /**
@@ -116,11 +122,14 @@ export const arAp = new Elysia().use(tenantDerive).get(
       .from(companies)
       .where(eq(companies.id, companyId));
 
-    const today = new Date().toISOString().slice(0, 10);
-
-    const [openInvoices, openBills] = await Promise.all([
+    // CU-868kh8w6b: antes esto traía TODAS las invoices/bills abiertas de la empresa
+    // (SELECT sin LIMIT) y las agrupaba en JavaScript — transferencia y memoria
+    // proporcionales al tamaño de la cartera, para devolver 10 números. Ahora Postgres
+    // agrupa y devuelve como mucho 5 filas por tabla. El índice (company_id, status,
+    // due_date) que ambas ya tienen cubre este filtro.
+    const [arRows, apRows] = await Promise.all([
       db
-        .select({ dueDate: invoices.dueDate, amountBase: invoices.amountBase })
+        .select({ bucket: AGING_BUCKET_SQL.as('bucket'), total: rawSql<string>`sum(amount_base)` })
         .from(invoices)
         .where(
           and(
@@ -128,30 +137,27 @@ export const arAp = new Elysia().use(tenantDerive).get(
             eq(invoices.status, 'open'),
             isNull(invoices.deletedAt),
           ),
-        ),
+        )
+        .groupBy(AGING_BUCKET_SQL),
       db
-        .select({ dueDate: bills.dueDate, amountBase: bills.amountBase })
+        .select({ bucket: AGING_BUCKET_SQL.as('bucket'), total: rawSql<string>`sum(amount_base)` })
         .from(bills)
         .where(
           and(eq(bills.companyId, companyId), eq(bills.status, 'open'), isNull(bills.deletedAt)),
-        ),
+        )
+        .groupBy(AGING_BUCKET_SQL),
     ]);
 
-    function toBuckets(rows: { dueDate: string | null; amountBase: string }[]) {
-      const totals = Object.fromEntries(AGING_BUCKETS.map((b) => [b, 0])) as Record<
-        AgingBucket,
-        number
-      >;
-      for (const row of rows) {
-        totals[bucketFor(row.dueDate, today)] += Number(row.amountBase);
-      }
+    function toBuckets(rows: { bucket: AgingBucket; total: string }[]) {
+      const totals = emptyBuckets();
+      for (const row of rows) totals[row.bucket] = Number(row.total);
       return totals;
     }
 
     return {
       baseCurrency: company?.baseCurrency ?? 'GTQ',
-      ar: toBuckets(openInvoices),
-      ap: toBuckets(openBills),
+      ar: toBuckets(arRows),
+      ap: toBuckets(apRows),
     };
   },
   {
