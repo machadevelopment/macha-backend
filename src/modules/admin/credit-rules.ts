@@ -2,7 +2,6 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { db } from '@/db/client';
 import { creditRules } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 
@@ -14,13 +13,13 @@ import { logAdminAction } from '@/lib/admin-audit';
  */
 export const adminCreditRules = new Elysia({ prefix: '/admin/credit-rules' })
   .use(adminGuard)
-  .get('/', async ({ tier, set }) => {
+  .get('/', async ({ tier, set, db }) => {
     assertStaffCapability(tier, 'edit_action_to_credits_ratio', set);
     return db.select().from(creditRules).orderBy(desc(creditRules.createdAt));
   })
   .post(
     '/',
-    async ({ staffId, tier, body, set }) => {
+    async ({ staffId, tier, body, set, db }) => {
       assertStaffCapability(tier, 'edit_action_to_credits_ratio', set);
       const [lastVersion] = await db
         .select({ version: creditRules.version })
@@ -49,7 +48,7 @@ export const adminCreditRules = new Elysia({ prefix: '/admin/credit-rules' })
         })
         .returning();
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         action: 'credit_rule.create',
         targetTable: 'credit_rules',

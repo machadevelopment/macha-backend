@@ -96,6 +96,10 @@ describe('guards contra Postgres real (CU-868kh8zbj)', () => {
 
   afterAll(async () => {
     await owner?.end();
+    // El pool compartido de src/db/client.ts NO se cierra aquí: bun test corre todos
+    // los archivos en el mismo proceso y cerrarlo dejaba sin conexión a los que
+    // corrieran después (CONNECTION_ENDED → 500). Lo cierra una sola vez el preload
+    // tests/integration/teardown.ts (CU-868kjc4wa).
   });
 
   describe('tenant.derive', () => {

@@ -2,7 +2,6 @@ import { Elysia, t } from 'elysia';
 import { and, asc, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { db } from '@/db/client';
 import { stagingRows, companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
 import { classifySheetRows } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
@@ -23,7 +22,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
   .use(adminGuard)
   .get(
     '/',
-    async ({ tier, query, set }) => {
+    async ({ tier, query, set, db }) => {
       assertStaffCapability(tier, 'review_flagged_rows', set);
       const conditions = [eq(stagingRows.reviewStatus, 'pending')];
       if (query.companyId) conditions.push(eq(stagingRows.companyId, query.companyId));
@@ -63,7 +62,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
   )
   .patch(
     '/:id',
-    async ({ staffId, tier, params, body, set }) => {
+    async ({ staffId, tier, params, body, set, db }) => {
       assertStaffCapability(tier, 'review_flagged_rows', set);
       const [before] = await db.select().from(stagingRows).where(eq(stagingRows.id, params.id));
       if (!before) {
@@ -81,7 +80,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
         })
         .where(eq(stagingRows.id, params.id));
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         companyId: before.companyId,
         action: 'staging_row.review',
@@ -103,7 +102,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       }),
     },
   )
-  .post('/:id/reextract', async ({ staffId, tier, params, set }) => {
+  .post('/:id/reextract', async ({ staffId, tier, params, set, db }) => {
     assertStaffCapability(tier, 'review_flagged_rows', set);
     const [row] = await db.select().from(stagingRows).where(eq(stagingRows.id, params.id));
     if (!row) {
@@ -152,7 +151,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       outputTokens: result.outputTokens,
     });
 
-    await logAdminAction({
+    await logAdminAction(db, {
       actorStaffId: staffId,
       companyId: row.companyId,
       action: 'staging_row.reextract',
