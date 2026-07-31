@@ -1,7 +1,6 @@
 import { Elysia } from 'elysia';
 import { and, eq } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
-import { db } from '@/db/client';
 import { companyUsers, companies, staff } from '@/db/schema';
 
 /**
@@ -11,10 +10,15 @@ import { companyUsers, companies, staff } from '@/db/schema';
  * No hay tenant-scoping aquí a propósito: un usuario puede pertenecer a varias
  * empresas y este endpoint las lista TODAS (siempre limitado a las del propio
  * usuario, vía identityDerive -> company_users.user_id).
+ *
+ * CU-868kjc4wa: usa el `db` que inyecta identityDerive, no el pool global. Ese db lleva
+ * `app.user_id` seteado, que es lo único que hace visibles las membresías propias bajo
+ * el rol macha_app (política de `company_users`, migración 0012). Con el pool pelado
+ * esto devolvía `[]` y el org-switcher se quedaba sin empresas.
  */
 export const me = new Elysia({ prefix: '/me' })
   .use(identityDerive)
-  .get('/memberships', async ({ userId }) => {
+  .get('/memberships', async ({ userId, db }) => {
     const memberships = await db
       .select({
         companyId: companyUsers.companyId,
