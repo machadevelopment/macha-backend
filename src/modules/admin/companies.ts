@@ -2,7 +2,6 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { db } from '@/db/client';
 import { companies, companyUsers, users } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
@@ -17,7 +16,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
   .use(adminGuard)
   .get(
     '/',
-    async ({ tier, query, set }) => {
+    async ({ tier, query, set, db }) => {
       assertStaffCapability(tier, 'view_companies', set);
       // CU-868kh913c: sin límite esto crecía con el número de empresas cliente.
       // Mismo patrón "load more" (limit+1) que /admin/staging-rows y /admin/documents.
@@ -42,7 +41,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
   )
   .post(
     '/',
-    async ({ staffId, tier, body, set }) => {
+    async ({ staffId, tier, body, set, db }) => {
       // CU-868kfvaf5 criterio 1: alta manual de empresas + aprovisiona partición.
       assertStaffCapability(tier, 'manage_companies', set);
       const [company] = await db
@@ -61,7 +60,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       // manual admin path never seeded it either, only scripts/seed.ts's demo company did.
       await seedDefaultAlertRules(db, company!.id);
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         companyId: company!.id,
         action: 'company.create',
@@ -85,7 +84,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
   )
   .patch(
     '/:id/status',
-    async ({ staffId, tier, params, body, set }) => {
+    async ({ staffId, tier, params, body, set, db }) => {
       assertStaffCapability(tier, 'manage_companies', set);
       const [before] = await db.select().from(companies).where(eq(companies.id, params.id));
       if (!before) {
@@ -95,7 +94,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
 
       await db.update(companies).set({ status: body.status }).where(eq(companies.id, params.id));
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         companyId: params.id,
         action: 'company.status_change',
@@ -120,7 +119,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
    * emails de esa empresa. `workosOrgId` no se expone: es un identificador del IdP y
    * ninguna pantalla lo usa.
    */
-  .get('/:id', async ({ tier, params, set }) => {
+  .get('/:id', async ({ tier, params, set, db }) => {
     assertStaffCapability(tier, 'view_companies', set);
     const [company] = await db
       .select({
@@ -141,7 +140,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
     }
     return company;
   })
-  .get('/:id/users', async ({ tier, params, set }) => {
+  .get('/:id/users', async ({ tier, params, set, db }) => {
     assertStaffCapability(tier, 'view_companies', set);
     return db
       .select({
@@ -158,7 +157,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
   })
   .patch(
     '/:id/users/:userId',
-    async ({ staffId, tier, params, body, set }) => {
+    async ({ staffId, tier, params, body, set, db }) => {
       // Gestión de miembros existentes (rol/estado). Invitar a un usuario que nunca
       // ha iniciado sesión vía WorkOS (sin fila en `users` todavía) necesitaría el
       // flujo de invite de WorkOS + email — no construido, mismo alcance que el
@@ -178,7 +177,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         .set({ role: body.role ?? before.role, status: body.status ?? before.status })
         .where(and(eq(companyUsers.companyId, params.id), eq(companyUsers.userId, params.userId)));
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         companyId: params.id,
         action: 'company_user.update',

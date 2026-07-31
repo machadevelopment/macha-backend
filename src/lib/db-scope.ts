@@ -3,8 +3,19 @@ import { sql, schema, type DB } from '@/db/client';
 
 export interface ScopedConnection {
   db: DB;
-  /** Sets another GUC with SET LOCAL on this same transaction. */
-  scopeTo: (guc: 'app.user_id' | 'app.company_id', value: string) => Promise<void>;
+  /**
+   * Sets another GUC with SET LOCAL on this same transaction.
+   *
+   * La unión cerrada es deliberada: son los tres únicos GUC que leen las políticas de
+   * RLS, y tenerlos enumerados aquí hace que añadir un cuarto sea un cambio visible en
+   * este archivo y no una cadena suelta en cualquier módulo. `app.cross_tenant` en
+   * particular abre la visibilidad cross-company y solo debe salir de `admin.guard`
+   * (CU-868kjc4af).
+   */
+  scopeTo: (
+    guc: 'app.user_id' | 'app.company_id' | 'app.cross_tenant',
+    value: string,
+  ) => Promise<void>;
   commit: () => Promise<void>;
   rollback: () => Promise<void>;
 }

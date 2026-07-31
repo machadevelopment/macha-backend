@@ -2,7 +2,6 @@ import { Elysia, t } from 'elysia';
 import { desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { db } from '@/db/client';
 import { industryTemplates, industryTemplateVersions } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 
@@ -15,11 +14,11 @@ import { logAdminAction } from '@/lib/admin-audit';
  */
 export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-templates' })
   .use(adminGuard)
-  .get('/', async ({ tier, set }) => {
+  .get('/', async ({ tier, set, db }) => {
     assertStaffCapability(tier, 'manage_plans_and_templates', set);
     return db.select().from(industryTemplates);
   })
-  .get('/:id/versions', async ({ tier, params, set }) => {
+  .get('/:id/versions', async ({ tier, params, set, db }) => {
     assertStaffCapability(tier, 'manage_plans_and_templates', set);
     return db
       .select()
@@ -29,7 +28,7 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
   })
   .post(
     '/',
-    async ({ staffId, tier, body, set }) => {
+    async ({ staffId, tier, body, set, db }) => {
       assertStaffCapability(tier, 'manage_plans_and_templates', set);
       const [template] = await db
         .insert(industryTemplates)
@@ -50,7 +49,7 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
         .set({ currentVersionId: version!.id })
         .where(eq(industryTemplates.id, template!.id));
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         action: 'industry_template.create',
         targetTable: 'industry_templates',
@@ -74,7 +73,7 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
   )
   .post(
     '/:id/versions',
-    async ({ staffId, tier, params, body, set }) => {
+    async ({ staffId, tier, params, body, set, db }) => {
       // Nueva versión = nueva fila (industry_template_versions es append-only, data
       // model.md §16) — nunca se actualiza una versión existente.
       assertStaffCapability(tier, 'manage_plans_and_templates', set);
@@ -100,7 +99,7 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
         .set({ currentVersionId: version!.id })
         .where(eq(industryTemplates.id, params.id));
 
-      await logAdminAction({
+      await logAdminAction(db, {
         actorStaffId: staffId,
         action: 'industry_template.new_version',
         targetTable: 'industry_template_versions',
