@@ -22,6 +22,7 @@
     "provision:tenant": "bun run scripts/provision-tenant.ts",
     "restore:drill": "bun run scripts/restore-drill.ts",
     "audit:staging-data": "bun run scripts/audit-staging-data.ts",
+    "verify:isolation": "bun run scripts/verify-isolation.ts",
     "prepare": "husky"
   },
   "dependencies": {

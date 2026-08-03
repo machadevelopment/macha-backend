@@ -54,7 +54,8 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | Yes | Owner role — migrations/seed/provisioning only. Never used by the running app in a real env. |
-| `APP_DATABASE_URL` | Prod/staging | Restricted `macha_app` role the app actually connects as. Falls back to `DATABASE_URL` if unset (RLS/append-only become no-ops without it). |
+| `APP_DATABASE_URL` | Prod/staging | Restricted `macha_app` role the app actually connects as. Falls back to `DATABASE_URL` if unset (RLS/append-only become no-ops without it) — ver el runbook de abajo. |
+| `REQUIRE_ISOLATED_DB_ROLE` | No (default `false`) | `true` hace que el arranque ABORTE si el rol de la app no está aislado. Se setea en staging/prod **después** de completar el runbook de `macha_app`. |
 | `REDIS_URL` | Yes | Rate limiting (Railway plugin). |
 | `INTAKE_*` | No (has defaults) | Excel intake caps, CU-868kfv972. |
 | `RATE_LIMIT_*` | No (has defaults) | Token-bucket + queue-depth gate values. |
@@ -68,6 +69,50 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
+
+## Activación del rol `macha_app` (CU-868kjbw5h) — runbook de despliegue
+
+> **Una instancia nueva NO está aislada hasta completar estos pasos.** `APP_DATABASE_URL`
+> vacía es un fallo de configuración **silencioso**: la app funciona idéntico, pero el
+> `REVOKE UPDATE, DELETE` de los 6 ledgers append-only no aplica (Postgres le conserva
+> esos privilegios al dueño de la tabla, de forma implícita e irrevocable, y no existe un
+> "FORCE" para privilegios como sí lo hay para RLS). Esto se hace **una vez por entorno**.
+
+Desde el arranque, la app verifica esto contra su conexión real y lo dice en el log
+(`src/lib/db-role-check.ts`), además de reportarlo a Sentry. Pero **no aborta** mientras
+`REQUIRE_ISOLATED_DB_ROLE` no esté en `true` — el último paso del runbook es justamente
+activar esa red.
+
+1. **Confirmar migraciones.** Que `0010`, `0011` y `0012` se aplicaron limpias en el
+   deploy. `0010` re-corre en cada deploy a propósito: su bloque `GRANT`/`REVOKE` es un
+   no-op (con `NOTICE`) hasta que el rol existe.
+2. **Crear el rol** (operador, directo contra Railway — requiere `CREATEROLE`, que el
+   usuario de app normalmente no tiene, por eso no va en una migración). La contraseña
+   se genera aquí y **no va en ninguna migración ni archivo de env**:
+   ```sql
+   CREATE ROLE macha_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS
+     PASSWORD '<generada>';
+   ```
+3. **Re-aplicar `0010`** (redeploy o `bun run db:migrate`) para que el `GRANT`/`REVOKE`
+   surta efecto ahora que el rol existe. Este segundo pase es el que se olvida.
+4. **Setear `APP_DATABASE_URL`** apuntando a `macha_app` y redeployar. Verificar que la
+   app arranca, que el log dice `aislamiento OK`, y que un usuario con membresía activa
+   recibe 200 (es lo que rompía `CU-868kj3utc`, ya arreglado en `0012`).
+5. **Verificar contra la instancia real** que el aislamiento muerde:
+   ```
+   VERIFY_OWNER_DATABASE_URL=postgres://owner@... \
+   VERIFY_APP_DATABASE_URL=postgres://macha_app@... \
+   bun run verify:isolation
+   ```
+   Comprueba las precondiciones del rol, que `UPDATE` sea rechazado en los 6 ledgers, y
+   que una sesión con `app.company_id` de la empresa A no vea filas de la B (con
+   contraprueba de que sí ve las propias, para que un 0 por ceguera no pase por
+   aislamiento). Es de solo lectura.
+6. **Setear `REQUIRE_ISOLATED_DB_ROLE=true`** en ese entorno. A partir de ahí, una
+   regresión de configuración aborta el arranque en vez de degradarse en silencio.
+
+Producción es un paso explícito y separado (**FRENO 3**, lo ejecuta el dueño), no un
+efecto secundario de haberlo hecho en staging.
 
 ## Verificación de aislamiento prod/no-prod (CU-868kfvaz6)
 

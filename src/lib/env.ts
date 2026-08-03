@@ -15,6 +15,13 @@ export const env = {
   // Railway role) keep working — the append-only guarantee only becomes real once
   // APP_DATABASE_URL is actually set to a distinct, non-owning role.
   appDatabaseUrl: process.env.APP_DATABASE_URL ?? req('DATABASE_URL'),
+  // CU-868kjbw5h: el fallback de arriba es un fallo de configuración SILENCIOSO — la app
+  // funciona idéntico sin aislamiento. Estas dos banderas lo vuelven observable y, cuando
+  // el operador lo decide, fatal. Ver src/lib/db-role-check.ts.
+  appDatabaseUrlIsExplicit: Boolean(process.env.APP_DATABASE_URL),
+  // Se setea a 'true' en staging/prod DESPUÉS de crear el rol y verificarlo; a partir de
+  // ahí, arrancar sin aislamiento aborta el proceso en vez de degradarse en silencio.
+  requireIsolatedDbRole: process.env.REQUIRE_ISOLATED_DB_ROLE === 'true',
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   workosJwksUrl: process.env.WORKOS_JWKS_URL ?? '',
   // CU-868kjkfdf: solo se usa para dar de alta una identidad NUEVA (una vez por usuario
