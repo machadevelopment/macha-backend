@@ -152,4 +152,10 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
       await release(false);
     }
   })
-  .as('global');
+  // `scoped`, NO `global`. Ver la nota compartida en src/app.test.ts: `global` propaga
+  // este `derive` al padre y a TODO lo que se monte después en src/app.ts, así que la
+  // autenticación de inquilino se filtraba a rutas que están fuera de esta cadena a
+  // propósito — los webhooks de Recurrente (que traen firma svix, no bearer) y
+  // /register (que existe para crear la membresía que este guard exige) respondían 401.
+  // `scoped` llega a la instancia que hace .use() y corta ahí, que es el alcance real.
+  .as('scoped');

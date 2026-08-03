@@ -85,4 +85,5 @@ export const identityDerive = new Elysia({ name: 'identity.derive' })
       await release(false);
     }
   })
-  .as('global');
+  // `scoped`, no `global` — misma razón que en tenant.derive.ts. Ver src/app.test.ts.
+  .as('scoped');

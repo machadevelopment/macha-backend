@@ -91,4 +91,8 @@ export const adminGuard = new Elysia({ name: 'admin.guard' })
       await release(false);
     }
   })
-  .as('global');
+  // `scoped`, no `global` — misma razón que en tenant.derive.ts. Ver src/app.test.ts.
+  // Aquí importa el doble: con `global`, este guard y el de inquilino se aplicaban AMBOS
+  // a /admin/*, reservando dos conexiones por request y rechazando con 403 al staff que
+  // no tuviera además una membresía de empresa.
+  .as('scoped');
