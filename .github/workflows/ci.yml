@@ -24,7 +24,16 @@ jobs:
       # `bun run test`, NO `bun test`: el CLI crudo ignora el script de package.json y
       # barre TODO el repo, incluido tests/integration/, que necesita un Postgres que
       # este job no tiene. El script acota a `bun test src`. (CU-868kh8zbj)
+      #
+      # DATABASE_URL es de mentira y a propósito: `src/app.test.ts` monta la app entera
+      # para fijar qué rutas son públicas y cuáles exigen token, y esa cadena de imports
+      # pasa por `lib/env.ts`, que exige la variable al cargarse. Ninguna de esas pruebas
+      # abre una conexión (postgres.js conecta perezosamente y las rutas guardadas cortan
+      # en el guard), así que no hace falta un Postgres en este job — solo que la variable
+      # exista. El job `integration` de abajo sí levanta uno real.
       - run: bun run test
+        env:
+          DATABASE_URL: postgres://unused:unused@127.0.0.1:1/unused
       # CU-868khttg2: el gate incluye `build` en ambos repos. El bug que originó el
       # ticket estaba en macha-frontend, pero la causa de fondo era el hueco del gate,
       # no el bug: typecheck/lint/test no compilan el bundle de despliegue, y `main`
