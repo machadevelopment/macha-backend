@@ -113,7 +113,14 @@ describe('rutas guardadas — 401 sin token', () => {
     expect((await call('/register/', { method: 'POST', body: '{}' })).status).toBe(401);
   });
 
-  const adminScoped = ['/admin/companies/', '/admin/staging-rows/', '/admin/ai-cost'];
+  const adminScoped = [
+    '/admin/companies/',
+    '/admin/staging-rows/',
+    '/admin/ai-cost',
+    // CU-868kjc6h1: el catálogo de tasas cuelga de un módulo propio con su propio
+    // `.use(adminGuard)` — si alguien lo montara sin guard, esto lo caza.
+    '/admin/companies/00000000-0000-0000-0000-000000000000/fx-rates/',
+  ];
   for (const path of adminScoped) {
     test(`GET ${path} exige token`, async () => {
       expect((await call(path)).status).toBe(401);
