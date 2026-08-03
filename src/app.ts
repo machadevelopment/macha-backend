@@ -5,6 +5,7 @@ import { adminCompanies } from '@/modules/admin/companies';
 import { adminStagingRows } from '@/modules/admin/staging-rows';
 import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
 import { adminConfig } from '@/modules/admin/config';
+import { adminFxRates } from '@/modules/admin/fx-rates';
 import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
@@ -50,6 +51,7 @@ export function createApp() {
       .use(adminStagingRows)
       .use(adminIndustryTemplates)
       .use(adminConfig)
+      .use(adminFxRates)
       .use(adminCreditRules)
       .use(adminAlertRules)
       .use(adminMonitoring)

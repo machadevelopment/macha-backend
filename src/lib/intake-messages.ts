@@ -21,6 +21,13 @@ export const INTAKE_MESSAGES = {
     insufficientCredits: (required: number, balance: number) =>
       `Saldo de créditos insuficiente para procesar este archivo (requiere ~${required}, disponible: ${balance}).`,
     queueFull: (max: number) => `Ya tienes ${max} archivos procesándose. Espera a que terminen.`,
+    // CU-868kjc6h1: el archivo menciona una moneda que la empresa no puede convertir
+    // porque nunca se registró una tasa. Se rechaza en la recepción, antes de gastar
+    // una sola llamada de IA en un documento que moriría al promoverse.
+    missingFxRate: (quote: string, base: string) =>
+      `El archivo incluye montos en ${quote}, pero esta empresa (base ${base}) no tiene ninguna ` +
+      `tasa de cambio registrada. Pide al equipo de Macha que registre la tasa ${quote}→${base} ` +
+      `y vuelve a subir el archivo.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -34,6 +41,10 @@ export const INTAKE_MESSAGES = {
       `Insufficient credit balance to process this file (requires ~${required}, available: ${balance}).`,
     queueFull: (max: number) =>
       `You already have ${max} files processing. Wait for them to finish.`,
+    missingFxRate: (quote: string, base: string) =>
+      `The file includes amounts in ${quote}, but this company (base ${base}) has no exchange ` +
+      `rate on record. Ask the Macha team to register the ${quote}→${base} rate and upload the ` +
+      `file again.`,
   },
 } as const;
 

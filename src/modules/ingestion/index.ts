@@ -7,6 +7,8 @@ import { intakeConfig } from '@/config/intake';
 import { uploadKey, uploadObject } from '@/lib/s3';
 import { inspectXlsxWorkbook, estimateBatchCount } from '@/lib/xlsx-inspect';
 import { countCsvRows } from '@/lib/csv-inspect';
+import { fileMentionsCurrency, isScannable } from '@/lib/currency-scan';
+import { counterCurrency, loadFxCatalog, type Currency } from '@/lib/fx';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { revertDocument } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
@@ -32,7 +34,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       assertClientCapability(role, 'upload_excel', set);
 
       const [company] = await db
-        .select({ locale: companies.locale })
+        .select({ locale: companies.locale, baseCurrency: companies.baseCurrency })
         .from(companies)
         .where(eq(companies.id, companyId));
       const msg = MESSAGES[company?.locale ?? 'es'];
@@ -98,6 +100,27 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           intakeConfig.largeSheetRowThreshold,
           intakeConfig.batchSize,
         );
+      }
+
+      // CU-868kjc6h1 criterio 2: moneda extranjera sin NINGUNA tasa registrada. Es el
+      // único caso en que se puede afirmar en la recepción que la carga no tiene salida
+      // — sin una sola fila en el catálogo, cualquier monto en esa moneda tumbaría la
+      // promoción entera, que es atómica. Con al menos una tasa el archivo pasa: si
+      // faltara la de una fecha concreta, esa fila se marca para revisión al
+      // clasificarla (lib/staging.ts) en vez de tumbar el documento.
+      //
+      // Va aquí, junto al resto de caps, por la misma razón que ellos: nada se ha
+      // subido a S3 ni encolado todavía, así que un rechazo no deja rastro que limpiar.
+      if (company && isScannable(ext)) {
+        const base = company.baseCurrency as Currency;
+        const quote = counterCurrency(base);
+        if (fileMentionsCurrency(buffer, ext, quote)) {
+          const catalog = await loadFxCatalog(db, companyId, base, quote);
+          if (catalog.length === 0) {
+            set.status = 422;
+            return { error: msg.missingFxRate(quote, base), reason: 'missing_fx_rate' };
+          }
+        }
       }
 
       // Hard block on insufficient credits (CU-868kfvaa6, CU-868kfv97x): verify BEFORE

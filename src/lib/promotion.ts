@@ -1,14 +1,7 @@
-import { eq, and, lte, desc } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import {
-  stagingRows,
-  documents,
-  transactions,
-  invoices,
-  bills,
-  fxRates,
-  companies,
-} from '@/db/schema';
+import { stagingRows, documents, transactions, invoices, bills, companies } from '@/db/schema';
+import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 
 export type PromotionResult =
   | { promoted: true; transactionCount: number; invoiceCount: number; billCount: number }
@@ -38,13 +31,20 @@ export function computeAmountBase(originalAmount: number, fxRate: number): strin
   return String(originalAmount * fxRate);
 }
 
-/** Fecha vigente ≤ la fecha dada (data model §4.10): la tasa más reciente que no sea
- * posterior. Moneda == moneda base de la empresa siempre resuelve a 1 (sin fila en
- * fx_rates necesaria). */
+/**
+ * Resuelve la tasa vigente o falla con un mensaje accionable.
+ *
+ * CU-868kjc6h1 criterio 3: el error que llega a `documents.error_reason` —lo que el
+ * staff ve en el monitoreo de uploads— decía `No fx_rate for company <uuid>:
+ * USD->GTQ on or before 2026-07-01`. Exacto y sin salida: no decía qué hacer. Ahora el
+ * texto viene de `missingFxRateMessage` y nombra la acción concreta. La lógica de
+ * lookup vive en `lib/fx.ts` porque la ingesta la necesita antes, para marcar la fila
+ * en vez de tumbar la carga entera.
+ */
 async function resolveFxRate(
   db: DB,
   companyId: string,
-  quoteCurrency: 'GTQ' | 'USD',
+  quoteCurrency: Currency,
   onOrBefore: string,
 ): Promise<{ rate: number; effectiveDate: string }> {
   const [company] = await db
@@ -53,30 +53,11 @@ async function resolveFxRate(
     .where(eq(companies.id, companyId));
   const base = company!.baseCurrency;
 
-  if (quoteCurrency === base) {
-    return { rate: 1, effectiveDate: onOrBefore };
-  }
-
-  const [fx] = await db
-    .select()
-    .from(fxRates)
-    .where(
-      and(
-        eq(fxRates.companyId, companyId),
-        eq(fxRates.baseCurrency, base),
-        eq(fxRates.quoteCurrency, quoteCurrency),
-        lte(fxRates.effectiveDate, onOrBefore),
-      ),
-    )
-    .orderBy(desc(fxRates.effectiveDate))
-    .limit(1);
-
+  const fx = await findFxRate(db, companyId, base, quoteCurrency, onOrBefore);
   if (!fx) {
-    throw new Error(
-      `No fx_rate for company ${companyId}: ${quoteCurrency}->${base} on or before ${onOrBefore}`,
-    );
+    throw new Error(missingFxRateMessage({ quote: quoteCurrency, base, onOrBefore }));
   }
-  return { rate: Number(fx.rate), effectiveDate: fx.effectiveDate };
+  return fx;
 }
 
 /**
