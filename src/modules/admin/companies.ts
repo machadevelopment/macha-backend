@@ -6,6 +6,7 @@ import { companies, companyUsers, users } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
+import { grantInitialCredits } from '@/lib/credits';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -59,6 +60,10 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       // CU-868kfvad3 catalog — fixed while building M8 self-serve registration: this
       // manual admin path never seeded it either, only scripts/seed.ts's demo company did.
       await seedDefaultAlertRules(db, company!.id);
+      // CU-868kjc7g5 criterio 3: mismo saldo de arranque que el registro autoservicio.
+      // El alta manual del admin es el otro camino por el que nace una empresa, y una
+      // empresa sin créditos no puede pedir su primer insight.
+      const { granted } = await grantInitialCredits(db, company!.id);
 
       await logAdminAction(db, {
         actorStaffId: staffId,
@@ -66,11 +71,11 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         action: 'company.create',
         targetTable: 'companies',
         targetId: company!.id,
-        metadata: { name: body.name, industry: body.industry, partitions },
+        metadata: { name: body.name, industry: body.industry, partitions, initialCredits: granted },
       });
 
       set.status = 201;
-      return { id: company!.id, name: company!.name, partitions };
+      return { id: company!.id, name: company!.name, partitions, initialCredits: granted };
     },
     {
       body: t.Object({

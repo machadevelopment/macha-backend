@@ -120,6 +120,8 @@ describe('rutas guardadas — 401 sin token', () => {
     // CU-868kjc6h1: el catálogo de tasas cuelga de un módulo propio con su propio
     // `.use(adminGuard)` — si alguien lo montara sin guard, esto lo caza.
     '/admin/companies/00000000-0000-0000-0000-000000000000/fx-rates/',
+    // CU-868kjc7g5: el ledger de créditos de una empresa, misma razón.
+    '/admin/companies/00000000-0000-0000-0000-000000000000/credits/',
   ];
   for (const path of adminScoped) {
     test(`GET ${path} exige token`, async () => {

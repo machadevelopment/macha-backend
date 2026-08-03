@@ -1,6 +1,8 @@
 import { and, eq, desc, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { creditRules, creditTransactions } from '@/db/schema';
+import { creditsConfig } from '@/config/credits';
+import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 
 export type ActionKind = 'excel' | 'chat' | 'insight' | 'report_generation';
 
@@ -61,4 +63,69 @@ export async function debitCredits(
     creditRuleId: params.creditRuleId,
     refId: params.refId,
   });
+}
+
+/**
+ * Abono (o corrección) manual de créditos — CU-868kjc7g5 / US-19.
+ *
+ * `note` es obligatoria en la firma, no opcional: hasta este ticket las dos únicas
+ * escrituras del ledger eran el débito por consumo y el abono de una compra de
+ * Recurrente, ambas con su origen implícito (`ref_id`). Un movimiento hecho a mano no
+ * tiene origen que lo explique, así que la razón ES el registro.
+ *
+ * `delta` puede ser negativo a propósito: `credit_transactions` es append-only (REVOKE
+ * UPDATE, DELETE en 0010), así que revertir un abono equivocado es una FILA
+ * COMPENSATORIA con su propia nota, nunca un UPDATE. El endpoint no ofrece editar.
+ */
+export async function recordCreditAdjustment(
+  db: DB,
+  params: {
+    companyId: string;
+    delta: number;
+    reason: 'monthly_allotment' | 'top_up';
+    note: string;
+    createdBy?: string;
+  },
+): Promise<{ id: string }> {
+  const [row] = await db
+    .insert(creditTransactions)
+    .values({
+      companyId: params.companyId,
+      delta: Math.round(params.delta),
+      reason: params.reason,
+      note: params.note,
+      createdBy: params.createdBy,
+    })
+    .returning({ id: creditTransactions.id });
+  return { id: row!.id };
+}
+
+/**
+ * Créditos de arranque de una empresa nueva (CU-868kjc7g5 criterio 3). El valor sale de
+ * `platform_settings` para poder cambiarlo sin desplegar; `creditsConfig` solo actúa de
+ * fallback en un entorno recién migrado y sin seed.
+ *
+ * Se llama al final del alta (registro autoservicio y alta manual del admin), dentro de
+ * la misma transacción: una empresa que nace sin créditos es una empresa que no puede
+ * pedir su primer insight y que además dispara la alerta de saldo bajo desde el día uno.
+ *
+ * ASIGNACIÓN MENSUAL RECURRENTE: NO en v1 (criterio 6). Un job que acredita a todas las
+ * empresas cada mes necesita una política de reseteo/rollover —¿el saldo no usado se
+ * pierde, se acumula, se topa?— y esa es justo la decisión que sigue abierta en PRD §12
+ * punto 4. Mientras tanto: abono inicial automático + top-up manual de super_admin, que
+ * son mecanismo puro y no comprometen ninguna de las respuestas posibles.
+ */
+export async function grantInitialCredits(db: DB, companyId: string): Promise<{ granted: number }> {
+  const amount = Number(
+    await getPlatformSetting(db, SETTINGS_KEYS.creditInitialGrant, creditsConfig.monthlyAllotment),
+  );
+  if (!Number.isFinite(amount) || amount <= 0) return { granted: 0 };
+
+  await recordCreditAdjustment(db, {
+    companyId,
+    delta: amount,
+    reason: 'monthly_allotment',
+    note: 'Asignación inicial al dar de alta la empresa',
+  });
+  return { granted: amount };
 }

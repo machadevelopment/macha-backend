@@ -1,0 +1,31 @@
+-- CU-868kjc7g5: la razón de un movimiento manual de créditos, en el propio ledger.
+--
+-- EL PROBLEMA. `credit_transactions.reason` es un enum de TRES valores
+-- ('monthly_allotment','top_up','consumption', CHECK en 0003) — dice de qué TIPO es el
+-- movimiento, no POR QUÉ se hizo. US-19 pide literalmente "top-ups manuales con razón",
+-- y un top-up de 5.000 créditos con `reason='top_up'` y nada más es exactamente el
+-- registro que no permite auditar nada seis meses después: no se sabe si fue una
+-- compensación por una carga fallida, una cortesía comercial o un dedazo.
+--
+-- POR QUÉ EN EL LEDGER Y NO SOLO EN `admin_audit_log`. La mutación también se audita
+-- ahí (y debe seguir haciéndolo), pero el ledger es la fuente de verdad del saldo y es
+-- lo que se muestra en la pantalla de créditos de la empresa. Obligar a cruzar dos
+-- tablas para saber por qué el saldo subió convierte una lectura trivial en un join que
+-- nadie hace. Y `admin_audit_log` solo cubre lo que hace el staff: un abono automático
+-- (asignación inicial del registro autoservicio) no pasa por ahí y también necesita
+-- dejar dicho qué fue.
+--
+-- APPEND-ONLY: agregar una columna no lo toca. `note` se escribe en el INSERT y no se
+-- vuelve a tocar nunca — corregir un abono equivocado sigue siendo una fila
+-- compensatoria (delta negativo con su propia nota), nunca un UPDATE. El REVOKE UPDATE,
+-- DELETE de 0010 sigue vigente sobre la tabla y cubre la columna nueva sin cambios:
+-- los privilegios en Postgres son por tabla salvo que se otorguen por columna, y aquí
+-- no se otorga ninguno.
+--
+-- Nullable a propósito: las filas de consumo (`reason='consumption'`) las escribe el
+-- motor de créditos y no tienen razón que explicar más allá de su `action_kind` +
+-- `ref_id`. La obligatoriedad de la nota en los movimientos manuales se impone en el
+-- endpoint (`/admin/companies/:id/credits`), donde se puede devolver un 400 con un
+-- mensaje útil, y no con un CHECK que solo diría "violates constraint".
+
+ALTER TABLE credit_transactions ADD COLUMN IF NOT EXISTS note text;

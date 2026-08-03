@@ -85,6 +85,10 @@ export const creditTransactions = pgTable(
     actionKind: text('action_kind').$type<'excel' | 'chat' | 'insight' | 'report_generation'>(), // set only when reason='consumption'
     creditRuleId: uuid('credit_rule_id').references(() => creditRules.id), // frozen rule version applied
     refId: uuid('ref_id'), // origin object: document_id/chat_id/report_id/insight_requests.id
+    // CU-868kjc7g5 (migración 0015): el POR QUÉ del movimiento, no su tipo. US-19 pide
+    // "top-ups manuales con razón" y `reason` solo dice de qué clase es el movimiento.
+    // Null en las filas de consumo, que se explican con action_kind + ref_id.
+    note: text('note'),
     createdBy: uuid('created_by'), // staff.id on manual top-ups
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

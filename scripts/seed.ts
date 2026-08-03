@@ -195,6 +195,10 @@ async function main() {
     SETTINGS_KEYS.creditMonthlyAllotment,
     creditsConfig.monthlyAllotment,
   );
+  // CU-868kjc7g5 criterio 3: créditos de arranque de una empresa nueva. Mismo valor
+  // provisional que la asignación mensual — el número real sigue abierto (PRD §12.4);
+  // lo que ya no está abierto es que una empresa nazca en 0 y no pueda pedir un insight.
+  await setPlatformSetting(db, SETTINGS_KEYS.creditInitialGrant, creditsConfig.monthlyAllotment);
   await setPlatformSetting(db, SETTINGS_KEYS.insightPromptTemplate, DEFAULT_INSIGHT_PROMPT);
   // CU-868kfvaet: precio provisional por crédito — sin confirmar con Jose/el owner.
   await setPlatformSetting(db, SETTINGS_KEYS.creditPriceUsdCents, 10);
