@@ -10,6 +10,8 @@ import { startReportGenerateWorker } from '@/queue/workers/report-generate';
 import { startReportTickWorker } from '@/queue/workers/report-tick';
 import { startEmailSendWorker } from '@/queue/workers/email-send';
 import { startDbBackupWorker } from '@/queue/workers/db-backup';
+import { runStartupIsolationCheck } from '@/lib/db-role-check';
+import { sql } from '@/db/client';
 
 // Macha Finance backend — Bun + Elysia. Tenant scoping is enforced in guards/derive
 // (see src/guards/). Admin is a separate namespace. Validation uses TypeBox (Elysia).
@@ -18,6 +20,18 @@ export const app = createApp().listen(env.port);
 
 console.log(`macha-backend listening on :${env.port}`);
 export type { App };
+
+// CU-868kjbw5h: verifica contra la conexión REAL que el rol de la app no es el dueño de
+// las tablas. Sin esto, `APP_DATABASE_URL` vacía deja RLS/append-only apagados sin un solo
+// síntoma. Corre después del listen por el mismo motivo que los workers: que un problema
+// de base no impida responder health checks. Aborta solo si REQUIRE_ISOLATED_DB_ROLE=true.
+runStartupIsolationCheck(sql, {
+  appUrlIsExplicit: env.appDatabaseUrlIsExplicit,
+  requireIsolated: env.requireIsolatedDbRole,
+  nodeEnv: env.nodeEnv,
+}).catch((err) => {
+  console.error('[db] no se pudo verificar el aislamiento del rol:', err);
+});
 
 // pg-boss workers run in-process with the API for MVP (PRD §5, "workers separables a
 // un servicio dedicado por cambio de configuración de despliegue cuando la capacidad
