@@ -9,6 +9,7 @@ import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
 import { alerts } from '@/modules/alerts';
+import { clientAlertRules } from '@/modules/alert-rules';
 import { register } from '@/modules/billing/register';
 import { creditsTopup } from '@/modules/billing/credits-topup';
 import { billingWebhooks } from '@/modules/billing/webhooks';
@@ -44,6 +45,7 @@ export function createApp() {
       .use(chats_)
       .use(reports_)
       .use(alerts)
+      .use(clientAlertRules)
       .use(adminCompanies)
       .use(adminStagingRows)
       .use(adminIndustryTemplates)
