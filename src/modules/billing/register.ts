@@ -5,6 +5,7 @@ import { identityDerive } from '@/guards/identity.derive';
 import { companies, companyUsers, subscriptions, users } from '@/db/schema';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
+import { grantInitialCredits } from '@/lib/credits';
 import {
   startSubscriptionCheckout,
   BASE_PLAN_AMOUNT_USD_CENTS,
@@ -79,6 +80,13 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
     await db.update(users).set({ locale: body.locale }).where(eq(users.id, userId));
 
     await seedDefaultAlertRules(db, company!.id);
+
+    // CU-868kjc7g5 criterio 3: la empresa nace con saldo. Antes terminaba el registro en
+    // 0 y su primer insight devolvía 402 — el checkout de Recurrente era el ÚNICO camino
+    // para tener créditos, cuando el PRD trata la compra self-serve como algo que se
+    // suma al plan, no como la puerta de entrada. Va dentro de la transacción del
+    // request: una empresa a medio crear no debe quedar con créditos.
+    await grantInitialCredits(db, company!.id);
 
     const checkout = await startSubscriptionCheckout({
       amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,

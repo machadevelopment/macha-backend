@@ -7,6 +7,7 @@ import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
 import { adminConfig } from '@/modules/admin/config';
 import { adminFxRates } from '@/modules/admin/fx-rates';
 import { adminCreditRules } from '@/modules/admin/credit-rules';
+import { adminCredits } from '@/modules/admin/credits';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
 import { alerts } from '@/modules/alerts';
@@ -53,6 +54,7 @@ export function createApp() {
       .use(adminConfig)
       .use(adminFxRates)
       .use(adminCreditRules)
+      .use(adminCredits)
       .use(adminAlertRules)
       .use(adminMonitoring)
       .use(register)
