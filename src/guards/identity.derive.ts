@@ -1,9 +1,8 @@
 import { Elysia } from 'elysia';
-import { eq } from 'drizzle-orm';
 import { verifyToken } from '@/lib/auth';
 import { db as rootDb } from '@/db/client';
-import { users } from '@/db/schema';
 import { reserveScopedConnection } from '@/lib/db-scope';
+import { resolveOrProvisionUser } from '@/lib/user-provisioning';
 
 // Reserved connections are kept off the typed context (handlers never see the raw
 // pooled connection) and released via onAfterHandle/onError, keyed by the request.
@@ -41,15 +40,14 @@ export const identityDerive = new Elysia({ name: 'identity.derive' })
     }
     const token = await verifyToken(auth.slice(7));
 
-    const [user] = await rootDb
-      .select()
-      .from(users)
-      .where(eq(users.workosUserId, token.sub))
-      .limit(1);
-    if (!user) {
-      set.status = 403;
-      throw new Error('No Macha account for this identity');
-    }
+    // CU-868kjkfdf: ESTE es el único punto donde una identidad de WorkOS obtiene su fila
+    // en `users`. Va aquí y no en `tenant.derive` ni en `admin.guard` a propósito: los
+    // dos exigen algo que un usuario recién creado no puede tener todavía (una membresía
+    // en `company_users`, una fila en `staff`), así que darlo de alta ahí no
+    // desbloquearía nada y solo repartiría la responsabilidad en tres sitios. Este guard
+    // es el que sirve `/register` y `/me/memberships`, que son literalmente las dos
+    // primeras llamadas de un usuario nuevo. Ver lib/user-provisioning.ts.
+    const user = await resolveOrProvisionUser(rootDb, token.sub);
 
     // A partir de aquí cualquier salida por error DEBE liberar la conexión — de ahí el
     // try/catch, igual que en tenant.derive: `onError` solo cubre lo que Elysia ya

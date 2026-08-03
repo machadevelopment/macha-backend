@@ -1,7 +1,8 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
-import { companies, companyUsers, subscriptions } from '@/db/schema';
+import { companies, companyUsers, subscriptions, users } from '@/db/schema';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import {
@@ -69,6 +70,13 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
       role: 'owner',
       status: 'active',
     });
+
+    // CU-868kjkfdf criterio 3: el alta JIT de `users` deja `locale` en el default 'es'
+    // porque WorkOS no expone preferencia de idioma. Este es el primer momento en que el
+    // idioma se SABE —el usuario acaba de elegirlo para su empresa— así que se sincroniza
+    // aquí. De esto dependen los emails de reporte y alerta, que se mandan por
+    // `users.locale`, no por el de la empresa.
+    await db.update(users).set({ locale: body.locale }).where(eq(users.id, userId));
 
     await seedDefaultAlertRules(db, company!.id);
 
