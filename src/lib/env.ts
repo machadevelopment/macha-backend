@@ -17,6 +17,11 @@ export const env = {
   appDatabaseUrl: process.env.APP_DATABASE_URL ?? req('DATABASE_URL'),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   workosJwksUrl: process.env.WORKOS_JWKS_URL ?? '',
+  // CU-868kjkfdf: solo se usa para dar de alta una identidad NUEVA (una vez por usuario
+  // en toda su vida). El access token de WorkOS no lleva email ni nombre, y `users.email`
+  // es NOT NULL — así que el perfil se le pide a la Management API por el `sub` que ya
+  // venía firmado, nunca al cliente. Ver src/lib/workos-users.ts.
+  workosApiKey: process.env.WORKOS_API_KEY ?? '',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-5',
   s3Region: process.env.S3_REGION ?? 'us-east-1',

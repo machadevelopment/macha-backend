@@ -18,6 +18,30 @@ bun run db:seed           # optional demo data (separate from schema migrations)
 bun run dev
 ```
 
+### Arranque local: cómo consigue su fila en `users` quien levanta esto por primera vez
+
+Pregunta que costó un bug crítico (CU-868kjkfdf): la base recién migrada tiene el
+esquema completo pero `users`, `companies`, `company_users` y `staff` en cero, y los
+guards rechazan con `403 No Macha account for this identity` a quien no tenga fila.
+
+**No hay que insertar nada a mano.** Desde CU-868kjkfdf, `identity.derive` da de alta la
+identidad sola la primera vez que aparece (ver `src/lib/user-provisioning.ts`): entras
+por AuthKit, el frontend llama a `/me/memberships` o a `/register` con tu token, y la
+fila se crea ahí. `users` es solo el espejo local de la identidad — **no concede acceso
+a nada**: los datos de negocio los gobierna `company_users` y el backoffice `staff`.
+
+Para que ese alta funcione hace falta `WORKOS_API_KEY`, porque el access token de WorkOS
+no lleva email ni nombre y `users.email` es `NOT NULL`. Sin la clave, un usuario **ya
+existente** entra sin problema; uno nuevo recibe un error que lo dice explícitamente.
+
+Dos cosas que siguen siendo manuales, porque conceden permisos y no deben ser
+automáticas:
+
+- **Ser `staff`** (acceso a `/admin/*`): insertar la fila en `staff` a mano contra la
+  base, con el `user_id` que ya se creó solo.
+- **Datos de demo**: `bun run db:seed` monta empresa, plantillas de industria y reglas
+  de crédito. No crea usuarios.
+
 ## Environment variables
 
 Secrets live only in platform-native envs (Railway) or a local untracked `.env` —
@@ -36,6 +60,7 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `RATE_LIMIT_*` | No (has defaults) | Token-bucket + queue-depth gate values. |
 | `CREDIT_*` | No (has defaults) | Credit ratio/allotment, provisional startup values. |
 | `WORKOS_JWKS_URL`, `WORKOS_CLIENT_ID` | Yes | JWT verification (JWKS), no password/session logic here. |
+| `WORKOS_API_KEY` | Yes | Alta JIT de una identidad nueva (CU-868kjkfdf): el access token no trae email/nombre y `users.email` es NOT NULL, así que el perfil se le pide a la Management API por el `sub` ya firmado. Una llamada por usuario en toda su vida. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Yes | ZDR contract only; model kept in config, never hardcoded. |
 | `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Yes | Binaries only; DB stores keys, not files. |
 | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. |
