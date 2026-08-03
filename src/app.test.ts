@@ -92,6 +92,8 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/chats/', undefined],
     ['/reports/', undefined],
     ['/alerts/', undefined],
+    ['/alert-rules/', undefined],
+    ['/alert-rules/ar_overdue', { method: 'PATCH', body: '{}' }],
   ];
 
   for (const [path, init] of tenantScoped) {

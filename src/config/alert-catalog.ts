@@ -16,11 +16,19 @@
 //
 // Umbrales REALES aprobados por Jose (confirmados sin cambios en su revisión final;
 // la API de ClickUp había devuelto la tabla vacía la primera vez, ya se corrigió).
+/**
+ * Unidad del umbral. Estaba solo en comentarios sueltos ("// días", "// %") y eso costó
+ * dos cosas: el backoffice mostraba números sin unidad (CU-868khvzqn) y nada validaba
+ * que un porcentaje estuviera entre 0 y 100. Al hacerla un dato, las dos se resuelven en
+ * el mismo sitio y no pueden divergir del umbral que describen.
+ */
+export type AlertThresholdUnit = 'percent' | 'days';
+
 export type AlertCatalogEntry = {
   ruleKey: string;
   label: string;
-  /** Placeholder — ver nota arriba. Unidad según la regla (%, días). */
   defaultThreshold: number;
+  unit: AlertThresholdUnit;
   notifyImmediately: boolean;
   notes: string;
 };
@@ -29,35 +37,40 @@ export const alertCatalog: AlertCatalogEntry[] = [
   {
     ruleKey: 'ar_overdue',
     label: 'Cobro vencido',
-    defaultThreshold: 60, // días
+    defaultThreshold: 60,
+    unit: 'days',
     notifyImmediately: true,
     notes: 'Factura por cobrar que pasa N días de su vencimiento (invoices.due_date).',
   },
   {
     ruleKey: 'portfolio_concentration',
     label: 'Concentración de cartera',
-    defaultThreshold: 25, // % de AR en un solo counterparty
+    defaultThreshold: 25,
+    unit: 'percent',
     notifyImmediately: true,
     notes: 'Un solo cliente concentra más del % de lo que te deben (AR abierta).',
   },
   {
     ruleKey: 'revenue_drop',
     label: 'Caída de ingresos MoM',
-    defaultThreshold: 15, // % caída vs. promedio de los 3 meses anteriores
+    defaultThreshold: 15,
+    unit: 'percent',
     notifyImmediately: true,
     notes: 'Ingresos del mes contra el promedio de los 3 meses anteriores.',
   },
   {
     ruleKey: 'margin_drop',
     label: 'Margen bajo',
-    defaultThreshold: 25, // % margen mínimo
+    defaultThreshold: 25,
+    unit: 'percent',
     notifyImmediately: false,
     notes: 'Margen bruto del período por debajo del umbral.',
   },
   {
     ruleKey: 'spend_out_of_range',
     label: 'Gasto fuera de rango',
-    defaultThreshold: 40, // % desviación vs. promedio móvil de 3 meses
+    defaultThreshold: 40,
+    unit: 'percent',
     notifyImmediately: false,
     notes:
       'Reemplaza "gasto anómalo" (no determinista). Una categoría de costo supera su ' +
@@ -67,7 +80,8 @@ export const alertCatalog: AlertCatalogEntry[] = [
   {
     ruleKey: 'low_credit_balance',
     label: 'Saldo de créditos bajo',
-    defaultThreshold: 20, // % de la asignación mensual restante
+    defaultThreshold: 20,
+    unit: 'percent',
     notifyImmediately: false,
     notes: 'Créditos restantes por debajo del % de la asignación mensual.',
   },
