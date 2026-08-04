@@ -48,10 +48,24 @@ export async function resolveOrProvisionUser(
   // vez por usuario en toda su vida, no por request.
   const profile = await fetchProfile(workosUserId);
 
-  // `onConflictDoNothing` sobre workos_user_id en vez de un "if not exists" en la app:
-  // dos requests simultáneos del mismo usuario nuevo (el frontend dispara varias
-  // llamadas al montar) llegarían los dos aquí con la fila todavía sin existir. El
-  // índice único es el árbitro; el re-select de abajo recoge la fila gane quien gane.
+  // `onConflictDoNothing` en vez de un "if not exists" en la app: dos requests
+  // simultáneos del mismo usuario nuevo (el frontend dispara varias llamadas al montar)
+  // llegarían los dos aquí con la fila todavía sin existir. El índice único es el
+  // árbitro; el re-select de abajo recoge la fila gane quien gane.
+  //
+  // SIN `target`, Y ESO IMPORTA. `users` tiene DOS índices únicos: `users_workos_user_uq`
+  // y `users_email_lower_uq` (expresión `lower(email)`, migración 0004). Un `ON CONFLICT
+  // (workos_user_id)` solo silencia el primero — el segundo sigue lanzando
+  // `duplicate key value violates unique constraint`. Y en la carrera que esto existe
+  // para cubrir, la fila perdedora viola LOS DOS a la vez: misma identidad, mismo correo.
+  // Cuál de los dos índices reporta Postgres depende del orden en que inserta las
+  // entradas, así que el fallo era intermitente: el test de concurrencia daba 500 en ~2
+  // de cada 3 corridas, en local y en CI, sobre el mismo commit.
+  //
+  // Sin `target` se silencia cualquier índice único, que es justo el comportamiento que
+  // ya describía el bloque de abajo: si el INSERT no entró por el índice de correo
+  // —otra identidad de WorkOS con el mismo email—, el re-select no encuentra nada y el
+  // caso sale por el mensaje explícito, no por un error crudo de Postgres.
   await db
     .insert(users)
     .values({
@@ -62,7 +76,7 @@ export async function resolveOrProvisionUser(
       // de idioma. `POST /register` lo corrige con el locale que el usuario elige para su
       // empresa, que es el primer momento en que se sabe de verdad (criterio 3).
     })
-    .onConflictDoNothing({ target: users.workosUserId });
+    .onConflictDoNothing();
 
   const [provisioned] = await db
     .select()
