@@ -15,8 +15,25 @@ export type ClientCapability =
   | 'configure_alerts'
   | 'manage_members'
   | 'change_roles'
-  | 'billing'
-  | 'delete_company';
+  | 'billing';
+
+// CU-868kh8pwv — `delete_company` SE RETIRÓ de la matriz (decisión de Jose, 2026-07-28).
+//
+// No se implementó ni se dejó declarada: no existe un "borrar empresa" en la interfaz
+// del cliente, y una capacidad que nadie puede ejercer es deuda, no diseño. Ninguna
+// herramienta seria deja que el dueño de una cuenta de pago destruya su empresa y su
+// data financiera con un clic.
+//
+// Lo que la reemplaza es DAR DE BAJA LA SUSCRIPCIÓN: un cambio de estado, no una
+// destrucción. La cuenta pasa a `cancelada` —pierde acceso a lo que consume IA— y su
+// data se conserva. Eso ya existe como estado de cuenta (activa/mora/cancelada) del
+// Módulo 8 y de la decisión de créditos (CU-868kfv97x), así que la capacidad de baja
+// vive atada a la suscripción y no a un permiso suelto sobre la empresa. El botón que
+// ejerce el owner es "dar de baja mi plan", no "borrar empresa".
+//
+// El borrado físico —si algún día hace falta, p. ej. por una solicitud legal de
+// eliminación de datos— es una operación interna de Macha con confirmación, fuera del
+// MVP y fuera de la interfaz del cliente.
 
 // Matriz 1 (aprobada). member sí carga Excel: en una pyme quien sube el archivo
 // casi nunca es el dueño. owner siempre tiene todas las capacidades del cliente.
@@ -30,7 +47,6 @@ const CLIENT_MATRIX: Record<ClientCapability, ClientRole[]> = {
   manage_members: ['owner'],
   change_roles: ['owner'],
   billing: ['owner'],
-  delete_company: ['owner'],
 };
 
 export function clientCan(role: ClientRole, capability: ClientCapability): boolean {

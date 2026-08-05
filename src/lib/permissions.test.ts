@@ -19,7 +19,6 @@ const CLIENT_CASES: [ClientCapability, ClientRole[]][] = [
   ['manage_members', ['owner']],
   ['change_roles', ['owner']],
   ['billing', ['owner']],
-  ['delete_company', ['owner']],
 ];
 
 const ALL_CLIENT_ROLES: ClientRole[] = ['owner', 'admin', 'member'];
