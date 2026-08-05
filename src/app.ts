@@ -23,6 +23,7 @@ import { industryTemplateDownload } from '@/modules/industry-templates';
 import { insights, creditsBalance } from '@/modules/insights';
 import { metrics, arAp } from '@/modules/metrics';
 import { me } from '@/modules/me';
+import { members, invitationAcceptance } from '@/modules/members';
 import { reports_ } from '@/modules/reports';
 
 /**
@@ -61,6 +62,8 @@ export function createApp() {
     .use(creditsTopup)
     .use(billingWebhooks)
     .use(me)
+    .use(members)
+    .use(invitationAcceptance)
     .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
     .onError(({ error, set }) => {
       Sentry.captureException(error);
