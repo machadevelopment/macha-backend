@@ -69,6 +69,24 @@ jobs:
           echo "El contenedor no respondió en /health:"
           docker logs ci-smoke
           exit 1
+      # El bundle se comió NODE_ENV una vez y nadie se enteró hasta ver el despliegue
+      # real: `bun build` sustituye `process.env.NODE_ENV` por un literal, y la etapa
+      # `build` del Dockerfile no la tiene seteada, así que quedaba "development"
+      # incrustado y la variable de Railway no hacía nada. Se arregló con `--env=disable`
+      # en el script `build`. Esto lo verifica de extremo a extremo —sobre el bundle
+      # que se despliega, no sobre el fuente— porque quitar esa bandera vuelve a
+      # compilar y a pasar todo lo demás en verde. Importa sobre todo por Sentry:
+      # `environment` sale de aquí, y con "development" no se distingue un incidente de
+      # producción de uno de staging.
+      - name: El entorno no quedó incrustado en el bundle
+        run: |
+          got=$(curl -sf -m 5 http://localhost:3001/ | grep -o '"env":"[^"]*"' || echo "SIN RESPUESTA")
+          echo "GET / -> $got"
+          test "$got" = '"env":"production"' || {
+            echo "Se esperaba \"env\":\"production\" (el Dockerfile setea NODE_ENV en la etapa runtime)."
+            echo "Si dice \"development\", al script 'build' de package.json le falta --env=disable."
+            exit 1
+          }
       - name: pg_dump existe en la imagen (job nocturno de backup, CU-868kfvar3)
         run: docker run --rm --entrypoint pg_dump macha-backend:ci --version
 
