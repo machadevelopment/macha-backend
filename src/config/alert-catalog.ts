@@ -61,10 +61,15 @@ export const alertCatalog: AlertCatalogEntry[] = [
   {
     ruleKey: 'margin_drop',
     label: 'Margen bajo',
+    // CU-868kh8y58 — NO CAMBIAR a un valor "de neto". Este 25% está calibrado sobre
+    // MARGEN BRUTO (`revenue - cogs`, sin restar opex), que es la definición cerrada
+    // del producto: ver lib/margin.ts y PRD.md §08. Un umbral pensado para margen neto
+    // sería mucho más bajo, y aplicarlo al bruto dejaría la alerta muda justo en las
+    // empresas que peor están.
     defaultThreshold: 25,
     unit: 'percent',
     notifyImmediately: false,
-    notes: 'Margen bruto del período por debajo del umbral.',
+    notes: 'Margen bruto del período (ingresos − costo directo) por debajo del umbral.',
   },
   {
     ruleKey: 'spend_out_of_range',

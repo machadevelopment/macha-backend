@@ -5,6 +5,7 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { getOrComputeMonthlyAmounts } from '@/lib/rollups';
 import { AGING_BUCKET_SQL, emptyAgingBuckets, type AgingBucket } from '@/lib/aging';
+import { grossProfit, grossMarginPct } from '@/lib/margin';
 import { companies, invoices, bills } from '@/db/schema';
 
 function monthStart(monthsAgo: number): string {
@@ -45,11 +46,26 @@ export const metrics = new Elysia().use(tenantDerive).get(
 
     const series = periods.map((period) => {
       const amounts = amountsByPeriod.get(period)!;
-      // Margen bruto provisional = ingresos - costo de ventas (sin restar opex).
-      // No hay una definición de "margen" confirmada por Jose todavía — placeholder
-      // explícito, a ajustar cuando exista esa decisión (mismo patrón que otros
-      // valores provisionales de F0).
-      return { period, ...amounts, margin: amounts.revenue - amounts.cogs };
+      // CU-868kh8y58: ya no es un placeholder. La definición cerrada vive en
+      // lib/margin.ts y la comparten KPI, reporte y alerta.
+      //
+      // Se devuelven las DOS caras del mismo dato a propósito: la utilidad bruta en
+      // moneda y el porcentaje. El bug del ticket era precisamente que en la misma
+      // pantalla convivían una ganancia que restaba gastos y un margen que no; que el
+      // backend emita el par ya calculado quita de la UI la oportunidad de recomponerlo
+      // mal. `grossMarginPct` es null en un período sin ventas (ver lib/margin.ts).
+      return {
+        period,
+        ...amounts,
+        grossProfit: grossProfit(amounts.revenue, amounts.cogs),
+        grossMarginPct: grossMarginPct(amounts.revenue, amounts.cogs),
+        // Alias del campo anterior. Se mantiene UNA release para que el orden de
+        // despliegue entre repos no importe: backend y frontend van a Railway y a
+        // Vercel por separado, así que renombrar en seco rompe el dashboard en la
+        // ventana entre un deploy y el otro. Sale del mismo cálculo compartido, así
+        // que no puede divergir mientras exista.
+        margin: grossProfit(amounts.revenue, amounts.cogs),
+      };
     });
 
     return { baseCurrency: company?.baseCurrency ?? 'GTQ', months: series };
@@ -66,6 +82,9 @@ export const metrics = new Elysia().use(tenantDerive).get(
             cogs: t.Number(),
             opex: t.Number(),
             other: t.Number(),
+            grossProfit: t.Number(),
+            grossMarginPct: t.Union([t.Number(), t.Null()]),
+            /** @deprecated Alias de `grossProfit`; ver el comentario del handler. */
             margin: t.Number(),
           }),
         ),
