@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
+import { enforceTokenBucketForUser } from '@/lib/rate-limit';
 import { companies, companyUsers, subscriptions, users } from '@/db/schema';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
@@ -62,7 +63,13 @@ import {
  */
 export const register = new Elysia({ prefix: '/register' }).use(identityDerive).post(
   '/',
-  async ({ userId, body, db, scopeToCompany }) => {
+  async ({ userId, body, set, db, scopeToCompany }) => {
+    // CU-868kjc950 criterio 1: por USUARIO, porque aquí todavía no hay empresa. Cada
+    // llamada corre `CREATE TABLE ... PARTITION OF` tres veces contra el Postgres
+    // compartido: sin techo, esto es DDL ilimitado sobre la base de todos los clientes.
+    const limited = await enforceTokenBucketForUser('register', userId, set, 'POST /register');
+    if (limited) return limited;
+
     // Antes del INSERT: ver la nota de arriba sobre el abrazo mortal.
     const companyId = randomUUID();
     await provisionTenantPartitions(companyId);

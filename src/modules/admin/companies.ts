@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql as rawSql } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { companies, companyUsers, users } from '@/db/schema';
@@ -8,6 +8,7 @@ import { logAdminAction } from '@/lib/admin-audit';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { grantInitialCredits } from '@/lib/credits';
+import { dejariaSinOwner, MENSAJE_SIN_OWNER } from '@/lib/membership-invariants';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -183,6 +184,88 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       .innerJoin(users, eq(users.id, companyUsers.userId))
       .where(eq(companyUsers.companyId, params.id));
   })
+  /**
+   * CU-868kmqrg7: alta de un miembro por correo.
+   *
+   * Faltaba la pieza que hacía inútil todo lo demás: `POST /admin/companies` creaba la
+   * empresa con particiones, alertas y créditos, pero NADA podía crear la fila en
+   * `company_users`. El único endpoint de miembros era el PATCH de abajo, que devuelve
+   * 404 si la membresía no existe — solo edita a quien ya está dentro. Una empresa recién
+   * creada quedaba inaccesible: existía, y nadie podía entrar. En el alta de producción
+   * del 2026-08-05 la membresía hubo que insertarla a mano contra la base.
+   *
+   * Alcance deliberado: por correo de alguien que YA inició sesión al menos una vez, o
+   * sea que ya tiene fila en `users` (la crea `identity.derive` sola, CU-868kjkfdf).
+   * Invitar a quien nunca ha entrado necesita el flujo de invitación de WorkOS + email,
+   * que sigue sin construirse — pero eso es un caso más, no el bloqueo: con esto el
+   * onboarding asistido ya no depende de acceso a la base.
+   *
+   * El correo se busca en minúsculas porque es como lo guarda el alta JIT desde WorkOS,
+   * y quien lo teclea en el panel no tiene por qué respetar mayúsculas.
+   */
+  .post(
+    '/:id/users',
+    async ({ staffId, tier, params, body, set, db }) => {
+      assertStaffCapability(tier, 'manage_companies', set);
+
+      const [company] = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(eq(companies.id, params.id));
+      if (!company) {
+        set.status = 404;
+        return { error: 'Company not found' };
+      }
+
+      const [user] = await db
+        .select({ id: users.id, email: users.email })
+        .from(users)
+        .where(rawSql`lower(${users.email}) = ${body.email.trim().toLowerCase()}`);
+      if (!user) {
+        set.status = 404;
+        // Mensaje accionable: el fallo casi siempre es que la persona todavía no ha
+        // entrado nunca, no que el correo esté mal escrito.
+        return {
+          error:
+            'No existe un usuario con ese correo. Tiene que iniciar sesión una vez para que se cree su identidad.',
+        };
+      }
+
+      const [yaEsta] = await db
+        .select({ role: companyUsers.role, status: companyUsers.status })
+        .from(companyUsers)
+        .where(and(eq(companyUsers.companyId, params.id), eq(companyUsers.userId, user.id)));
+      if (yaEsta) {
+        set.status = 409;
+        return { error: 'El usuario ya es miembro de esta empresa', ...yaEsta };
+      }
+
+      await db.insert(companyUsers).values({
+        companyId: params.id,
+        userId: user.id,
+        role: body.role,
+        status: 'active',
+      });
+
+      await logAdminAction(db, {
+        actorStaffId: staffId,
+        companyId: params.id,
+        action: 'company_user.add',
+        targetTable: 'company_users',
+        targetId: user.id,
+        metadata: { email: user.email, role: body.role },
+      });
+
+      set.status = 201;
+      return { userId: user.id, email: user.email, role: body.role, status: 'active' };
+    },
+    {
+      body: t.Object({
+        email: t.String({ minLength: 3 }),
+        role: t.Union([t.Literal('owner'), t.Literal('admin'), t.Literal('member')]),
+      }),
+    },
+  )
   .patch(
     '/:id/users/:userId',
     async ({ staffId, tier, params, body, set, db }) => {
@@ -198,6 +281,22 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       if (!before) {
         set.status = 404;
         return { error: 'Membership not found' };
+      }
+
+      // CU-868kjc8pj: hasta aquí lo único que se comprobaba era que la membresía
+      // existiera —para el audit log— y luego se escribía rol y estado directo. Nada
+      // impedía degradar o revocar al ÚNICO owner, contra la regla del PRD §8. La
+      // comprobación toma un lock sobre las filas de la empresa (ver el helper), así que
+      // dos peticiones degradando a dos owners distintos no pueden pasar ambas.
+      const cambio = {
+        companyId: params.id,
+        userId: params.userId,
+        nextRole: body.role ?? before.role,
+        nextStatus: body.status ?? before.status,
+      };
+      if (await dejariaSinOwner(db, cambio)) {
+        set.status = 409;
+        return { error: MENSAJE_SIN_OWNER };
       }
 
       await db
