@@ -36,9 +36,25 @@ import {
  * El orden importa y no es el que era:
  *   - el checkout con Recurrente ocurre ANTES de insertar la suscripción, para que la
  *     fila nazca con `provider_checkout_id` y desaparezca el UPDATE posterior;
- *   - las particiones se crean AL FINAL. Son DDL sobre otra conexión (rol dueño) y no
- *     participan de esta transacción: si algo falla antes, no queda una partición
- *     huérfana de una empresa que se revirtió.
+ *   - las particiones se crean PRIMERO, antes del INSERT en `companies`.
+ *
+ * Ese último punto estaba invertido y colgaba la petición para siempre. Las particiones
+ * se creaban al final para no dejar huérfanas si algo fallaba antes — razonable sobre el
+ * papel, imposible en la práctica: el DDL corre sobre otra conexión (rol dueño) y
+ * `CREATE TABLE ... PARTITION OF transactions` hereda la FK compuesta a `companies`,
+ * cuya validación pide un ShareRowExclusiveLock sobre `companies`. Ese lock choca con el
+ * RowExclusiveLock que dejó el INSERT de ESTA transacción, que no cierra hasta
+ * `onAfterHandle` — o sea, hasta después de este handler. El DDL espera al request y el
+ * request espera al DDL. Postgres no lo mata: su detector solo ve ciclos entre locks, y
+ * el request no espera un lock sino al cliente (`idle in transaction`).
+ *
+ * Verificado en producción sobre el gemelo de este código (`POST /admin/companies`, la
+ * otra vía por la que nace una empresa): petición colgada indefinidamente y
+ * `pg_blocking_pids` confirmando el ciclo.
+ *
+ * Coste asumido del orden nuevo: si algo falla después, quedan particiones vacías de una
+ * empresa que no existe. Es basura inocua —tablas vacías— y `CREATE TABLE IF NOT EXISTS`
+ * hace idempotente el reintento; colgar el alta de empresas no tiene arreglo desde fuera.
  *
  * Queda un caso extremo asumido: si el commit falla DESPUÉS del checkout, queda un
  * checkout abierto en Recurrente sin empresa local. El webhook lo ignoraría (no
@@ -47,9 +63,14 @@ import {
 export const register = new Elysia({ prefix: '/register' }).use(identityDerive).post(
   '/',
   async ({ userId, body, db, scopeToCompany }) => {
+    // Antes del INSERT: ver la nota de arriba sobre el abrazo mortal.
+    const companyId = randomUUID();
+    await provisionTenantPartitions(companyId);
+
     const [company] = await db
       .insert(companies)
       .values({
+        id: companyId,
         // Sin org de WorkOS propia todavía para una empresa auto-registrada (eso
         // vive en el flujo de invite/multi-tenant de WorkOS, fuera de alcance aquí)
         // — placeholder estable y único por empresa.
@@ -102,8 +123,6 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
       status: 'pending_checkout',
       providerCheckoutId: checkout.providerCheckoutId,
     });
-
-    await provisionTenantPartitions(company!.id);
 
     return { companyId: company!.id, checkoutUrl: checkout.checkoutUrl };
   },
