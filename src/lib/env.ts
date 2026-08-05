@@ -73,6 +73,17 @@ export const env = {
   // (X-SECRET-KEY), test/live variants determine sandbox vs real charges.
   recurrenteSecretKey: process.env.RECURRENTE_SECRET_KEY ?? '',
   recurrenteWebhookSecret: process.env.RECURRENTE_WEBHOOK_SECRET ?? '',
+  /**
+   * CU-868kmxu41 — permite completar el registro SIN pasar por el checkout, para
+   * onboarding de pilotos mientras el proveedor de pagos no está contratado.
+   *
+   * Es opt-in explícito y no un fallback automático a propósito: si "sin clave de
+   * Recurrente" bastara para saltarse el cobro, olvidar la variable en producción
+   * regalaría cuentas en silencio. Sin esta bandera, un entorno sin proveedor rechaza
+   * el registro con un 503 claro; con ella, la empresa se crea y su suscripción queda
+   * en `pending_checkout`, que es exactamente lo que es.
+   */
+  billingCheckoutOptional: process.env.BILLING_CHECKOUT_OPTIONAL === 'true',
   // CU-868kfvar3: retención del pg_dump nocturno en S3 (segunda capa de respaldo,
   // aparte del backup nativo de Railway — configuración de consola, no vive aquí).
   // Vacía, `??` daba `Number('')` = 0 — es decir, retención CERO: el job de limpieza

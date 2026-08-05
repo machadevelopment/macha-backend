@@ -12,6 +12,9 @@ import {
   BASE_PLAN_AMOUNT_USD_CENTS,
   appBaseUrl,
 } from '@/lib/billing/provider';
+import { isBillingConfigured } from '@/lib/billing/recurrente-client';
+import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
+import { env } from '@/lib/env';
 
 /**
  * CU-868kfvae1/868kfvaem: registro autoservicio — alta automática de empresa+owner
@@ -116,22 +119,49 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
     // request: una empresa a medio crear no debe quedar con créditos.
     await grantInitialCredits(db, company!.id);
 
-    const checkout = await startSubscriptionCheckout({
-      amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
-      companyId: company!.id,
-      successUrl: `${appBaseUrl}/?registered=1`,
-      cancelUrl: `${appBaseUrl}/register?cancelled=1`,
-    });
+    // CU-868kmxu41 — EL CHECKOUT SE DECIDE, NO SE ASUME.
+    //
+    // Antes esto llamaba a Recurrente sin más, y en un entorno sin
+    // `RECURRENTE_SECRET_KEY` el throw tumbaba el registro entero con un 500 cuyo texto
+    // interno llegaba literal al navegador. Efecto real en producción: NINGUNA empresa
+    // podía darse de alta, así que ningún piloto podía entrar a probar el producto.
+    //
+    // Ahora hay dos caminos y ambos son explícitos:
+    //
+    //  · Con proveedor configurado -> lo de siempre: checkout primero, y la suscripción
+    //    nace ya con su `provider_checkout_id`.
+    //  · Sin proveedor -> depende de `BILLING_CHECKOUT_OPTIONAL`. Si está encendida, la
+    //    empresa se crea y su suscripción queda en `pending_checkout` sin id de
+    //    checkout: es el estado honesto —existe, no ha pagado— y el cobro se puede
+    //    reconciliar después. Si NO está encendida, se rechaza con un 503 limpio.
+    //
+    // El opt-in es deliberado: si la simple ausencia de la clave bastara para saltarse
+    // el cobro, olvidar la variable en producción regalaría cuentas en silencio.
+    if (!isBillingConfigured() && !env.billingCheckoutOptional) {
+      throw new BillingNotConfiguredError();
+    }
+
+    const checkout = isBillingConfigured()
+      ? await startSubscriptionCheckout({
+          amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
+          companyId: company!.id,
+          successUrl: `${appBaseUrl}/?registered=1`,
+          cancelUrl: `${appBaseUrl}/register?cancelled=1`,
+        })
+      : null;
 
     await db.insert(subscriptions).values({
       companyId: company!.id,
       planCode: 'base',
       amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
       status: 'pending_checkout',
-      providerCheckoutId: checkout.providerCheckoutId,
+      providerCheckoutId: checkout?.providerCheckoutId,
     });
 
-    return { companyId: company!.id, checkoutUrl: checkout.checkoutUrl };
+    // `checkoutUrl: null` le dice al frontend "entrá a la app" en vez de redirigir a un
+    // checkout que no existe. No se devuelve una cadena vacía: un `null` explícito es
+    // imposible de confundir con una URL rota.
+    return { companyId: company!.id, checkoutUrl: checkout?.checkoutUrl ?? null };
   },
   {
     body: t.Object({
