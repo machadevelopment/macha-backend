@@ -9,7 +9,32 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from './env';
 
 // S3 stores binaries; the DB stores only keys. Keys are prefixed by company_id.
-export const s3 = new S3Client({ region: env.s3Region });
+//
+// Las credenciales se pasan EXPLÍCITAS cuando existen. Antes solo se pasaba la región y
+// el SDK caía a su cadena por defecto, que busca `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
+// — no los `S3_*` que documentan `.env.example` y el README. Resultado: con la
+// configuración documentada, toda subida moría con `Could not load credentials from any
+// providers`. Visto en producción al subir el primer Excel real.
+//
+// Si no están seteadas se OMITE el campo a propósito, en vez de pasar cadenas vacías: en
+// un entorno con rol de IAM o credenciales de instancia la cadena por defecto SÍ es lo
+// correcto, y un objeto `credentials` con cadenas vacías la anularía y rompería el
+// despliegue. Por eso el `??` de env.ts (cadena vacía) y este `&&` van juntos.
+//
+// Función aparte —y no un spread en línea— para poder fijarla en un test sin construir un
+// cliente ni tocar `process.env` (el módulo lee `env` una sola vez, al importarse).
+export function s3Credentials(
+  accessKeyId: string,
+  secretAccessKey: string,
+): { credentials?: { accessKeyId: string; secretAccessKey: string } } {
+  if (!accessKeyId || !secretAccessKey) return {};
+  return { credentials: { accessKeyId, secretAccessKey } };
+}
+
+export const s3 = new S3Client({
+  region: env.s3Region,
+  ...s3Credentials(env.s3AccessKeyId, env.s3SecretAccessKey),
+});
 
 export const uploadKey = (companyId: string, documentId: string, ext: string) =>
   `companies/${companyId}/uploads/${documentId}.${ext}`;
