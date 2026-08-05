@@ -1,4 +1,5 @@
 import { env } from '@/lib/env';
+import { BillingNotConfiguredError } from './billing-errors';
 
 // CU-868kfvae6: Recurrente REST API (verified against docs.recurrente.com — base
 // URL, auth header, /api/checkouts request/response shape, and the subscription
@@ -6,11 +7,15 @@ import { env } from '@/lib/env';
 const BASE_URL = 'https://app.recurrente.com/api';
 
 function assertConfigured(): void {
-  if (!env.recurrenteSecretKey) {
-    throw new Error(
-      'RECURRENTE_SECRET_KEY not configured — cannot call the Recurrente API. Set a test key to develop against their sandbox.',
-    );
-  }
+  // CU-868kmwn3q: tipo propio, no un Error suelto. El mensaje de este throw llegaba
+  // literal al navegador con el nombre de la variable de entorno dentro; ahora `app.ts`
+  // lo traduce a un 503 limpio antes de responder.
+  if (!env.recurrenteSecretKey) throw new BillingNotConfiguredError();
+}
+
+/** ¿Se puede cobrar en este entorno? Lo consulta `/register` para decidir sin lanzar. */
+export function isBillingConfigured(): boolean {
+  return Boolean(env.recurrenteSecretKey);
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {

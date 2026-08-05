@@ -23,6 +23,11 @@ import { industryTemplateDownload } from '@/modules/industry-templates';
 import { insights, creditsBalance } from '@/modules/insights';
 import { metrics, arAp } from '@/modules/metrics';
 import { me } from '@/modules/me';
+import {
+  BillingNotConfiguredError,
+  BILLING_NOT_CONFIGURED_STATUS,
+  BILLING_NOT_CONFIGURED_MESSAGE,
+} from '@/lib/billing/billing-errors';
 import { members, invitationAcceptance } from '@/modules/members';
 import { reports_ } from '@/modules/reports';
 
@@ -73,6 +78,14 @@ export function createApp() {
       // el JSON de Anthropic completo — incluido "Your credit balance is too low to
       // access the Anthropic API", que le decía a una empresa con créditos de sobra
       // que se había quedado sin saldo, y con `request_id` del proveedor de regalo.
+      // CU-868kmwn3q: mismo tratamiento y por la misma razón que el de IA — un error de
+      // configuración del servidor no es información del usuario, y el texto crudo
+      // llevaba dentro el nombre de la variable de entorno.
+      if (error instanceof BillingNotConfiguredError) {
+        set.status = BILLING_NOT_CONFIGURED_STATUS;
+        return { error: BILLING_NOT_CONFIGURED_MESSAGE };
+      }
+
       if (error instanceof AiProviderError) {
         set.status = aiFailureStatus(error.failure);
         return { error: aiFailureMessage(error.failure) };

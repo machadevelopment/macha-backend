@@ -24,11 +24,41 @@ import { intakeConfig } from '@/config/intake';
  * sobreestimar cuesta una llamada extra.
  */
 
-/** Costo fijo estimado por fila devuelta, en tokens: llaves, claves del payload, comas. */
-const OUTPUT_TOKENS_PER_ROW_BASE = 35;
+/**
+ * RECALIBRADO con producción (2026-08-05, segunda corrida del mismo libro). La primera
+ * versión de estos coeficientes asumía que la salida crece con el ancho de la hoja, y
+ * los números reales dicen que **no**:
+ *
+ *   | hoja          | cols | filas | tokens salida | por fila |
+ *   |---------------|------|-------|---------------|----------|
+ *   | Tiendas       |  10  |    6  |         3.695 |    616   |
+ *   | Productos     |  17  |   43  |        12.638 |    294   |
+ *   | OrdenesCompra |   7  |   61  |        13.028 |    214   |
+ *   | Clientes      |  13  |  101  |        20.145 |    200   |
+ *   | Inventario    |   9  |  211  |        19.758 |     94   |
+ *   | LineasOC      |   6  |  224  |        19.758 |     88   |
+ *   | Proveedores   |   9  |    7  |           256 |     37   |
+ *
+ * Una hoja de 7 columnas costó 214 tokens por fila y una de 9 costó 94: el ancho de
+ * ENTRADA no manda. Lo que manda es cuántas filas decide clasificar el modelo y qué tan
+ * largo sale cada payload, que es una propiedad del contenido, no de la forma. Con la
+ * calibración vieja el planificador mandó 305 filas de `Ventas` en una llamada y la
+ * respuesta volvió a cortarse — el mismo documento perdido, ahora con un error honesto.
+ *
+ * De ahí el cambio de forma: **domina un costo fijo por fila, calibrado sobre el peor
+ * caso creíble** (~294, descartando `Tiendas` porque con 6 filas el overhead fijo de la
+ * respuesta se reparte entre muy pocas y no representa a un lote grande). El término por
+ * celda se conserva pequeño, como corrección de segundo orden, no como el factor
+ * principal que era.
+ *
+ * Se asume el costo: hojas angostas se parten más de lo estrictamente necesario y eso
+ * son llamadas de más a Anthropic. Es el lado barato del error — el otro lado es perder
+ * el documento entero.
+ */
+const OUTPUT_TOKENS_PER_ROW_BASE = 300;
 
-/** Costo estimado por celda de la fila de entrada, en tokens de salida. */
-const OUTPUT_TOKENS_PER_CELL = 6;
+/** Corrección de segundo orden por ancho. Pequeña a propósito: ver la tabla de arriba. */
+const OUTPUT_TOKENS_PER_CELL = 8;
 
 /**
  * Cuántas columnas mira para estimar el ancho. Una hoja puede traer una fila
