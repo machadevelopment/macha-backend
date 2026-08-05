@@ -28,3 +28,11 @@ export function reportUrl(reportId: string): string {
 export function alertUrl(alertEventId: string): string {
   return `${env.appBaseUrl}/alerts/${alertEventId}`;
 }
+
+/** Aceptación de una invitación de equipo (CU-868kh8pwv). Espera el token EN CLARO, no
+ * el id de la invitación: la base solo guarda su hash, y el enlace es lo único que
+ * prueba que quien lo abre recibió el correo. Ruta:
+ * `app/(app)/invitations/accept/page.tsx`. */
+export function invitationAcceptUrl(token: string): string {
+  return `${env.appBaseUrl}/invitations/accept?token=${encodeURIComponent(token)}`;
+}

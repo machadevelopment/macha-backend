@@ -9,7 +9,9 @@ export const notifications = pgTable(
     companyId: uuid('company_id')
       .notNull()
       .references(() => companies.id),
-    kind: text('kind').$type<'report' | 'alert'>().notNull(),
+    // CU-868kh8pwv: 'invitation' se suma al CHECK en la migración 0017 — un tipo de
+    // TypeScript más ancho que la restricción de la base solo mueve el fallo a runtime.
+    kind: text('kind').$type<'report' | 'alert' | 'invitation'>().notNull(),
     recipientEmail: text('recipient_email').notNull(),
     refId: uuid('ref_id'), // report_version_id or alert_event_id
     resendMessageId: text('resend_message_id'),
