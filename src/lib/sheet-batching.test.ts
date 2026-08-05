@@ -13,6 +13,23 @@ const sheet = (rows: number, cells: number): unknown[][] =>
  * cortaba, el JSON llegaba partido y el documento entero se perdía.
  */
 describe('planBatchSize (CU-868kmwdqu)', () => {
+  test('el lote de 305 filas que volvió a romper producción ya no se planifica', () => {
+    // Segunda corrida, 2026-08-05: con la calibración vieja el planificador mandó 305
+    // filas de `Ventas` en una llamada y la respuesta se cortó otra vez. El número está
+    // acá con nombre y apellido para que una recalibración futura no lo reintroduzca.
+    expect(planBatchSize(sheet(521, 16))).toBeLessThan(305);
+  });
+
+  test('el presupuesto se calibra sobre el peor caso medido, no sobre el promedio', () => {
+    // Producción midió hasta ~294 tokens de salida por fila en lotes grandes. Un lote
+    // planificado no debe superar el presupuesto ni con ese costo por fila.
+    const PEOR_CASO_MEDIDO = 294;
+    for (const cols of [6, 9, 13, 16, 17]) {
+      const filas = planBatchSize(sheet(600, cols));
+      expect(filas * PEOR_CASO_MEDIDO).toBeLessThanOrEqual(intakeConfig.outputTokenBudget);
+    }
+  });
+
   test('la hoja que rompió producción ya no va en una sola llamada', () => {
     const ventas = sheet(521, 16);
     const size = planBatchSize(ventas);
