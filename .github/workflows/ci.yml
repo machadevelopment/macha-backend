@@ -40,6 +40,38 @@ jobs:
       # despliega solo. Aquí es barato (~200ms) y cubre el mismo riesgo.
       - run: bun run build
 
+  # `bun run build` de arriba NO construye la imagen, y la imagen es lo que Railway
+  # despliega de verdad. El hueco no era teórico: el `prepare` de package.json es
+  # `husky`, devDependency, así que `bun install --production` moría con
+  # `husky: command not found` (exit 127) y la imagen NUNCA compiló — con el gate
+  # entero en verde, porque nadie la construía. Se descubrió en el primer deploy real
+  # a Railway, no aquí, que es exactamente lo que este job evita que se repita.
+  #
+  # Construye y además ARRANCA el contenedor: una imagen que compila pero no levanta
+  # (falta un binario en la etapa runtime, un COPY que no trajo lo que hacía falta)
+  # pasaría un build a secas. `pg_dump` se verifica aparte porque no lo usa el arranque
+  # sino el job nocturno de backup — se rompería en silencio meses después.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t macha-backend:ci .
+      - name: El contenedor arranca y responde
+        run: |
+          docker run -d --name ci-smoke -p 3001:3001 \
+            -e DATABASE_URL='postgres://unused:unused@127.0.0.1:1/unused' \
+            macha-backend:ci
+          for i in $(seq 1 30); do
+            if curl -sf -m 2 http://localhost:3001/health; then echo "OK"; exit 0; fi
+            sleep 1
+          done
+          echo "El contenedor no respondió en /health:"
+          docker logs ci-smoke
+          exit 1
+      - name: pg_dump existe en la imagen (job nocturno de backup, CU-868kfvar3)
+        run: docker run --rm --entrypoint pg_dump macha-backend:ci --version
+
   # CU-868kh8zbj criterio 5: los tests de integración corren EN CI o no protegen nada.
   # Job aparte del unitario a propósito: necesita un Postgres y tarda más, y separarlo
   # deja ver de un vistazo si lo que se rompió fue el aislamiento o el código normal.
