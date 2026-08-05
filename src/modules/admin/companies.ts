@@ -1,4 +1,5 @@
 import { Elysia, t } from 'elysia';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
@@ -45,9 +46,32 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
     async ({ staffId, tier, body, set, db }) => {
       // CU-868kfvaf5 criterio 1: alta manual de empresas + aprovisiona partición.
       assertStaffCapability(tier, 'manage_companies', set);
+
+      // El id se genera aquí y las particiones se crean ANTES del INSERT. El orden es
+      // obligatorio, no una preferencia: `provisionTenantPartitions` corre el DDL sobre
+      // OTRA conexión (rol dueño), y `CREATE TABLE ... PARTITION OF transactions` hereda
+      // la FK compuesta a `companies`, cuya validación pide un ShareRowExclusiveLock
+      // sobre `companies`. Ese lock choca con el RowExclusiveLock que deja el INSERT de
+      // la transacción del request —abierta desde `derive` y que no cierra hasta
+      // `onAfterHandle`, o sea hasta DESPUÉS de este handler.
+      //
+      // Con el INSERT primero, el resultado era un abrazo mortal permanente: el DDL
+      // espera al request, el request espera al DDL. Postgres no lo mata porque su
+      // detector solo ve ciclos entre locks, y el request no está esperando un lock sino
+      // al cliente (`idle in transaction`). Visto en producción: `POST /admin/companies`
+      // colgado indefinidamente, `pg_blocking_pids` confirmando el ciclo.
+      //
+      // Coste de este orden: si algo falla después, quedan particiones vacías de una
+      // empresa que no existe. Es intencional — una tabla vacía huérfana es basura
+      // inocua y `CREATE TABLE IF NOT EXISTS` hace que el reintento sea idempotente,
+      // mientras que colgar la petición deja el alta de empresas inutilizable.
+      const companyId = randomUUID();
+      const partitions = await provisionTenantPartitions(companyId);
+
       const [company] = await db
         .insert(companies)
         .values({
+          id: companyId,
           workosOrgId: body.workosOrgId,
           name: body.name,
           industry: body.industry,
@@ -56,7 +80,6 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         })
         .returning();
 
-      const partitions = await provisionTenantPartitions(company!.id);
       // CU-868kfvad3 catalog — fixed while building M8 self-serve registration: this
       // manual admin path never seeded it either, only scripts/seed.ts's demo company did.
       await seedDefaultAlertRules(db, company!.id);
