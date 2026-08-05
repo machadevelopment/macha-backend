@@ -6,7 +6,7 @@
   "description": "Macha Finance — CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "bun build src/index.ts --target bun --outdir dist",
+    "build": "bun build src/index.ts --target bun --env=disable --outdir dist",
     "start": "bun run dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
