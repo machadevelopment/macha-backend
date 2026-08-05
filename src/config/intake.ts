@@ -13,14 +13,14 @@
 //   de Macha, midiendo el percentil 95 de filas y de hojas. No bloquea el arranque.
 export const intakeConfig = {
   /** Tamaño máximo de archivo, en MB. */
-  maxFileSizeMb: Number(process.env.INTAKE_MAX_FILE_SIZE_MB ?? 10),
+  maxFileSizeMb: Number(process.env.INTAKE_MAX_FILE_SIZE_MB || 10),
   /** Filas máximas por archivo (todas las hojas). */
-  maxRowsPerFile: Number(process.env.INTAKE_MAX_ROWS_PER_FILE ?? 50_000),
+  maxRowsPerFile: Number(process.env.INTAKE_MAX_ROWS_PER_FILE || 50_000),
   /** Hojas máximas por libro. Corrección: faltaba en la primera implementación —
    * la tabla de valores de Jose (CU-868kfv972) no llegó completa la primera vez. */
-  maxSheetsPerWorkbook: Number(process.env.INTAKE_MAX_SHEETS_PER_WORKBOOK ?? 30),
+  maxSheetsPerWorkbook: Number(process.env.INTAKE_MAX_SHEETS_PER_WORKBOOK || 30),
   /** A partir de cuántas filas una hoja se considera "grande" y se procesa en lotes. */
-  largeSheetRowThreshold: Number(process.env.INTAKE_LARGE_SHEET_ROW_THRESHOLD ?? 5_000),
+  largeSheetRowThreshold: Number(process.env.INTAKE_LARGE_SHEET_ROW_THRESHOLD || 5_000),
   /** Tamaño de lote para hojas grandes. */
-  batchSize: Number(process.env.INTAKE_BATCH_SIZE ?? 2_000),
+  batchSize: Number(process.env.INTAKE_BATCH_SIZE || 2_000),
 };

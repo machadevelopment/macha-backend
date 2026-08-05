@@ -7,9 +7,9 @@
 export const creditsConfig = {
   /** Tokens (input+output) equivalentes a 1 crédito, para estimación de costo interna.
    * Nunca expuesto al usuario final (la unidad visible al cliente es el crédito). */
-  creditToTokensRatio: Number(process.env.CREDIT_TO_TOKENS_RATIO ?? 50_000),
+  creditToTokensRatio: Number(process.env.CREDIT_TO_TOKENS_RATIO || 50_000),
   /** Asignación mensual provisional de créditos por empresa (paquete del plan).
    * Sin endpoint de onboarding todavía que la aplique (F7/M8); documentado aquí para
    * cuando exista. */
-  monthlyAllotment: Number(process.env.CREDIT_MONTHLY_ALLOTMENT ?? 1_000),
+  monthlyAllotment: Number(process.env.CREDIT_MONTHLY_ALLOTMENT || 1_000),
 };
