@@ -4,7 +4,8 @@ import { describe, expect, test } from 'bun:test';
 // never touch the DB — same stub pattern as modules/health/index.test.ts.
 process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
 
-const { assertZdrModel, estimateCostUsd } = await import('./anthropic');
+const { assertZdrModel, estimateCostUsd, assertNotTruncated, SheetOutputTruncatedError } =
+  await import('./anthropic');
 
 describe('assertZdrModel', () => {
   test('accepts the ZDR-verified model', () => {
@@ -54,5 +55,33 @@ describe('estimateCostUsd', () => {
 
   test('zero tokens costs zero', () => {
     expect(estimateCostUsd(0, 0)).toBe(0);
+  });
+});
+
+describe('assertNotTruncated (CU-868kmwdqu)', () => {
+  test('una respuesta cortada por max_tokens NO es una respuesta válida', () => {
+    // El caso real: el modelo corta a media respuesta y el JSON llega partido. Antes
+    // esto caía en el catch del JSON.parse y se reportaba como "not valid JSON despite
+    // structured output" — un mensaje que manda a investigar structured output, que
+    // garantiza la forma de la respuesta pero no que quepa.
+    expect(() => assertNotTruncated('max_tokens', 'Ventas', 521)).toThrow(
+      SheetOutputTruncatedError,
+    );
+  });
+
+  test('el error dice qué hoja fue y cuántas filas llevaba, que es lo accionable', () => {
+    try {
+      assertNotTruncated('max_tokens', 'Ventas', 521);
+      throw new Error('debió lanzar');
+    } catch (err) {
+      expect((err as Error).message).toContain('Ventas');
+      expect((err as Error).message).toContain('521');
+    }
+  });
+
+  test('un final normal pasa de largo', () => {
+    expect(() => assertNotTruncated('end_turn', 'Ventas', 10)).not.toThrow();
+    expect(() => assertNotTruncated(null, 'Ventas', 10)).not.toThrow();
+    expect(() => assertNotTruncated(undefined, 'Ventas', 10)).not.toThrow();
   });
 });

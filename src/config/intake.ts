@@ -23,4 +23,15 @@ export const intakeConfig = {
   largeSheetRowThreshold: Number(process.env.INTAKE_LARGE_SHEET_ROW_THRESHOLD || 5_000),
   /** Tamaño de lote para hojas grandes. */
   batchSize: Number(process.env.INTAKE_BATCH_SIZE || 2_000),
+  /**
+   * CU-868kmwdqu — presupuesto de tokens de SALIDA por llamada a Claude, la cota que de
+   * verdad limita cuántas filas caben en un lote (ver lib/sheet-batching.ts).
+   *
+   * 40.000 contra un `max_tokens` de 64.000: el margen del 37% no es timidez, es que la
+   * estimación es una heurística sobre el ancho de la hoja y equivocarse por abajo tiene
+   * un costo asimétrico — el modelo corta la respuesta, el JSON llega partido y se
+   * pierde el documento entero, no solo el lote. Equivocarse por arriba solo cuesta una
+   * llamada de más.
+   */
+  outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 40_000),
 };

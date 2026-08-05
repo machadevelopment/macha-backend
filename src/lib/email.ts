@@ -23,6 +23,13 @@ export const TEMPLATES = {
       subject: `Alerta: ${label}`,
       html: `<p>Se disparó la alerta <strong>${label}</strong> en tu empresa.</p><p><a href="${viewUrl}">Ver detalle</a></p>`,
     }),
+    // CU-868kh8pwv. El nombre de la empresa va en el asunto porque quien recibe esto
+    // puede no esperar el correo: sin él, "Te invitaron a Macha Finance" es
+    // indistinguible de spam. El enlace lleva el token y caduca en 7 días.
+    invitation: (companyName: string, acceptUrl: string, invitedByEmail: string) => ({
+      subject: `Te invitaron a ${companyName} en Macha Finance`,
+      html: `<p><strong>${invitedByEmail}</strong> te invitó a unirte a <strong>${companyName}</strong> en Macha Finance.</p><p><a href="${acceptUrl}">Aceptar invitación</a></p><p>El enlace vence en 7 días. Si no esperabas esta invitación, ignora este correo.</p>`,
+    }),
   },
   en: {
     reportReady: (viewUrl: string) => ({
@@ -33,12 +40,16 @@ export const TEMPLATES = {
       subject: `Alert: ${label}`,
       html: `<p>The <strong>${label}</strong> alert was triggered for your company.</p><p><a href="${viewUrl}">View detail</a></p>`,
     }),
+    invitation: (companyName: string, acceptUrl: string, invitedByEmail: string) => ({
+      subject: `You've been invited to ${companyName} on Macha Finance`,
+      html: `<p><strong>${invitedByEmail}</strong> invited you to join <strong>${companyName}</strong> on Macha Finance.</p><p><a href="${acceptUrl}">Accept invitation</a></p><p>The link expires in 7 days. If you weren't expecting this invitation, ignore this email.</p>`,
+    }),
   },
 } as const;
 
 export interface EmailSendPayload {
   companyId: string;
-  kind: 'report' | 'alert';
+  kind: 'report' | 'alert' | 'invitation';
   refId: string;
   recipientEmail: string;
   subject: string;
@@ -117,5 +128,36 @@ export async function deliverEmail(db: DB, payload: EmailSendPayload): Promise<v
     resendMessageId: result.data?.id,
     status: result.error ? 'failed' : 'sent',
     errorReason: result.error?.message,
+  });
+}
+
+/**
+ * CU-868kh8pwv. A diferencia de reportes y alertas, el destinatario puede NO tener
+ * todavía cuenta en Macha: el correo es el único canal por el que se entera. Va por la
+ * misma cola que el resto (`email.send`), así que hereda su backoff — una caída
+ * transitoria de Resend no pierde la invitación, y la fila ya existe en
+ * `company_invitations` aunque el correo se retrase.
+ */
+export async function sendInvitationEmail(params: {
+  companyId: string;
+  locale: 'es' | 'en';
+  invitationId: string;
+  companyName: string;
+  recipientEmail: string;
+  invitedByEmail: string;
+  acceptUrl: string;
+}): Promise<void> {
+  const t = TEMPLATES[params.locale].invitation(
+    params.companyName,
+    params.acceptUrl,
+    params.invitedByEmail,
+  );
+  await enqueueEmail({
+    companyId: params.companyId,
+    kind: 'invitation',
+    refId: params.invitationId,
+    recipientEmail: params.recipientEmail,
+    subject: t.subject,
+    html: t.html,
   });
 }

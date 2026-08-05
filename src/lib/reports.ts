@@ -16,6 +16,7 @@ import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { uploadObject, reportRenderKey } from '@/lib/s3';
 import { sendReportReadyEmail } from '@/lib/email';
 import { reportUrl } from '@/lib/app-urls';
+import { grossProfit, grossMarginPct } from '@/lib/margin';
 
 /**
  * CU-868kfvacr/868kfvacg: métricas calculadas en SQL directo sobre el ledger para el
@@ -69,7 +70,17 @@ async function computeReportMetrics(
     cogs: totals.cogs,
     opex: totals.opex,
     other: totals.other,
-    margin: totals.revenue! - totals.cogs!,
+    // CU-868kh8y58: misma definición que el KPI y que la alerta `margin_drop`, vía
+    // lib/margin.ts. Antes era una resta suelta aquí y otra en modules/metrics.
+    grossProfit: grossProfit(totals.revenue!, totals.cogs!),
+    grossMarginPct: grossMarginPct(totals.revenue!, totals.cogs!),
+    // El alias sobrevive por una razón más fuerte que en el endpoint de métricas: este
+    // objeto se GUARDA en `report_versions.metrics`, que es un ledger append-only
+    // (REVOKE UPDATE,DELETE en 0010). Las versiones ya emitidas conservan para siempre
+    // la forma vieja y no hay migración posible, así que el lector tiene que aguantar
+    // las dos formas de todos modos; emitirlo también en las nuevas mantiene un solo
+    // campo común entre ambas generaciones. Sale del mismo cálculo, no puede divergir.
+    margin: grossProfit(totals.revenue!, totals.cogs!),
     accountsReceivableOpen: Number(arRow?.total ?? 0),
     accountsPayableOpen: Number(apRow?.total ?? 0),
   };
@@ -137,7 +148,11 @@ export async function generateReport(
   const renderHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Reporte ${periodStart} — ${periodEnd}</title></head>
 <body>
   <h1>Reporte ejecutivo (${periodStart} — ${periodEnd})</h1>
-  <p><strong>Ingresos:</strong> ${metrics.revenue} · <strong>Costo de ventas:</strong> ${metrics.cogs} · <strong>Margen:</strong> ${metrics.margin}</p>
+  <p><strong>Ingresos:</strong> ${metrics.revenue} · <strong>Costo directo de ventas:</strong> ${metrics.cogs} · <strong>Utilidad bruta:</strong> ${metrics.grossProfit} · <strong>Margen bruto:</strong> ${
+    metrics.grossMarginPct === null
+      ? 'sin ventas en el período'
+      : `${metrics.grossMarginPct.toFixed(1)}%`
+  }</p>
   <p><strong>Por cobrar abierto:</strong> ${metrics.accountsReceivableOpen} · <strong>Por pagar abierto:</strong> ${metrics.accountsPayableOpen}</p>
   <div>${result.narrative.replace(/\n/g, '<br/>')}</div>
 </body></html>`;
