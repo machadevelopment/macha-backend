@@ -55,6 +55,39 @@ describe('precondiciones del rol de aplicación (CU-868kh8zbj)', () => {
     expect(role!.rolbypassrls).toBe(false);
   });
 
+  test('macha_app puede usar y crear en el esquema pgboss (CU-868kmuheb)', async () => {
+    // pg-boss vive en su PROPIO esquema, y 0010 solo concedió sobre `public`. Mientras la
+    // app corrió como dueño no se notó; al pasar a `macha_app`, `POST /documents` empezó
+    // a devolver 500 con `permission denied for schema pgboss` — y con él TODO lo
+    // asíncrono (ingesta, reportes, alertas, correo, respaldo) más el gate de profundidad
+    // de cola, que lee `pgboss.job`. Visto en producción el 2026-08-05.
+    //
+    // CREATE, no solo USAGE: pg-boss instala y migra sus propias tablas al arrancar.
+    const [priv] = await app`
+      select
+        has_schema_privilege(current_user, 'pgboss', 'USAGE')  as can_use,
+        has_schema_privilege(current_user, 'pgboss', 'CREATE') as can_create
+    `;
+    expect({ use: priv!.can_use, create: priv!.can_create }).toEqual({ use: true, create: true });
+  });
+
+  test('macha_app lee las tablas que el DUEÑO creó en pgboss (CU-868kmuheb)', async () => {
+    // El caso real de producción: las tablas de la cola ya existían, creadas por el dueño
+    // cuando la app todavía conectaba como dueño. `has_schema_privilege` sobre el esquema
+    // no dice nada de ellas — hacen falta los GRANT sobre las tablas y el ALTER DEFAULT
+    // PRIVILEGES para las que vengan después. Se simula creando una tabla con el dueño
+    // DESPUÉS de la migración y comprobando que la app la puede tocar.
+    await owner`create table if not exists pgboss.grant_probe (id int)`;
+    try {
+      await app`insert into pgboss.grant_probe (id) values (1)`;
+      const rows = await app`select id from pgboss.grant_probe`;
+      expect(rows.map((r) => r.id)).toEqual([1]);
+      await app`delete from pgboss.grant_probe`;
+    } finally {
+      await owner`drop table if exists pgboss.grant_probe`;
+    }
+  });
+
   test('las tablas de negocio tienen RLS habilitado Y forzado', async () => {
     // ENABLE por sí solo no aplica al dueño (por eso existe la migración 0010).
     // Se comprueban las dos banderas: relrowsecurity y relforcerowsecurity.
