@@ -16,6 +16,13 @@ function req(name: string): string {
   return v;
 }
 export const env = {
+  // Esta línea depende de `--env=disable` en el script `build` (package.json). Sin esa
+  // bandera, `bun build` sustituye `process.env.NODE_ENV` por un LITERAL en tiempo de
+  // build — y la etapa `build` del Dockerfile no tiene NODE_ENV seteada, así que el
+  // bundle salía con `nodeEnv: "development"` incrustado y la variable de Railway no
+  // hacía nada. Verificado contra el despliegue real: `/` respondía
+  // `{"env":"development"}` con `NODE_ENV=production` puesta en la plataforma.
+  // Es exclusivo de NODE_ENV; el resto de `process.env` sobrevive al bundling.
   nodeEnv: process.env.NODE_ENV || 'development',
   // `Number('')` es 0, no NaN: con `??` un PORT vacío hacía escuchar en un puerto
   // efímero al azar en vez de en 3001.
