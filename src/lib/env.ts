@@ -54,6 +54,14 @@ export const env = {
   anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
   s3Region: process.env.S3_REGION || 'us-east-1',
   s3Bucket: process.env.S3_BUCKET ?? '',
+  // Estas dos existían en `.env.example` y en la tabla de "requeridas" del README desde
+  // el principio, pero NADIE las leía: `s3.ts` construía el cliente solo con la región y
+  // el SDK caía a su cadena de credenciales por defecto, que busca `AWS_ACCESS_KEY_ID` /
+  // `AWS_SECRET_ACCESS_KEY` — otros nombres. Con la configuración documentada, toda
+  // subida moría con `Could not load credentials from any providers`. Visto en
+  // producción al subir el primer Excel real.
+  s3AccessKeyId: process.env.S3_ACCESS_KEY_ID ?? '',
+  s3SecretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? '',
   resendApiKey: process.env.RESEND_API_KEY ?? '',
   resendFromEmail: process.env.RESEND_FROM_EMAIL || 'notificaciones@macha.finance',
   sentryDsn: process.env.SENTRY_DSN ?? '',
