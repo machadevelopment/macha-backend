@@ -168,11 +168,22 @@ async function evalLowCreditBalance(
   // CU-868kfvafy criterio 1: configurable desde el panel (platform_settings), nunca
   // en código — creditsConfig.monthlyAllotment queda solo como fallback si el admin
   // nunca lo tocó (entorno recién migrado, sin seed).
-  const monthlyAllotment = await getPlatformSetting(
-    db,
-    SETTINGS_KEYS.creditMonthlyAllotment,
-    creditsConfig.monthlyAllotment,
+  const monthlyAllotment = Number(
+    await getPlatformSetting(
+      db,
+      SETTINGS_KEYS.creditMonthlyAllotment,
+      creditsConfig.monthlyAllotment,
+    ),
   );
+
+  // CU-868kjc7g5: sin denominador no hay porcentaje que signifique nada. Antes esto
+  // dividía a ciegas: un allotment mal puesto a 0 desde el panel daba Infinity/NaN y la
+  // comparación de abajo decidía en silencio. La causa raíz del ruido era otra —ninguna
+  // empresa recibía créditos jamás, así que `balance` era estructuralmente 0 y la alerta
+  // disparaba en cada evaluación desde el día uno— y se arregla con la asignación
+  // inicial (`grantInitialCredits`); esto es la guarda que faltaba al lado.
+  if (!Number.isFinite(monthlyAllotment) || monthlyAllotment <= 0) return null;
+
   const pctRemaining = (balance / monthlyAllotment) * 100;
   return pctRemaining < threshold ? pctRemaining : null;
 }

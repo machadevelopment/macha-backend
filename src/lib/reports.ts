@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, isNull, lte, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import {
@@ -127,17 +128,12 @@ export async function generateReport(
     .orderBy(desc(reportVersions.version))
     .limit(1);
 
-  const [version] = await db
-    .insert(reportVersions)
-    .values({
-      companyId,
-      reportId: report!.id,
-      version: (lastVersion?.version ?? 0) + 1,
-      metrics,
-      narrative: result.narrative,
-    })
-    .returning();
-
+  // CU-868kjc5pj: el id se genera aquí, no en la base. `report_versions` es un ledger
+  // append-only (REVOKE UPDATE,DELETE en la migración 0010), así que la fila tiene que
+  // insertarse YA COMPLETA — antes esto insertaba y luego hacía UPDATE para poner
+  // s3_render_key, porque la clave de S3 se construye con el id de la versión. Con el
+  // rol macha_app ese UPDATE es `permission denied` y el reporte no se genera nunca.
+  const versionId = randomUUID();
   const renderHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Reporte ${periodStart} — ${periodEnd}</title></head>
 <body>
   <h1>Reporte ejecutivo (${periodStart} — ${periodEnd})</h1>
@@ -146,12 +142,25 @@ export async function generateReport(
   <div>${result.narrative.replace(/\n/g, '<br/>')}</div>
 </body></html>`;
 
-  const renderKey = reportRenderKey(companyId, version!.id);
+  // El render sube ANTES del insert: si falla, no queda una fila de ledger apuntando a
+  // un objeto inexistente. Al revés (insert y luego subida fallida) sería irreparable,
+  // porque la fila no se puede corregir ni borrar.
+  const renderKey = reportRenderKey(companyId, versionId);
   await uploadObject(renderKey, Buffer.from(renderHtml, 'utf-8'), 'text/html');
-  await db
-    .update(reportVersions)
-    .set({ s3RenderKey: renderKey })
-    .where(eq(reportVersions.id, version!.id));
+
+  const [version] = await db
+    .insert(reportVersions)
+    .values({
+      id: versionId,
+      companyId,
+      reportId: report!.id,
+      version: (lastVersion?.version ?? 0) + 1,
+      metrics,
+      narrative: result.narrative,
+      s3RenderKey: renderKey,
+    })
+    .returning();
+
   await db.update(reports).set({ currentVersionId: version!.id }).where(eq(reports.id, report!.id));
 
   const recipients = await db

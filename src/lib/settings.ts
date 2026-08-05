@@ -15,6 +15,13 @@ export const SETTINGS_KEYS = {
   // falta confirmar con Jose/el owner. Provisional a propósito (10 centavos =
   // $0.10/crédito), holgado como el resto de placeholders de F0.
   creditPriceUsdCents: 'credit_price_usd_cents',
+  // CU-868kjc7g5 criterio 3: créditos con los que arranca una empresa nueva. En
+  // platform_settings y no en código/env para poder cambiarlo sin desplegar — es un
+  // número comercial (cuánto se regala para que el producto se pueda probar), no una
+  // constante técnica. Hasta este ticket ninguna empresa recibía créditos jamás: el
+  // primer insight devolvía 402 y la alerta de saldo bajo disparaba desde el día uno,
+  // porque su porcentaje se calcula sobre un saldo estructuralmente 0.
+  creditInitialGrant: 'credit_initial_grant',
 } as const;
 
 export async function getPlatformSetting<T>(db: DB, key: string, fallback: T): Promise<T> {

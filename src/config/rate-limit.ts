@@ -18,21 +18,21 @@
 // este ticket solo fija los valores/estructura.
 export const rateLimitConfig = {
   queueGate: {
-    maxJobs: Number(process.env.RATE_LIMIT_QUEUE_GATE_MAX_JOBS ?? 3),
+    maxJobs: Number(process.env.RATE_LIMIT_QUEUE_GATE_MAX_JOBS || 3),
     /** Solo estos kinds pasan por el gate; chat/insight quedan explícitamente fuera. */
     appliesTo: ['excel', 'report_generation'] as const,
   },
   tokenBucket: {
     /** API general de lectura (dashboard, status polling). */
     read: {
-      rpm: Number(process.env.RATE_LIMIT_READ_RPM ?? 120),
-      burst: Number(process.env.RATE_LIMIT_READ_BURST ?? 240),
+      rpm: Number(process.env.RATE_LIMIT_READ_RPM || 120),
+      burst: Number(process.env.RATE_LIMIT_READ_BURST || 240),
     },
     /** Endpoints de IA interactivos: chat, insight. Excel/reporte NO pasan por aquí
      * — se controlan solo por el gate de cola de arriba. */
     ai: {
-      rpm: Number(process.env.RATE_LIMIT_AI_RPM ?? 20),
-      burst: Number(process.env.RATE_LIMIT_AI_BURST ?? 30),
+      rpm: Number(process.env.RATE_LIMIT_AI_RPM || 20),
+      burst: Number(process.env.RATE_LIMIT_AI_BURST || 30),
     },
   },
 };

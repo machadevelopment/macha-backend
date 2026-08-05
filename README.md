@@ -18,6 +18,30 @@ bun run db:seed           # optional demo data (separate from schema migrations)
 bun run dev
 ```
 
+### Arranque local: cómo consigue su fila en `users` quien levanta esto por primera vez
+
+Pregunta que costó un bug crítico (CU-868kjkfdf): la base recién migrada tiene el
+esquema completo pero `users`, `companies`, `company_users` y `staff` en cero, y los
+guards rechazan con `403 No Macha account for this identity` a quien no tenga fila.
+
+**No hay que insertar nada a mano.** Desde CU-868kjkfdf, `identity.derive` da de alta la
+identidad sola la primera vez que aparece (ver `src/lib/user-provisioning.ts`): entras
+por AuthKit, el frontend llama a `/me/memberships` o a `/register` con tu token, y la
+fila se crea ahí. `users` es solo el espejo local de la identidad — **no concede acceso
+a nada**: los datos de negocio los gobierna `company_users` y el backoffice `staff`.
+
+Para que ese alta funcione hace falta `WORKOS_API_KEY`, porque el access token de WorkOS
+no lleva email ni nombre y `users.email` es `NOT NULL`. Sin la clave, un usuario **ya
+existente** entra sin problema; uno nuevo recibe un error que lo dice explícitamente.
+
+Dos cosas que siguen siendo manuales, porque conceden permisos y no deben ser
+automáticas:
+
+- **Ser `staff`** (acceso a `/admin/*`): insertar la fila en `staff` a mano contra la
+  base, con el `user_id` que ya se creó solo.
+- **Datos de demo**: `bun run db:seed` monta empresa, plantillas de industria y reglas
+  de crédito. No crea usuarios.
+
 ## Environment variables
 
 Secrets live only in platform-native envs (Railway) or a local untracked `.env` —
@@ -30,12 +54,14 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | Yes | Owner role — migrations/seed/provisioning only. Never used by the running app in a real env. |
-| `APP_DATABASE_URL` | Prod/staging | Restricted `macha_app` role the app actually connects as. Falls back to `DATABASE_URL` if unset (RLS/append-only become no-ops without it). |
+| `APP_DATABASE_URL` | Prod/staging | Restricted `macha_app` role the app actually connects as. Falls back to `DATABASE_URL` if unset (RLS/append-only become no-ops without it) — ver el runbook de abajo. |
+| `REQUIRE_ISOLATED_DB_ROLE` | No (default `false`) | `true` hace que el arranque ABORTE si el rol de la app no está aislado. Se setea en staging/prod **después** de completar el runbook de `macha_app`. |
 | `REDIS_URL` | Yes | Rate limiting (Railway plugin). |
 | `INTAKE_*` | No (has defaults) | Excel intake caps, CU-868kfv972. |
 | `RATE_LIMIT_*` | No (has defaults) | Token-bucket + queue-depth gate values. |
 | `CREDIT_*` | No (has defaults) | Credit ratio/allotment, provisional startup values. |
 | `WORKOS_JWKS_URL`, `WORKOS_CLIENT_ID` | Yes | JWT verification (JWKS), no password/session logic here. |
+| `WORKOS_API_KEY` | Yes | Alta JIT de una identidad nueva (CU-868kjkfdf): el access token no trae email/nombre y `users.email` es NOT NULL, así que el perfil se le pide a la Management API por el `sub` ya firmado. Una llamada por usuario en toda su vida. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Yes | ZDR contract only; model kept in config, never hardcoded. |
 | `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Yes | Binaries only; DB stores keys, not files. |
 | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. |
@@ -43,6 +69,64 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
+
+> **Una variable vacía es un valor, no una ausencia.** Guardar la clave sin valor en la
+> UI de Railway/Vercel deja `''`, no `undefined`. Por eso los defaults de `src/lib/env.ts`
+> y de `src/config/*` se resuelven con `||` y nunca con `??`: con `??` una
+> `APP_DATABASE_URL=` vacía resolvía a `''`, y `postgres('')` no falla — se conecta a los
+> defaults de libpq, así que la app arrancaba y **`/health` seguía devolviendo 200**
+> mientras toda query moría. Cubierto por `src/lib/env.test.ts`.
+
+## Healthcheck del despliegue
+
+Apunta el healthcheck de la plataforma a **`/health/db`**, no a `/health`. `/health` es
+solo liveness: responde 200 sin tocar Postgres, así que un deploy con la base mal
+configurada se marca sano igual. `/health/db` ejecuta un `SELECT 1` y falla con 5xx si la
+conexión no sirve, que es justo lo que debe frenar el deploy.
+
+## Activación del rol `macha_app` (CU-868kjbw5h) — runbook de despliegue
+
+> **Una instancia nueva NO está aislada hasta completar estos pasos.** `APP_DATABASE_URL`
+> vacía es un fallo de configuración **silencioso**: la app funciona idéntico, pero el
+> `REVOKE UPDATE, DELETE` de los 6 ledgers append-only no aplica (Postgres le conserva
+> esos privilegios al dueño de la tabla, de forma implícita e irrevocable, y no existe un
+> "FORCE" para privilegios como sí lo hay para RLS). Esto se hace **una vez por entorno**.
+
+Desde el arranque, la app verifica esto contra su conexión real y lo dice en el log
+(`src/lib/db-role-check.ts`), además de reportarlo a Sentry. Pero **no aborta** mientras
+`REQUIRE_ISOLATED_DB_ROLE` no esté en `true` — el último paso del runbook es justamente
+activar esa red.
+
+1. **Confirmar migraciones.** Que `0010`, `0011` y `0012` se aplicaron limpias en el
+   deploy. `0010` re-corre en cada deploy a propósito: su bloque `GRANT`/`REVOKE` es un
+   no-op (con `NOTICE`) hasta que el rol existe.
+2. **Crear el rol** (operador, directo contra Railway — requiere `CREATEROLE`, que el
+   usuario de app normalmente no tiene, por eso no va en una migración). La contraseña
+   se genera aquí y **no va en ninguna migración ni archivo de env**:
+   ```sql
+   CREATE ROLE macha_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS
+     PASSWORD '<generada>';
+   ```
+3. **Re-aplicar `0010`** (redeploy o `bun run db:migrate`) para que el `GRANT`/`REVOKE`
+   surta efecto ahora que el rol existe. Este segundo pase es el que se olvida.
+4. **Setear `APP_DATABASE_URL`** apuntando a `macha_app` y redeployar. Verificar que la
+   app arranca, que el log dice `aislamiento OK`, y que un usuario con membresía activa
+   recibe 200 (es lo que rompía `CU-868kj3utc`, ya arreglado en `0012`).
+5. **Verificar contra la instancia real** que el aislamiento muerde:
+   ```
+   VERIFY_OWNER_DATABASE_URL=postgres://owner@... \
+   VERIFY_APP_DATABASE_URL=postgres://macha_app@... \
+   bun run verify:isolation
+   ```
+   Comprueba las precondiciones del rol, que `UPDATE` sea rechazado en los 6 ledgers, y
+   que una sesión con `app.company_id` de la empresa A no vea filas de la B (con
+   contraprueba de que sí ve las propias, para que un 0 por ceguera no pase por
+   aislamiento). Es de solo lectura.
+6. **Setear `REQUIRE_ISOLATED_DB_ROLE=true`** en ese entorno. A partir de ahí, una
+   regresión de configuración aborta el arranque en vez de degradarse en silencio.
+
+Producción es un paso explícito y separado (**FRENO 3**, lo ejecuta el dueño), no un
+efecto secundario de haberlo hecho en staging.
 
 ## Verificación de aislamiento prod/no-prod (CU-868kfvaz6)
 

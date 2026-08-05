@@ -2,7 +2,6 @@ import { Elysia, t } from 'elysia';
 import { desc, eq, sql as rawSql } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { db } from '@/db/client';
 import { aiUsageEvents, companies, documents } from '@/db/schema';
 
 /**
@@ -13,7 +12,7 @@ import { aiUsageEvents, companies, documents } from '@/db/schema';
  */
 export const adminMonitoring = new Elysia({ prefix: '/admin' })
   .use(adminGuard)
-  .get('/ai-cost', async ({ tier, set }) => {
+  .get('/ai-cost', async ({ tier, set, db }) => {
     assertStaffCapability(tier, 'view_ai_usage_cost', set);
     return db
       .select({
@@ -31,7 +30,7 @@ export const adminMonitoring = new Elysia({ prefix: '/admin' })
   })
   .get(
     '/documents',
-    async ({ tier, query, set }) => {
+    async ({ tier, query, set, db }) => {
       assertStaffCapability(tier, 'view_job_status', set);
       // CU-868kfvaz9: "load more" — limit+1 para saber si hay más sin COUNT aparte.
       const limit = Math.min(Number(query.limit ?? 50) || 50, 200);
