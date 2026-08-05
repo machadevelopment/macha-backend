@@ -107,6 +107,40 @@ const CLASSIFY_ROWS_SCHEMA = {
 } as const;
 
 /**
+ * CU-868kmwdqu — el lote no cupo en el presupuesto de salida y el modelo cortó a media
+ * respuesta. Es un error de DIMENSIONAMIENTO, no de formato ni del proveedor, y por eso
+ * tiene tipo propio: quien lo lea en `documents.error_reason` o en Sentry tiene que
+ * saber que la acción es partir la hoja en lotes más chicos (config
+ * `INTAKE_OUTPUT_TOKEN_BUDGET`, ver lib/sheet-batching.ts), no revisar el prompt.
+ */
+export class SheetOutputTruncatedError extends Error {
+  constructor(
+    readonly sheetName: string,
+    readonly rowsInBatch: number,
+  ) {
+    super(
+      `La hoja "${sheetName}" excede el presupuesto de salida del modelo con ${rowsInBatch} filas por llamada: la respuesta se cortó por max_tokens. Reducir INTAKE_OUTPUT_TOKEN_BUDGET o el ancho del lote.`,
+    );
+    this.name = 'SheetOutputTruncatedError';
+  }
+}
+
+/**
+ * Función aparte —y no un `if` en línea— para poder fijarla en un test sin montar un
+ * cliente de Anthropic ni simular un stream. Lo que hay que poder probar es la regla,
+ * no el SDK: una respuesta cortada NO es una respuesta válida.
+ */
+export function assertNotTruncated(
+  stopReason: string | null | undefined,
+  sheetName: string,
+  rowsInBatch: number,
+): void {
+  if (stopReason === 'max_tokens') {
+    throw new SheetOutputTruncatedError(sheetName, rowsInBatch);
+  }
+}
+
+/**
  * One Claude call per sheet/batch (CU-868kfva8v): classifies target_entity + maps
  * fields, using structured outputs (output_config.format) for a guaranteed-parseable
  * response instead of prompting for JSON and hoping. Streaming + a generous max_tokens
@@ -141,6 +175,13 @@ export async function classifySheetRows(params: {
     ],
   });
   const message = await runAi('classify_sheet_rows', () => stream.finalMessage());
+
+  // CU-868kmwdqu: ANTES de intentar parsear. Si el modelo cortó por tope de salida, el
+  // texto es JSON válido hasta la mitad y nada más, y el `catch` de abajo reportaba
+  // "not valid JSON despite structured output" — un mensaje que manda a investigar
+  // structured output, que garantiza la FORMA de la respuesta pero no que quepa. Se
+  // perdió un documento real de producción detrás de ese error engañoso.
+  assertNotTruncated(message.stop_reason, params.sheetName, params.rows.length);
 
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
