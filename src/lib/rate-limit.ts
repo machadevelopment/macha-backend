@@ -191,12 +191,47 @@ export async function enforceTokenBucket(
   companyId: string,
   set: Context['set'],
   route: string,
+  // Inyectable por la misma razón que en `checkTokenBucket`: sin esto la rama del 429
+  // no se puede probar sin un Redis real, y el test solo podía comprobar que la función
+  // existiera. Los cinco módulos que ya la llaman no cambian: es opcional y va al final.
+  redis?: TokenBucketRedis,
 ): Promise<RateLimitedBody | null> {
-  const gate = await checkTokenBucket(bucket, companyId);
+  const gate = await checkTokenBucket(bucket, companyId, redis);
   if (gate.allowed) return null;
 
   set.status = 429;
   set.headers['Retry-After'] = String(gate.retryAfterSeconds);
   reportRateLimited({ mechanism: 'token_bucket', companyId, route, detail: bucket });
+  return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
+}
+
+/**
+ * CU-868kjc950: variante con la clave por USUARIO, para las rutas donde todavía no hay
+ * empresa a la que cobrarle el cupo — hoy solo `/register`, que cuelga de
+ * `identityDerive` y no de `tenantDerive`.
+ *
+ * Se añade en vez de cambiar la firma de arriba (nota técnica del ticket): cinco módulos
+ * ya llaman a `enforceTokenBucket(bucket, companyId, …)` y reescribirlos solo para
+ * generalizar una clave es riesgo sin ganancia.
+ *
+ * El prefijo `u:` mantiene los dos espacios de nombres separados en Redis. Ambos ids son
+ * UUID, así que sin él una empresa y un usuario podrían compartir cupo por accidente si
+ * alguna vez se les asignara el mismo bucket.
+ */
+export async function enforceTokenBucketForUser(
+  bucket: TokenBucketName,
+  userId: string,
+  set: Context['set'],
+  route: string,
+  redis?: TokenBucketRedis,
+): Promise<RateLimitedBody | null> {
+  const gate = await checkTokenBucket(bucket, `u:${userId}`, redis);
+  if (gate.allowed) return null;
+
+  set.status = 429;
+  set.headers['Retry-After'] = String(gate.retryAfterSeconds);
+  // `companyId` es el sujeto del reporte, no necesariamente una empresa: aquí es el
+  // usuario, que es lo único que identifica a quien está agotando el cupo.
+  reportRateLimited({ mechanism: 'token_bucket', companyId: `u:${userId}`, route, detail: bucket });
   return { error: 'rate_limited', retryAfterSeconds: gate.retryAfterSeconds };
 }

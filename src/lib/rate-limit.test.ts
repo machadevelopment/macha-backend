@@ -2,8 +2,13 @@ import { describe, expect, test } from 'bun:test';
 
 process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
 
-const { checkTokenBucket, reportRateLimited, enforceTokenBucket, rateLimitedResponse } =
-  await import('./rate-limit');
+const {
+  checkTokenBucket,
+  reportRateLimited,
+  enforceTokenBucket,
+  enforceTokenBucketForUser,
+  rateLimitedResponse,
+} = await import('./rate-limit');
 const { rateLimitConfig } = await import('@/config/rate-limit');
 
 /**
@@ -115,5 +120,50 @@ describe('rateLimitedResponse (contrato del 429)', () => {
 
   test('enforceTokenBucket está exportado para que las rutas no repitan el 429 a mano', () => {
     expect(typeof enforceTokenBucket).toBe('function');
+  });
+});
+
+/**
+ * CU-868kjc950. `/register` no cuelga de `tenantDerive` sino de `identityDerive`: basta
+ * cualquier usuario autenticado en WorkOS, sin pertenecer a ninguna empresa. Cada llamada
+ * ejecuta `CREATE TABLE ... PARTITION OF` tres veces contra el Postgres compartido, así
+ * que sin techo esto es DDL ilimitado sobre la base de TODOS los clientes.
+ *
+ * El limitador existente no servía tal cual: su clave es la empresa, y aquí todavía no
+ * hay empresa. De ahí la variante por usuario.
+ */
+describe('rate limit por usuario (CU-868kjc950)', () => {
+  test('la clave de Redis lleva el prefijo `u:` — usuarios y empresas no comparten cupo', async () => {
+    const redis = fakeRedis([1, 5]);
+    await checkTokenBucket('register', 'u:user-1', redis);
+    // key es el 3er argumento de eval(script, numKeys, key, ...)
+    expect(redis.calls[0]![2]).toBe('rl:register:u:user-1');
+  });
+
+  test('devuelve 429 con Retry-After cuando el usuario agota el cupo', async () => {
+    const redis = fakeRedis([0, 0]);
+    const set = { status: 0, headers: {} as Record<string, string> };
+    const body = await enforceTokenBucketForUser(
+      'register',
+      'user-1',
+      set as never,
+      'POST /register',
+      redis,
+    );
+    expect(set.status).toBe(429);
+    expect(body).toEqual({ error: 'rate_limited', retryAfterSeconds: expect.any(Number) });
+    expect(set.headers['Retry-After']).toBeDefined();
+  });
+
+  test('el cupo de alta de empresas es bajo a propósito: ráfaga de 3', () => {
+    expect(rateLimitConfig.tokenBucket.register.burst).toBeLessThanOrEqual(5);
+    // 3 por hora expresadas en rpm.
+    expect(rateLimitConfig.tokenBucket.register.rpm).toBeLessThan(1);
+  });
+
+  test('el top-up tiene bucket propio y más estricto que `ai`', () => {
+    expect(rateLimitConfig.tokenBucket.billing.rpm).toBeLessThan(
+      rateLimitConfig.tokenBucket.ai.rpm,
+    );
   });
 });
