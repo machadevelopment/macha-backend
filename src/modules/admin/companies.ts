@@ -8,6 +8,7 @@ import { logAdminAction } from '@/lib/admin-audit';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { grantInitialCredits } from '@/lib/credits';
+import { dejariaSinOwner, MENSAJE_SIN_OWNER } from '@/lib/membership-invariants';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -198,6 +199,22 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       if (!before) {
         set.status = 404;
         return { error: 'Membership not found' };
+      }
+
+      // CU-868kjc8pj: hasta aquí lo único que se comprobaba era que la membresía
+      // existiera —para el audit log— y luego se escribía rol y estado directo. Nada
+      // impedía degradar o revocar al ÚNICO owner, contra la regla del PRD §8. La
+      // comprobación toma un lock sobre las filas de la empresa (ver el helper), así que
+      // dos peticiones degradando a dos owners distintos no pueden pasar ambas.
+      const cambio = {
+        companyId: params.id,
+        userId: params.userId,
+        nextRole: body.role ?? before.role,
+        nextStatus: body.status ?? before.status,
+      };
+      if (await dejariaSinOwner(db, cambio)) {
+        set.status = 409;
+        return { error: MENSAJE_SIN_OWNER };
       }
 
       await db
