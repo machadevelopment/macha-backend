@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 import * as Sentry from '@sentry/bun';
 import { env } from '@/lib/env';
+import { AiProviderError, aiFailureMessage, aiFailureStatus } from '@/lib/ai-errors';
 import { adminCompanies } from '@/modules/admin/companies';
 import { adminStagingRows } from '@/modules/admin/staging-rows';
 import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
@@ -35,39 +36,48 @@ import { reports_ } from '@/modules/reports';
  * despliega en cuanto alguien agregue un módulo aquí y no allá. Ver `src/app.test.ts`.
  */
 export function createApp() {
-  return (
-    new Elysia()
-      .use(health)
-      .use(ingestion)
-      .use(industryTemplateDownload)
-      .use(metrics)
-      .use(arAp)
-      .use(insights)
-      .use(creditsBalance)
-      .use(chats_)
-      .use(reports_)
-      .use(alerts)
-      .use(clientAlertRules)
-      .use(adminCompanies)
-      .use(adminStagingRows)
-      .use(adminIndustryTemplates)
-      .use(adminConfig)
-      .use(adminFxRates)
-      .use(adminCreditRules)
-      .use(adminCredits)
-      .use(adminAlertRules)
-      .use(adminMonitoring)
-      .use(register)
-      .use(creditsTopup)
-      .use(billingWebhooks)
-      .use(me)
-      .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
-      // Devuelve `undefined` a propósito: Sentry registra y Elysia sigue con su
-      // manejo de error por defecto (el status que el guard ya puso en `set`).
-      .onError(({ error }) => {
-        Sentry.captureException(error);
-      })
-  );
+  return new Elysia()
+    .use(health)
+    .use(ingestion)
+    .use(industryTemplateDownload)
+    .use(metrics)
+    .use(arAp)
+    .use(insights)
+    .use(creditsBalance)
+    .use(chats_)
+    .use(reports_)
+    .use(alerts)
+    .use(clientAlertRules)
+    .use(adminCompanies)
+    .use(adminStagingRows)
+    .use(adminIndustryTemplates)
+    .use(adminConfig)
+    .use(adminFxRates)
+    .use(adminCreditRules)
+    .use(adminCredits)
+    .use(adminAlertRules)
+    .use(adminMonitoring)
+    .use(register)
+    .use(creditsTopup)
+    .use(billingWebhooks)
+    .use(me)
+    .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
+    .onError(({ error, set }) => {
+      Sentry.captureException(error);
+
+      // CU-868kmr192: el fallo del proveedor de IA se traduce ANTES de responder.
+      // Sin esto, Elysia serializaba el error del SDK tal cual y el cliente recibía
+      // el JSON de Anthropic completo — incluido "Your credit balance is too low to
+      // access the Anthropic API", que le decía a una empresa con créditos de sobra
+      // que se había quedado sin saldo, y con `request_id` del proveedor de regalo.
+      if (error instanceof AiProviderError) {
+        set.status = aiFailureStatus(error.failure);
+        return { error: aiFailureMessage(error.failure) };
+      }
+
+      // Para todo lo demás devuelve `undefined` a propósito: Sentry registra y Elysia
+      // sigue con su manejo por defecto (el status que el guard ya puso en `set`).
+    });
 }
 
 export type App = ReturnType<typeof createApp>;
