@@ -3,6 +3,7 @@ import { and, asc, desc, eq, isNull, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { chatSegments, chatMessages, aiUsageEvents } from '@/db/schema';
 import { anthropicModel, assertZdrModel, getClient } from '@/lib/anthropic';
+import { runAi } from '@/lib/ai-errors';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 
 // CU-868kfvabw: ~60% del presupuesto de contexto de claude-sonnet-5 (1M tokens,
@@ -116,15 +117,17 @@ export async function maybeCloseSegment(
 
   assertZdrModel(anthropicModel);
   const transcript = messages.map((m) => `${m.role}: ${m.content}`).join('\n');
-  const response = await getClient().messages.create({
-    model: anthropicModel,
-    max_tokens: 1024,
-    system:
-      'Resume esta conversación financiera en un documento de traspaso conciso, ' +
-      'preservando cualquier dato/cifra/decisión relevante para continuar la ' +
-      'conversación sin el historial crudo. No agregues opiniones nuevas.',
-    messages: [{ role: 'user', content: transcript }],
-  });
+  const response = await runAi('chat_segment_summary', () =>
+    getClient().messages.create({
+      model: anthropicModel,
+      max_tokens: 1024,
+      system:
+        'Resume esta conversación financiera en un documento de traspaso conciso, ' +
+        'preservando cualquier dato/cifra/decisión relevante para continuar la ' +
+        'conversación sin el historial crudo. No agregues opiniones nuevas.',
+      messages: [{ role: 'user', content: transcript }],
+    }),
+  );
   const handoffDoc =
     response.content.find((b): b is Anthropic.TextBlock => b.type === 'text')?.text ?? '';
 

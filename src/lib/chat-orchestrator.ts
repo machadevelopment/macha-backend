@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { anthropicModel, assertZdrModel, getClient } from '@/lib/anthropic';
+import { runAi } from '@/lib/ai-errors';
 import { CHAT_TOOLS, executeChatTool, type ChatToolContext } from '@/lib/chat-tools';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 
@@ -50,13 +51,15 @@ export async function runChatTurn(params: {
 
   // Bounded loop: a runaway tool-use cycle should never hang a request indefinitely.
   for (let round = 0; round < 8; round++) {
-    const response = await anthropic.messages.create({
-      model: anthropicModel,
-      max_tokens: 2048,
-      system: systemPrompt(params.locale),
-      tools: CHAT_TOOLS,
-      messages,
-    });
+    const response = await runAi('chat_turn', () =>
+      anthropic.messages.create({
+        model: anthropicModel,
+        max_tokens: 2048,
+        system: systemPrompt(params.locale),
+        tools: CHAT_TOOLS,
+        messages,
+      }),
+    );
 
     callCount++;
     totalInputTokens += response.usage.input_tokens;

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
+import { runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
 import type { industryTemplateVersions } from '@/db/schema';
 
@@ -139,7 +140,7 @@ export async function classifySheetRows(params: {
       },
     ],
   });
-  const message = await stream.finalMessage();
+  const message = await runAi('classify_sheet_rows', () => stream.finalMessage());
 
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
@@ -191,7 +192,7 @@ export async function generateInsightNarrative(
     system: systemPrompt,
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
-  const message = await stream.finalMessage();
+  const message = await runAi('insight_narrative', () => stream.finalMessage());
 
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
@@ -231,7 +232,7 @@ export async function generateReportNarrative(
     system: REPORT_SYSTEM_PROMPT(locale),
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
-  const message = await stream.finalMessage();
+  const message = await runAi('report_narrative', () => stream.finalMessage());
 
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
