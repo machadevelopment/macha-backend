@@ -70,6 +70,20 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
 
+> **Una variable vacía es un valor, no una ausencia.** Guardar la clave sin valor en la
+> UI de Railway/Vercel deja `''`, no `undefined`. Por eso los defaults de `src/lib/env.ts`
+> y de `src/config/*` se resuelven con `||` y nunca con `??`: con `??` una
+> `APP_DATABASE_URL=` vacía resolvía a `''`, y `postgres('')` no falla — se conecta a los
+> defaults de libpq, así que la app arrancaba y **`/health` seguía devolviendo 200**
+> mientras toda query moría. Cubierto por `src/lib/env.test.ts`.
+
+## Healthcheck del despliegue
+
+Apunta el healthcheck de la plataforma a **`/health/db`**, no a `/health`. `/health` es
+solo liveness: responde 200 sin tocar Postgres, así que un deploy con la base mal
+configurada se marca sano igual. `/health/db` ejecuta un `SELECT 1` y falla con 5xx si la
+conexión no sirve, que es justo lo que debe frenar el deploy.
+
 ## Activación del rol `macha_app` (CU-868kjbw5h) — runbook de despliegue
 
 > **Una instancia nueva NO está aislada hasta completar estos pasos.** `APP_DATABASE_URL`
