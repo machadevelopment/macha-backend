@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
+import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { alertEvents, alertRules, documents } from '@/db/schema';
 
 /**
@@ -24,6 +25,11 @@ export const alerts = new Elysia({ prefix: '/alerts' })
   .get(
     '/',
     async ({ companyId, role, query, set, db }) => {
+      // CU-868kjc950 criterio 3: se añadieron en CU-868kj0tdq, después de que
+      // CU-868kh8qhp conectara el bucket `read`, y quedaron fuera del barrido.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /alerts');
+      if (limited) return limited;
+
       assertClientCapability(role, 'view_dashboard_reports', set);
 
       // Patrón limit+1 ya establecido en modules/admin/monitoring.ts y staging-rows.ts:
@@ -61,23 +67,32 @@ export const alerts = new Elysia({ prefix: '/alerts' })
         limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100 })),
         offset: t.Optional(t.Numeric({ minimum: 0 })),
       }),
-      response: t.Object({
-        items: t.Array(
-          t.Object({
-            id: t.String(),
-            ruleKey: t.String(),
-            threshold: t.String(),
-            triggeredValue: t.String(),
-            createdAt: t.String(),
-          }),
-        ),
-        hasMore: t.Boolean(),
-      }),
+      // Pasa a estar indexado por status para poder declarar el 429, igual que
+      // /metrics y /ar-ap (CU-868kjc950). Un `response` suelto equivale al 200 y deja
+      // fuera cualquier otra respuesta, que es lo que rompía al añadir el rate limit.
+      response: {
+        200: t.Object({
+          items: t.Array(
+            t.Object({
+              id: t.String(),
+              ruleKey: t.String(),
+              threshold: t.String(),
+              triggeredValue: t.String(),
+              createdAt: t.String(),
+            }),
+          ),
+          hasMore: t.Boolean(),
+        }),
+        429: rateLimitedResponse,
+      },
     },
   )
   .get(
     '/:id',
     async ({ companyId, role, params, set, db }) => {
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /alerts/:id');
+      if (limited) return limited;
+
       assertClientCapability(role, 'view_dashboard_reports', set);
 
       // Criterio 2: el filtro por company_id va en el WHERE, no en un chequeo posterior

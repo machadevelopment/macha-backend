@@ -34,6 +34,30 @@ export const rateLimitConfig = {
       rpm: Number(process.env.RATE_LIMIT_AI_RPM || 20),
       burst: Number(process.env.RATE_LIMIT_AI_BURST || 30),
     },
+    /**
+     * CU-868kjc950 criterio 1: alta de empresas, con clave POR USUARIO — en `/register`
+     * todavía no hay empresa. Valor bajo y a propósito: cada llamada ejecuta
+     * `CREATE TABLE ... PARTITION OF` tres veces contra el Postgres compartido. Eso no
+     * es "muchas filas", es DDL sin límite sobre la base de todos los clientes: miles de
+     * particiones vacías degradan el planner de las tres tablas particionadas para
+     * TODAS las empresas, no solo para quien abusa.
+     *
+     * 3/hora con ráfaga 3: crear más de un puñado de empresas por hora no es un caso
+     * legítimo, y quien monta dos empresas seguidas de verdad no toca el techo.
+     */
+    register: {
+      rpm: Number(process.env.RATE_LIMIT_REGISTER_RPH || 3) / 60,
+      burst: Number(process.env.RATE_LIMIT_REGISTER_BURST || 3),
+    },
+    /**
+     * CU-868kjc950 criterio 2: top-up de créditos. Bucket propio y no `ai` porque `ai`
+     * (20 rpm) es demasiado permisivo para algo que abre un checkout en el proveedor de
+     * pagos en cada llamada.
+     */
+    billing: {
+      rpm: Number(process.env.RATE_LIMIT_BILLING_RPM || 5),
+      burst: Number(process.env.RATE_LIMIT_BILLING_BURST || 8),
+    },
   },
 };
 
