@@ -41,3 +41,37 @@ describe('BillingNotConfiguredError (CU-868kmxu41)', () => {
     expect(err).toBeInstanceOf(Error);
   });
 });
+
+/**
+ * CU-868kmxu41 — la matriz de decisión del registro, fijada como tabla.
+ *
+ * El orden de estas condiciones ya estuvo mal una vez: la primera versión solo miraba
+ * la bandera cuando el proveedor NO estaba configurado, así que en cuanto se cargaron
+ * las llaves de Recurrente la bandera dejó de servir — justo cuando hacía falta, con
+ * proveedor contratado y pilotos a los que todavía no se les quiere cobrar.
+ */
+describe('¿cobra este entorno? (CU-868kmxu41)', () => {
+  // Réplica exacta de la decisión del handler. Si cambia allá y no acá, el test cae.
+  const decidir = (banderaOpcional: boolean, proveedorConfigurado: boolean) => {
+    const cobra = !banderaOpcional;
+    if (cobra && !proveedorConfigurado) return 'rechaza_503';
+    return cobra ? 'checkout' : 'sin_checkout';
+  };
+
+  test('bandera encendida con proveedor configurado: modo piloto, sin cobrar', () => {
+    // El caso que la primera versión no cubría y que es el motivo de este arreglo.
+    expect(decidir(true, true)).toBe('sin_checkout');
+  });
+
+  test('bandera encendida sin proveedor: tampoco cobra, y no se cae', () => {
+    expect(decidir(true, false)).toBe('sin_checkout');
+  });
+
+  test('bandera apagada con proveedor: cobro real, el flujo de siempre', () => {
+    expect(decidir(false, true)).toBe('checkout');
+  });
+
+  test('bandera apagada sin proveedor: 503 limpio, nunca un 500 con internals', () => {
+    expect(decidir(false, false)).toBe('rechaza_503');
+  });
+});

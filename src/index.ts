@@ -19,6 +19,19 @@ import { sql } from '@/db/client';
 export const app = createApp().listen(env.port);
 
 console.log(`macha-backend listening on :${env.port}`);
+
+// CU-868kmxu41: el estado peligroso es "hay con qué cobrar y no se está cobrando".
+// Durante un piloto es deliberado; olvidado, es un agujero de ingresos que nadie nota
+// porque TODO funciona — los clientes entran, usan el producto y nunca pagan. Se grita
+// al arrancar por la misma razón que el aviso de aislamiento de base: un fallo
+// silencioso necesita a alguien que lo diga en voz alta.
+if (env.billingCheckoutOptional) {
+  console.warn(
+    env.recurrenteSecretKey
+      ? '[billing] MODO PILOTO: BILLING_CHECKOUT_OPTIONAL=true con proveedor de pagos configurado — los registros NO pasan por checkout y NADIE está pagando. Apagar la bandera antes de facturar.'
+      : '[billing] MODO PILOTO: BILLING_CHECKOUT_OPTIONAL=true — los registros no pasan por checkout.',
+  );
+}
 export type { App };
 
 // CU-868kjbw5h: verifica contra la conexión REAL que el rol de la app no es el dueño de
