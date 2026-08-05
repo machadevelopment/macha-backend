@@ -121,27 +121,35 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
 
     // CU-868kmxu41 — EL CHECKOUT SE DECIDE, NO SE ASUME.
     //
-    // Antes esto llamaba a Recurrente sin más, y en un entorno sin
-    // `RECURRENTE_SECRET_KEY` el throw tumbaba el registro entero con un 500 cuyo texto
-    // interno llegaba literal al navegador. Efecto real en producción: NINGUNA empresa
-    // podía darse de alta, así que ningún piloto podía entrar a probar el producto.
+    // Historia, porque el orden de estas condiciones ya estuvo mal una vez. La primera
+    // versión solo miraba la bandera cuando el proveedor NO estaba configurado, así que
+    // en cuanto se cargaron las llaves de Recurrente la bandera dejó de servir para
+    // nada — justo cuando hacía falta: hay proveedor contratado, pero todavía no se
+    // quiere cobrar a los pilotos que están dando feedback.
     //
-    // Ahora hay dos caminos y ambos son explícitos:
+    // `BILLING_CHECKOUT_OPTIONAL` significa "el registro NO exige checkout", y manda
+    // sobre todo lo demás. Las cuatro combinaciones quedan así:
     //
-    //  · Con proveedor configurado -> lo de siempre: checkout primero, y la suscripción
-    //    nace ya con su `provider_checkout_id`.
-    //  · Sin proveedor -> depende de `BILLING_CHECKOUT_OPTIONAL`. Si está encendida, la
-    //    empresa se crea y su suscripción queda en `pending_checkout` sin id de
-    //    checkout: es el estado honesto —existe, no ha pagado— y el cobro se puede
-    //    reconciliar después. Si NO está encendida, se rechaza con un 503 limpio.
+    //   bandera ON,  proveedor configurado  -> sin checkout (modo piloto)
+    //   bandera ON,  sin proveedor          -> sin checkout
+    //   bandera OFF, proveedor configurado  -> checkout normal, cobro real
+    //   bandera OFF, sin proveedor          -> 503 limpio, no un 500 con internals
     //
-    // El opt-in es deliberado: si la simple ausencia de la clave bastara para saltarse
-    // el cobro, olvidar la variable en producción regalaría cuentas en silencio.
-    if (!isBillingConfigured() && !env.billingCheckoutOptional) {
+    // La empresa se crea igual y su suscripción queda en `pending_checkout`, que NO
+    // bloquea el acceso: `tenant.derive` solo rechaza `cancelled` (ver su comentario).
+    // El piloto entra completo y con los créditos iniciales de CU-868kjc7g5.
+    //
+    // OJO AL ESTADO PELIGROSO: bandera encendida CON proveedor configurado significa
+    // que hay con qué cobrar y no se está cobrando. Es legítimo durante un piloto y es
+    // un agujero de ingresos si se olvida encendida, así que el arranque lo grita
+    // (ver src/index.ts). Nunca se enciende sola: es opt-in explícito del operador.
+    const cobraEsteEntorno = !env.billingCheckoutOptional;
+
+    if (cobraEsteEntorno && !isBillingConfigured()) {
       throw new BillingNotConfiguredError();
     }
 
-    const checkout = isBillingConfigured()
+    const checkout = cobraEsteEntorno
       ? await startSubscriptionCheckout({
           amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
           companyId: company!.id,
