@@ -16,6 +16,7 @@ import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 import { sendAlertTriggeredEmail } from '@/lib/email';
 import { alertCatalog } from '@/config/alert-catalog';
 import { alertUrl } from '@/lib/app-urls';
+import { grossMarginPct } from '@/lib/margin';
 
 const NO_REPEAT_DAYS = 7;
 
@@ -97,8 +98,10 @@ async function evalMarginDrop(
   const period = monthStart(0);
   const revenue = await getOrComputeMonthlyAmount(db, companyId, period, 'revenue');
   const cogs = await getOrComputeMonthlyAmount(db, companyId, period, 'cogs');
-  if (revenue === 0) return null;
-  const marginPct = ((revenue - cogs) / revenue) * 100;
+  // CU-868kh8y58: la misma función que el KPI y el reporte. `null` cuando no hubo
+  // ventas — un mes sin facturar no dispara "margen bajo" (ver lib/margin.ts).
+  const marginPct = grossMarginPct(revenue, cogs);
+  if (marginPct === null) return null;
   return marginPct < threshold ? marginPct : null;
 }
 
