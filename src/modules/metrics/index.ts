@@ -8,6 +8,8 @@ import { AGING_BUCKET_SQL, emptyAgingBuckets, type AgingBucket } from '@/lib/agi
 import { grossProfit, grossMarginPct } from '@/lib/margin';
 import { computePeriodMetrics } from './period';
 import { companies, invoices, bills } from '@/db/schema';
+import { productPerformance } from './products';
+import { categoryBreakdown } from './categories';
 
 function monthStart(monthsAgo: number): string {
   const d = new Date();
@@ -225,6 +227,166 @@ export const arAp = new Elysia().use(tenantDerive).get(
           '61_90': t.Number(),
           '90_plus': t.Number(),
         }),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+/**
+ * Rutas de rango arbitrario + desagregaciones. Van en el mismo módulo que `/metrics`
+ * porque comparten guard, bucket y capacidad; separarlas solo repetiría el preámbulo.
+ *
+ * `/metrics/period` y `/metrics/products` YA tenían su lógica escrita (`period.ts`,
+ * `products.ts`) pero ninguna ruta las exponía: el frontend llamaba a las dos y recibía
+ * 404. Quedaron a medio cablear entre PRs (#114 y #115) y el hueco no se veía porque
+ * `app.test.ts` enumera las rutas montadas y estas no lo estaban.
+ *
+ * Los tres validan `from`/`to` con el mismo formato: sin eso, un rango mal escrito llega a
+ * Postgres como texto y revienta con un error de casteo que el cliente no puede accionar.
+ */
+const RANGO_ISO = t.String({
+  pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+  error: 'Formato esperado: YYYY-MM-DD',
+});
+
+const PERIOD_TOTALS = t.Object({
+  revenue: t.Number(),
+  cogs: t.Number(),
+  opex: t.Number(),
+  other: t.Number(),
+});
+
+export const metricsPeriod = new Elysia().use(tenantDerive).get(
+  '/metrics/period',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/period');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const { current, previous, series } = await computePeriodMetrics(
+      db,
+      companyId,
+      query.from,
+      query.to,
+    );
+
+    return {
+      baseCurrency: company?.baseCurrency ?? 'GTQ',
+      current,
+      previous,
+      series,
+    };
+  },
+  {
+    query: t.Object({ from: RANGO_ISO, to: RANGO_ISO }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        current: PERIOD_TOTALS,
+        previous: PERIOD_TOTALS,
+        series: t.Array(t.Composite([t.Object({ date: t.String() }), PERIOD_TOTALS])),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+export const metricsProducts = new Elysia().use(tenantDerive).get(
+  '/metrics/products',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/products');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const items = await productPerformance(db, companyId, query.from, query.to, query.limit ?? 10);
+
+    return { baseCurrency: company?.baseCurrency ?? 'GTQ', items };
+  },
+  {
+    query: t.Object({
+      from: RANGO_ISO,
+      to: RANGO_ISO,
+      // Techo de 200: la pantalla de Ventas por producto lista el catálogo completo de una
+      // PYME, no un top 5. Sin techo, una empresa con miles de SKUs se traería todo a la
+      // tabla y la dejaría inservible además de lenta.
+      limit: t.Optional(t.Numeric({ minimum: 1, maximum: 200 })),
+    }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        items: t.Array(
+          t.Object({
+            productId: t.String(),
+            name: t.String(),
+            category: t.Union([t.String(), t.Null()]),
+            revenue: t.Number(),
+            cogs: t.Number(),
+            grossProfit: t.Number(),
+            grossMarginPct: t.Union([t.Number(), t.Null()]),
+            // `null` = ninguna fila de venta de este producto traía unidades. No es 0.
+            units: t.Union([t.Number(), t.Null()]),
+            revenueWithUnits: t.Number(),
+            transactionCount: t.Number(),
+            revenueSharePct: t.Number(),
+            previousRevenue: t.Number(),
+            trend: t.Union([t.Literal('up'), t.Literal('down'), t.Literal('flat')]),
+          }),
+        ),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+export const metricsCategories = new Elysia().use(tenantDerive).get(
+  '/metrics/categories',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/categories');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const rows = await categoryBreakdown(db, companyId, query.from, query.to);
+
+    return { baseCurrency: company?.baseCurrency ?? 'GTQ', rows };
+  },
+  {
+    query: t.Object({ from: RANGO_ISO, to: RANGO_ISO }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        rows: t.Array(
+          t.Object({
+            category: t.String(),
+            type: t.Union([
+              t.Literal('revenue'),
+              t.Literal('cogs'),
+              t.Literal('opex'),
+              t.Literal('other'),
+            ]),
+            total: t.Number(),
+            transactionCount: t.Number(),
+            sharePct: t.Number(),
+          }),
+        ),
       }),
       429: rateLimitedResponse,
     },

@@ -58,6 +58,23 @@ export const rateLimitConfig = {
       rpm: Number(process.env.RATE_LIMIT_BILLING_RPM || 5),
       burst: Number(process.env.RATE_LIMIT_BILLING_BURST || 8),
     },
+    /**
+     * Mutaciones de datos de negocio hechas a mano desde la app (hoy: inventario).
+     *
+     * Bucket propio y no `read`, aunque el costo por llamada sea parecido: `read` está
+     * calibrado para polling —120 rpm existen porque el dashboard y el estado de carga se
+     * repreguntan solos— y colgar escrituras de ahí significa que una racha de polling
+     * puede dejar sin cupo a alguien registrando una salida de bodega, o al revés. Son dos
+     * patrones de uso distintos y comparten techo por casualidad, no por diseño.
+     *
+     * 60/min con ráfaga 90: un conteo físico se captura en tandas rápidas (decenas de
+     * movimientos seguidos), así que el límite tiene que aguantar a una persona escribiendo
+     * a toda velocidad sin estorbarle, y aun así frenar un cliente en bucle.
+     */
+    write: {
+      rpm: Number(process.env.RATE_LIMIT_WRITE_RPM || 60),
+      burst: Number(process.env.RATE_LIMIT_WRITE_BURST || 90),
+    },
   },
 };
 
@@ -74,7 +91,9 @@ export const rateLimitConfig = {
 //
 // Consumo real de los buckets (CU-868kh8qhp):
 // - `ai`: chat (POST /chats/:id/messages) e insight (POST /insights).
-// - `read`: /metrics, /ar-ap, /documents (lista y polling de estado), /reports
-//   (lista, detalle y /view) y /credits/balance.
+// - `read`: /metrics (+ /period, /products, /categories), /ar-ap, /inventory (lista y
+//   movimientos), /documents (lista y polling de estado), /reports (lista, detalle y
+//   /view) y /credits/balance.
+// - `write`: mutaciones de /inventory (alta, edición, baja y registro de movimientos).
 // - `/admin/*` NO pasa por ningún bucket: es staff, no tenant, y estos se llavean por
 //   company_id. Limitar el backoffice sería otra decisión, con su propio criterio.
