@@ -31,14 +31,57 @@ export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
 // uploads); reportes -> según causa, reintentos moderados; alertas -> reintento
 // estándar sin backoff (evaluación barata, determinista); email -> reintentos con
 // backoff (fallos transitorios de Resend).
-const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
-  [QUEUES.excelIngest]: { retryLimit: 3, retryDelay: 30, retryBackoff: true },
+//
+// `expireInSeconds` NO es opcional para los jobs largos, aunque parezca un detalle: el
+// default de pg-boss son 15 minutos (`expire_in interval not null default interval '15
+// minutes'`, src/plans.js) y ninguna cola lo declaraba. Pasados esos 15 minutos pg-boss
+// da el job por vencido y lo reencola — pero el worker de este proceso SIGUE corriendo,
+// porque expirar es una marca en la tabla, no una cancelación. El resultado observado en
+// producción (documento `ce2a824b`, 2026-08-06) es un archivo que se queda en
+// `processing` para siempre desde la vista del cliente: la ejecución que lo terminaría ya
+// no es la dueña del job, y la que sí lo es arranca de nuevo.
+//
+// Es un fallo de configuración de cola, no del worker: el `catch` del worker sí marca
+// `failed`, pero solo si algo lanza. Un vencimiento no lanza nada.
+export const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
+  //
+  // Una hora, y el número sale de medir, no de redondear. En producción una hoja ancha
+  // ("Info MACRO 2026", ~587 columnas) se parte en lotes de 8 filas porque el
+  // presupuesto de salida manda (lib/sheet-batching.ts), y una hoja normal de 85 filas
+  // por lote tardó entre 140 y 220 segundos por llamada a Claude. Un libro de varias
+  // hojas pasa de 15 minutos con facilidad — el que motivó esto llevaba 24 lotes en 11
+  // minutos y no había terminado.
+  //
+  // No cubre el tope teórico del intake (50.000 filas: a este ritmo son horas). Eso NO se
+  // arregla subiendo más este número, se arregla dejando de procesar los lotes en serie;
+  // queda como trabajo aparte. Una hora cubre con margen el archivo de una PYME real, que
+  // es lo que hoy se rompe.
+  [QUEUES.excelIngest]: {
+    retryLimit: 3,
+    retryDelay: 30,
+    retryBackoff: true,
+    expireInSeconds: 3_600,
+  },
   [QUEUES.reportTick]: { retryLimit: 1, retryDelay: 60, retryBackoff: false },
-  [QUEUES.reportGenerate]: { retryLimit: 2, retryDelay: 60, retryBackoff: true },
+  // Generar un reporte es UNA llamada a Claude, no una por lote, pero con narrativa larga
+  // y render; 15 minutos es ajustado y el modo de fallo sería el mismo silencio.
+  [QUEUES.reportGenerate]: {
+    retryLimit: 2,
+    retryDelay: 60,
+    retryBackoff: true,
+    expireInSeconds: 900,
+  },
   [QUEUES.alertEvaluate]: { retryLimit: 3, retryDelay: 15, retryBackoff: false },
   [QUEUES.emailSend]: { retryLimit: 3, retryDelay: 30, retryBackoff: true },
-  // Backup fallido -> reintenta pronto en vez de esperar 24h a la próxima noche.
-  [QUEUES.dbBackup]: { retryLimit: 2, retryDelay: 300, retryBackoff: true },
+  // Backup fallido -> reintenta pronto en vez de esperar 24h a la próxima noche. El
+  // `pg_dump` de una base que crece puede pasarse de 15 minutos y quedar en el mismo
+  // limbo; media hora da margen sin dejar un job colgado indefinidamente.
+  [QUEUES.dbBackup]: {
+    retryLimit: 2,
+    retryDelay: 300,
+    retryBackoff: true,
+    expireInSeconds: 1_800,
+  },
 };
 
 export async function startQueue(): Promise<PgBoss> {
