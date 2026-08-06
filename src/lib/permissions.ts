@@ -15,7 +15,8 @@ export type ClientCapability =
   | 'configure_alerts'
   | 'manage_members'
   | 'change_roles'
-  | 'billing';
+  | 'billing'
+  | 'manage_inventory';
 
 // CU-868kh8pwv — `delete_company` SE RETIRÓ de la matriz (decisión de Jose, 2026-07-28).
 //
@@ -47,6 +48,16 @@ const CLIENT_MATRIX: Record<ClientCapability, ClientRole[]> = {
   manage_members: ['owner'],
   change_roles: ['owner'],
   billing: ['owner'],
+  // Mismo criterio que `upload_excel`, y por la misma razón práctica: en una pyme quien
+  // cuenta la mercadería y registra una entrada de bodega casi nunca es el dueño. Dejarlo
+  // en owner/admin obligaría a que el dueño transcriba lo que le dictan, que es como se
+  // deja de usar la pantalla.
+  //
+  // Incluye dar de baja un SKU, y eso NO es una excepción olvidada: la baja es lógica
+  // (`deleted_at`), el historial de movimientos sobrevive intacto y el ledger es
+  // append-only, así que no hay nada que destruir. Una capacidad aparte para marcar una
+  // bandera reversible sería control que no controla nada.
+  manage_inventory: ['owner', 'admin', 'member'],
 };
 
 export function clientCan(role: ClientRole, capability: ClientCapability): boolean {
