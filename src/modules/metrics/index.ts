@@ -23,131 +23,84 @@ function monthStart(monthsAgo: number): string {
 // (criterio 1); tenantDerive is the only source of company_id (criterio 2, no
 // negociable); amounts are already amount_base — no currency conversion here
 // (criterio 3, "sin conversión").
-export const metrics = new Elysia()
-  .use(tenantDerive)
-  .get(
-    '/metrics',
-    async ({ companyId, role, query, set, db }) => {
-      assertClientCapability(role, 'view_dashboard_reports', set);
+export const metrics = new Elysia().use(tenantDerive).get(
+  '/metrics',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
 
-      // CU-868kh8qhp: bucket `read` — el dashboard es justo el consumidor que motivó
-      // los valores generosos de este bucket (120 rpm / 240 burst).
-      const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics');
-      if (limited) return limited;
+    // CU-868kh8qhp: bucket `read` — el dashboard es justo el consumidor que motivó
+    // los valores generosos de este bucket (120 rpm / 240 burst).
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics');
+    if (limited) return limited;
 
-      const [company] = await db
-        .select({ baseCurrency: companies.baseCurrency })
-        .from(companies)
-        .where(eq(companies.id, companyId));
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
 
-      const months = query.months ?? 12;
-      const periods = Array.from({ length: months }, (_, i) => monthStart(months - 1 - i));
+    const months = query.months ?? 12;
+    const periods = Array.from({ length: months }, (_, i) => monthStart(months - 1 - i));
 
-      // CU-868kh8w6b: esto era un doble bucle `periods × ROLLUP_TYPES` con un await por
-      // combinación — 48 round-trips secuenciales con el default de 12 meses y 144 con
-      // months=36. Ahora son 2 queries fijas, independientes de cuántos meses se pidan.
-      // El cache-aside de metric_rollups se conserva intacto (ver lib/rollups.ts).
-      const amountsByPeriod = await getOrComputeMonthlyAmounts(db, companyId, periods);
+    // CU-868kh8w6b: esto era un doble bucle `periods × ROLLUP_TYPES` con un await por
+    // combinación — 48 round-trips secuenciales con el default de 12 meses y 144 con
+    // months=36. Ahora son 2 queries fijas, independientes de cuántos meses se pidan.
+    // El cache-aside de metric_rollups se conserva intacto (ver lib/rollups.ts).
+    const amountsByPeriod = await getOrComputeMonthlyAmounts(db, companyId, periods);
 
-      const series = periods.map((period) => {
-        const amounts = amountsByPeriod.get(period)!;
-        // CU-868kh8y58: ya no es un placeholder. La definición cerrada vive en
-        // lib/margin.ts y la comparten KPI, reporte y alerta.
-        //
-        // Se devuelven las DOS caras del mismo dato a propósito: la utilidad bruta en
-        // moneda y el porcentaje. El bug del ticket era precisamente que en la misma
-        // pantalla convivían una ganancia que restaba gastos y un margen que no; que el
-        // backend emita el par ya calculado quita de la UI la oportunidad de recomponerlo
-        // mal. `grossMarginPct` es null en un período sin ventas (ver lib/margin.ts).
-        return {
-          period,
-          ...amounts,
-          grossProfit: grossProfit(amounts.revenue, amounts.cogs),
-          grossMarginPct: grossMarginPct(amounts.revenue, amounts.cogs),
-          // Alias del campo anterior. Se mantiene UNA release para que el orden de
-          // despliegue entre repos no importe: backend y frontend van a Railway y a
-          // Vercel por separado, así que renombrar en seco rompe el dashboard en la
-          // ventana entre un deploy y el otro. Sale del mismo cálculo compartido, así
-          // que no puede divergir mientras exista.
-          margin: grossProfit(amounts.revenue, amounts.cogs),
-        };
-      });
-
-      return { baseCurrency: company?.baseCurrency ?? 'GTQ', months: series };
-    },
-    {
-      query: t.Object({ months: t.Optional(t.Numeric({ minimum: 1, maximum: 36 })) }),
-      response: {
-        200: t.Object({
-          baseCurrency: t.String(),
-          months: t.Array(
-            t.Object({
-              period: t.String(),
-              revenue: t.Number(),
-              cogs: t.Number(),
-              opex: t.Number(),
-              other: t.Number(),
-              grossProfit: t.Number(),
-              grossMarginPct: t.Union([t.Number(), t.Null()]),
-              /** @deprecated Alias de `grossProfit`; ver el comentario del handler. */
-              margin: t.Number(),
-            }),
-          ),
-        }),
-        429: rateLimitedResponse,
-      },
-    },
-  )
-  /**
-   * Totales de un rango ARBITRARIO + la ventana anterior del mismo tamaño + serie diaria.
-   * Lo consume el filtro de período del dashboard (Hoy / Semana / Mes / Año / Custom).
-   *
-   * Ruta aparte de `GET /metrics` en vez de un parámetro más: aquella devuelve la serie
-   * MENSUAL de los últimos N meses (y se apoya en el cache-aside de `metric_rollups`);
-   * esta consulta el ledger directo porque un rango libre no encaja en el molde mensual.
-   * Son dos preguntas distintas y mezclarlas en una firma haría que ninguna se entienda.
-   */
-  .get(
-    '/period',
-    async ({ companyId, role, query, set, db }) => {
-      assertClientCapability(role, 'view_dashboard_reports', set);
-
-      const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/period');
-      if (limited) return limited;
-
-      if (query.from > query.to) {
-        set.status = 400;
-        return { error: 'El rango es inválido: la fecha inicial es posterior a la final.' };
-      }
-
-      const [company] = await db
-        .select({ baseCurrency: companies.baseCurrency })
-        .from(companies)
-        .where(eq(companies.id, companyId));
-
-      const { current, previous, series } = await computePeriodMetrics(
-        db,
-        companyId,
-        query.from,
-        query.to,
-      );
-
+    const series = periods.map((period) => {
+      const amounts = amountsByPeriod.get(period)!;
+      // CU-868kh8y58: ya no es un placeholder. La definición cerrada vive en
+      // lib/margin.ts y la comparten KPI, reporte y alerta.
+      //
+      // Se devuelven las DOS caras del mismo dato a propósito: la utilidad bruta en
+      // moneda y el porcentaje. El bug del ticket era precisamente que en la misma
+      // pantalla convivían una ganancia que restaba gastos y un margen que no; que el
+      // backend emita el par ya calculado quita de la UI la oportunidad de recomponerlo
+      // mal. `grossMarginPct` es null en un período sin ventas (ver lib/margin.ts).
       return {
-        baseCurrency: company?.baseCurrency ?? 'GTQ',
-        from: query.from,
-        to: query.to,
-        current,
-        previous,
-        series,
+        period,
+        ...amounts,
+        grossProfit: grossProfit(amounts.revenue, amounts.cogs),
+        grossMarginPct: grossMarginPct(amounts.revenue, amounts.cogs),
+        // Alias del campo anterior. Se mantiene UNA release para que el orden de
+        // despliegue entre repos no importe: backend y frontend van a Railway y a
+        // Vercel por separado, así que renombrar en seco rompe el dashboard en la
+        // ventana entre un deploy y el otro. Sale del mismo cálculo compartido, así
+        // que no puede divergir mientras exista.
+        margin: grossProfit(amounts.revenue, amounts.cogs),
       };
-    },
-    {
-      query: t.Object({
-        from: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
-        to: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+    });
+
+    return { baseCurrency: company?.baseCurrency ?? 'GTQ', months: series };
+  },
+  {
+    query: t.Object({ months: t.Optional(t.Numeric({ minimum: 1, maximum: 36 })) }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        months: t.Array(
+          t.Object({
+            period: t.String(),
+            revenue: t.Number(),
+            cogs: t.Number(),
+            opex: t.Number(),
+            other: t.Number(),
+            grossProfit: t.Number(),
+            grossMarginPct: t.Union([t.Number(), t.Null()]),
+            /** @deprecated Alias de `grossProfit`; ver el comentario del handler. */
+            margin: t.Number(),
+          }),
+        ),
       }),
+      429: rateLimitedResponse,
     },
-  );
+  },
+);
+// El rango arbitrario NO se encadena aquí: iba `.get('/period', …)` sobre esta misma
+// instancia, que no lleva `prefix`, así que quedaba montado en `/period` a secas — el
+// propio mensaje de su token-bucket decía `GET /metrics/period`, que era el path
+// pretendido y el que llama el frontend. Vive abajo, en `metricsPeriod`, con su path
+// completo. Ver la nota de aquel bloque.
 
 /**
  * AR/AP aging (criterio de US-05/F4 dashboard, MVP: totales por antigüedad). No pasa
@@ -257,6 +210,19 @@ const PERIOD_TOTALS = t.Object({
   other: t.Number(),
 });
 
+/**
+ * Totales de un rango ARBITRARIO + la ventana anterior del mismo tamaño + serie diaria.
+ * Lo consume el filtro de período del dashboard (Hoy / Semana / Mes / Año / Custom).
+ *
+ * Ruta aparte de `GET /metrics` en vez de un parámetro más: aquella devuelve la serie
+ * MENSUAL de los últimos N meses (y se apoya en el cache-aside de `metric_rollups`); esta
+ * consulta el ledger directo porque un rango libre no encaja en el molde mensual. Son dos
+ * preguntas distintas y mezclarlas en una firma haría que ninguna se entienda.
+ *
+ * Instancia propia con el path completo, y no `.get('/period')` encadenado a `metrics`:
+ * esa instancia no lleva `prefix`, así que encadenarlo lo montaba en `/period` a secas
+ * mientras el frontend llamaba `/metrics/period`.
+ */
 export const metricsPeriod = new Elysia().use(tenantDerive).get(
   '/metrics/period',
   async ({ companyId, role, query, set, db }) => {
@@ -264,6 +230,14 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
 
     const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/period');
     if (limited) return limited;
+
+    // El patrón del query solo garantiza la FORMA de cada fecha, no su orden. Un rango al
+    // revés no da error en Postgres: da cero filas, o sea unos KPIs en cero que se leen
+    // como "no vendí nada" en vez de como "escribiste mal el rango".
+    if (query.from > query.to) {
+      set.status = 400;
+      return { error: 'El rango es inválido: la fecha inicial es posterior a la final.' };
+    }
 
     const [company] = await db
       .select({ baseCurrency: companies.baseCurrency })
@@ -279,6 +253,10 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
 
     return {
       baseCurrency: company?.baseCurrency ?? 'GTQ',
+      // Se devuelve el rango consultado: la UI dispara varias peticiones al cambiar de
+      // filtro y sin esto no puede distinguir la respuesta que pidió de una tardía.
+      from: query.from,
+      to: query.to,
       current,
       previous,
       series,
@@ -289,10 +267,13 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
     response: {
       200: t.Object({
         baseCurrency: t.String(),
+        from: t.String(),
+        to: t.String(),
         current: PERIOD_TOTALS,
         previous: PERIOD_TOTALS,
         series: t.Array(t.Composite([t.Object({ date: t.String() }), PERIOD_TOTALS])),
       }),
+      400: t.Object({ error: t.String() }),
       429: rateLimitedResponse,
     },
   },
