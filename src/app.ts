@@ -71,7 +71,17 @@ export function createApp() {
     .use(invitationAcceptance)
     .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
     .onError(({ error, set }) => {
-      Sentry.captureException(error);
+      // CU-868kmvaf7: los errores de CLIENTE no van a Sentry. Un token vencido es el
+      // evento más rutinario que existe —los access tokens de WorkOS duran minutos— y
+      // antes generaba un evento cada vez. Con tráfico real eso ahoga los errores de
+      // verdad, que es peor que no tener monitoreo: da la sensación de estar mirando.
+      //
+      // Se mira `set.status` y no el tipo de error a propósito: cubre de una vez los
+      // 401 de sesión, los 403 de capacidad y los 404, sin tener que enumerar clases.
+      // Lo que no clasificó ningún guard sigue subiendo entero.
+      const status = typeof set.status === 'number' ? set.status : 500;
+      const esErrorDeCliente = status >= 400 && status < 500;
+      if (!esErrorDeCliente) Sentry.captureException(error);
 
       // CU-868kmr192: el fallo del proveedor de IA se traduce ANTES de responder.
       // Sin esto, Elysia serializaba el error del SDK tal cual y el cliente recibía

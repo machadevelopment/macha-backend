@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 import { and, eq } from 'drizzle-orm';
-import { verifyToken } from '@/lib/auth';
+import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { users, staff } from '@/db/schema';
 import { reserveScopedConnection } from '@/lib/db-scope';
@@ -32,12 +32,8 @@ const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>(
  */
 export const adminGuard = new Elysia({ name: 'admin.guard' })
   .derive(async ({ headers, request, set }) => {
-    const auth = headers['authorization'];
-    if (!auth?.startsWith('Bearer ')) {
-      set.status = 401;
-      throw new Error('Missing bearer token');
-    }
-    const token = await verifyToken(auth.slice(7));
+    // CU-868kmvaf7: un token vencido devolvía 500 con el texto de `jose`. Ver bearer.ts.
+    const token = await verifyBearerOr401(headers['authorization'], set);
 
     // `users` y `staff` no tienen RLS, así que el gate se resuelve con el pool normal —
     // y, más importante, se resuelve ANTES de abrir ninguna vía cross-tenant.
