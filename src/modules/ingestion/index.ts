@@ -267,6 +267,70 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
     return { id: doc.id, status: 'reverted' as const, alreadyReverted: false };
   })
+  /**
+   * Reintento de un documento fallido, sin volver a subir el archivo.
+   *
+   * Por qué se puede: el original sigue en S3 (`documents.s3_key`) y el worker ya es
+   * REANUDABLE, no solo idempotente (CU-868kkgypv): lleva la marca de cada lote
+   * confirmado en `document_ingest_batches` y se salta los ya hechos ANTES de llamar a
+   * Claude. Reencolar es exactamente lo que hace pg-boss en sus propios reintentos, así
+   * que esto no abre un camino nuevo — expone el que ya existía, que hasta ahora se
+   * agotaba en silencio y dejaba al cliente sin más salida que volver a subir el mismo
+   * archivo, pagando de nuevo TODOS los lotes.
+   *
+   * Solo desde `failed`: reencolar uno en cola/proceso duplicaría el job, y uno
+   * promovido/revertido no tiene nada que reintentar.
+   */
+  .post('/:id/retry', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'upload_excel', set);
+
+    const [doc] = await db
+      .select({ id: documents.id, status: documents.status })
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+    if (doc.status !== 'failed') {
+      set.status = 409;
+      return {
+        error: `Solo se puede reintentar un documento fallido (estado actual: ${doc.status}).`,
+      };
+    }
+
+    // Mismo gate de profundidad de cola que la subida: un reintento cuesta lo mismo que
+    // una carga nueva y no debe poder saltárselo.
+    const gate = await checkQueueGate(companyId, 'excel');
+    if (!gate.allowed) {
+      set.status = 429;
+      reportRateLimited({
+        mechanism: 'queue_gate',
+        companyId,
+        route: 'POST /documents/:id/retry',
+        detail: 'excel',
+      });
+      const [company] = await db
+        .select({ locale: companies.locale })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+      return {
+        error: MESSAGES[company?.locale ?? 'es'].queueFull(rateLimitConfig.queueGate.maxJobs),
+        reason: 'queue_full',
+      };
+    }
+
+    // `error_reason` se limpia acá y no al terminar: mientras el job corre, el error
+    // anterior ya no describe el estado del documento.
+    await db
+      .update(documents)
+      .set({ status: 'queued', errorReason: null })
+      .where(eq(documents.id, params.id));
+
+    await enqueue(QUEUES.excelIngest, { documentId: params.id, companyId });
+
+    return { id: doc.id, status: 'queued' as const };
+  })
   .get('/:id', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
 

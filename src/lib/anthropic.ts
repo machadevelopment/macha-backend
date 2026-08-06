@@ -48,11 +48,23 @@ export type ClassifySheetResult = {
   model: string;
 };
 
+/**
+ * El diccionario adjunto es una AYUDA, no la autoridad del mapeo (decisión de Keneth,
+ * 2026-08-06). El motor tiene que poder con el archivo que traiga el cliente, venga como
+ * venga: la contabilidad de una PYME no está normalizada y esperar que sus encabezados
+ * caigan en un diccionario curado es exactamente la suposición que dejaba cargas
+ * muertas. Por eso el punto 2 obliga a clasificar SIEMPRE —inventando el nombre de
+ * categoría si hace falta, que es texto libre aguas abajo (lib/staging-rules.ts solo
+ * exige que no sea vacío)— y la duda se expresa en `confidence`, que es el canal que sí
+ * tiene salida: una fila de confianza baja va a revisión interna, no a la basura.
+ */
 const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
-2. Mapear los campos al esquema común usando el diccionario de sinónimos de la industria (bloque adjunto).
-3. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema.`;
+2. Mapear los campos al esquema común. Clasifica SIEMPRE cada fila con tu propio criterio contable: "type" está limitado a revenue/cogs/opex/other, pero "category" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
+3. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
+4. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
+5. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.`;
 
 // JSON Schema for structured outputs (output_config.format) — guarantees a valid,
 // parseable shape instead of asking for JSON in prose and hoping. additionalProperties
