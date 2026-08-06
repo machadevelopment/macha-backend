@@ -23,6 +23,7 @@
     "restore:drill": "bun run scripts/restore-drill.ts",
     "audit:staging-data": "bun run scripts/audit-staging-data.ts",
     "verify:isolation": "bun run scripts/verify-isolation.ts",
+    "bench:ingest": "bun run scripts/benchmark-ingest.ts",
     "prepare": "husky"
   },
   "dependencies": {
