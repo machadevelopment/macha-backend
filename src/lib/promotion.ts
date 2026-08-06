@@ -5,7 +5,18 @@ import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 
 export type PromotionResult =
   | { promoted: true; transactionCount: number; invoiceCount: number; billCount: number }
-  | { promoted: false; reason: 'pending_rows' | 'no_rows' };
+  | {
+      promoted: false;
+      reason: 'pending_rows' | 'no_rows';
+      /**
+       * CU-868kn5hqu: cuántas filas están frenando la promoción. Antes esto no salía de
+       * aquí, así que `documents.flagged_count` quedaba en NULL y el cliente veía su
+       * dashboard en cero sin forma de saber que su carga estaba esperando revisión —
+       * ni cuánto faltaba. Un libro real dejó 542 filas marcadas y el producto se leía
+       * como roto.
+       */
+      pendingCount: number;
+    };
 
 type TransactionPayload = {
   type: 'revenue' | 'cogs' | 'opex' | 'other';
@@ -79,10 +90,13 @@ export async function promoteDocument(
     .where(and(eq(stagingRows.companyId, companyId), eq(stagingRows.documentId, documentId)));
 
   if (rows.length === 0) {
-    return { promoted: false, reason: 'no_rows' };
+    return { promoted: false, reason: 'no_rows', pendingCount: 0 };
   }
-  if (rows.some((r) => r.reviewStatus === 'pending' || r.reviewStatus === 'rejected')) {
-    return { promoted: false, reason: 'pending_rows' };
+  const pendientes = rows.filter(
+    (r) => r.reviewStatus === 'pending' || r.reviewStatus === 'rejected',
+  ).length;
+  if (pendientes > 0) {
+    return { promoted: false, reason: 'pending_rows', pendingCount: pendientes };
   }
 
   let transactionCount = 0;
