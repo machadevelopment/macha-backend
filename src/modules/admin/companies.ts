@@ -9,6 +9,7 @@ import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { grantInitialCredits } from '@/lib/credits';
 import { dejariaSinOwner, MENSAJE_SIN_OWNER } from '@/lib/membership-invariants';
+import { normalizeIndustry } from '@/lib/industry-template';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -75,7 +76,10 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
           id: companyId,
           workosOrgId: body.workosOrgId,
           name: body.name,
-          industry: body.industry,
+          // Normalizada al escribir: la industria es texto libre y es la llave con la
+          // que se busca la plantilla de mapeo. "TECH" y "tech" tienen que ser la misma
+          // industria (lib/industry-template.ts).
+          industry: normalizeIndustry(body.industry),
           baseCurrency: body.baseCurrency,
           locale: body.locale,
         })

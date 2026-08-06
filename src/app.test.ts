@@ -85,7 +85,20 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/documents/abc', undefined],
     ['/industry-templates/download', undefined],
     ['/metrics', undefined],
+    // Estas tres NO estaban acá, y por eso nadie notó que `/metrics/period` y
+    // `/metrics/products` tenían su lógica escrita pero ninguna ruta montada: el frontend
+    // las llamaba y recibía 404. Una ruta ausente da 404, no 401, así que esta lista es
+    // exactamente lo que lo detecta.
+    ['/metrics/period?from=2026-01-01&to=2026-01-31', undefined],
+    ['/metrics/products?from=2026-01-01&to=2026-01-31', undefined],
+    ['/metrics/categories?from=2026-01-01&to=2026-01-31', undefined],
     ['/ar-ap', undefined],
+    ['/inventory/', undefined],
+    ['/inventory/movements', undefined],
+    ['/inventory/', { method: 'POST', body: '{}' }],
+    ['/inventory/00000000-0000-4000-8000-000000000000', { method: 'PATCH', body: '{}' }],
+    ['/inventory/00000000-0000-4000-8000-000000000000/movements', { method: 'POST', body: '{}' }],
+    ['/inventory/00000000-0000-4000-8000-000000000000', { method: 'DELETE' }],
     ['/insights', { method: 'POST', body: '{}' }],
     ['/credits/balance', undefined],
     ['/credits/topup/', { method: 'POST', body: '{}' }],

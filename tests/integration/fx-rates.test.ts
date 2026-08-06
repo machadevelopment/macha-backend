@@ -237,7 +237,9 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
     // Y el efecto que importa: el documento queda para revisión, no fallido — las filas
     // siguen ahí, esperando a que alguien registre la tasa.
     const promotion = await promoteDocument(db, companyId, documentId);
-    expect(promotion).toEqual({ promoted: false, reason: 'pending_rows' });
+    // `pendingCount` se agregó en CU-868kn5hqu: es lo que deja que el cliente sepa
+    // CUÁNTAS filas frenan su carga en vez de ver el dashboard en cero sin explicación.
+    expect(promotion).toEqual({ promoted: false, reason: 'pending_rows', pendingCount: 1 });
 
     await db
       .update(schema.documents)

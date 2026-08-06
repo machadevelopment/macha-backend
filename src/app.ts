@@ -21,7 +21,14 @@ import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
 import { industryTemplateDownload } from '@/modules/industry-templates';
 import { insights, creditsBalance } from '@/modules/insights';
-import { metrics, arAp } from '@/modules/metrics';
+import {
+  metrics,
+  arAp,
+  metricsPeriod,
+  metricsProducts,
+  metricsCategories,
+} from '@/modules/metrics';
+import { inventory } from '@/modules/inventory';
 import { me } from '@/modules/me';
 import {
   BillingNotConfiguredError,
@@ -49,6 +56,10 @@ export function createApp() {
     .use(industryTemplateDownload)
     .use(metrics)
     .use(arAp)
+    .use(metricsPeriod)
+    .use(metricsProducts)
+    .use(metricsCategories)
+    .use(inventory)
     .use(insights)
     .use(creditsBalance)
     .use(chats_)

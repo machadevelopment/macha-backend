@@ -93,4 +93,8 @@ export const APPEND_ONLY_LEDGERS = [
   'report_versions',
   'industry_template_versions',
   'payments',
+  // Migración 0019. El historial de existencias es lo que alguien revisa cuando falta
+  // mercadería; si se puede editar no sirve para eso. Una corrección es un movimiento de
+  // ajuste, igual que en credit_transactions.
+  'inventory_movements',
 ] as const;

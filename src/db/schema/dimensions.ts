@@ -19,6 +19,22 @@ export const products = pgTable(
       .notNull()
       .references(() => companies.id),
     name: text('name').notNull(),
+    /**
+     * Agrupador libre para "ventas por categoría" (pantalla Ventas por producto).
+     *
+     * Nullable a propósito: un producto existe desde que la ingesta lo nombra, y en ese
+     * momento puede no haber nada en la fila del Excel que diga a qué familia pertenece.
+     * Un default tipo 'sin categoría' se vería idéntico a una categoría real en la
+     * gráfica de participación; el null deja que la UI diga "sin clasificar", que es
+     * distinto.
+     *
+     * Es texto libre y no una tabla `product_categories` como en el prototipo: la
+     * categoría de producto es una etiqueta que sale de la IA leyendo el Excel del
+     * cliente, igual que `transactions.category`, y una tabla aparte solo agregaría un
+     * catálogo que nadie administra todavía. Si más adelante hace falta renombrar
+     * categorías en masa, ahí se justifica promoverla a dimensión propia.
+     */
+    category: text('category'),
     externalRef: text('external_ref'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -27,6 +43,7 @@ export const products = pgTable(
     companyIdx: index('products_company_idx').on(t.companyId),
     // UNIQUE(company_id, lower(name)) applied as expression index in SQL migration.
     companyIdUq: uniqueIndex('products_company_id_uq').on(t.companyId, t.id), // FK target
+    categoryIdx: index('products_company_category_idx').on(t.companyId, t.category),
   }),
 );
 

@@ -28,8 +28,8 @@ describe('ledgers append-only (CU-868kh8zbj)', () => {
     await app?.end();
   });
 
-  test('la lista cubre los 6 ledgers que declara CLAUDE.md', () => {
-    expect(APPEND_ONLY_LEDGERS.length).toBe(6);
+  test('la lista cubre los 7 ledgers que declara CLAUDE.md', () => {
+    expect(APPEND_ONLY_LEDGERS.length).toBe(7);
   });
 
   for (const ledger of APPEND_ONLY_LEDGERS) {

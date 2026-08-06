@@ -2,8 +2,9 @@ import { Elysia, t } from 'elysia';
 import { and, asc, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { stagingRows, companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
+import { stagingRows, companies } from '@/db/schema';
 import { classifySheetRows } from '@/lib/anthropic';
+import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { logAdminAction } from '@/lib/admin-audit';
 
@@ -111,17 +112,18 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
     }
 
     const [company] = await db.select().from(companies).where(eq(companies.id, row.companyId));
-    const [template] = await db
-      .select()
-      .from(industryTemplates)
-      .where(eq(industryTemplates.industry, company!.industry));
-    const [templateVersion] = await db
-      .select()
-      .from(industryTemplateVersions)
-      .where(eq(industryTemplateVersions.id, template!.currentVersionId!));
+    if (!company) {
+      set.status = 404;
+      return { error: 'Company not found' };
+    }
+    // Mismo resolver que el worker de ingesta (lib/industry-template.ts): sin plantilla
+    // propia cae a la genérica integrada. Antes eran dos `!` sobre `undefined` — una
+    // empresa sin plantilla tumbaba la reextracción con un TypeError, justo en la
+    // pantalla donde el staff arregla las filas que esa misma falta de plantilla marcó.
+    const templateVersion = await resolveIndustryTemplate(db, company.industry);
 
     const result = await classifySheetRows({
-      templateVersion: templateVersion!,
+      templateVersion,
       sheetName: `revisión (${row.flagReason ?? 'sin razón registrada'})`,
       rows: [[JSON.stringify(row.payload)]],
     });

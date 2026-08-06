@@ -3,7 +3,8 @@ import * as XLSX from 'xlsx';
 import { eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
+import { companies } from '@/db/schema';
+import { resolveIndustryTemplate } from '@/lib/industry-template';
 
 const COLUMNS = ['fecha', 'descripción', 'categoría', 'monto', 'moneda'];
 
@@ -32,21 +33,13 @@ export const industryTemplateDownload = new Elysia({ prefix: '/industry-template
       return { error: 'Company not found' };
     }
 
-    const [template] = await db
-      .select()
-      .from(industryTemplates)
-      .where(eq(industryTemplates.industry, company.industry));
-
-    let exampleCategories: string[] = ['ventas', 'compras', 'gastos operativos'];
-    if (template?.currentVersionId) {
-      const [version] = await db
-        .select()
-        .from(industryTemplateVersions)
-        .where(eq(industryTemplateVersions.id, template.currentVersionId));
-      if (version) {
-        exampleCategories = Object.keys(version.synonyms).slice(0, 3);
-      }
-    }
+    // Mismo resolver que usa la ingesta (lib/industry-template.ts). Antes esta ruta
+    // tenía su propio fallback a tres categorías inventadas a mano, que no correspondían
+    // a nada que el clasificador supiera mapear: el archivo de ejemplo enseñaba a llenar
+    // categorías que el worker no reconocía. Ahora los ejemplos salen SIEMPRE del mismo
+    // diccionario con el que se va a clasificar el archivo que el cliente devuelva.
+    const template = await resolveIndustryTemplate(db, company.industry);
+    const exampleCategories = Object.keys(template.synonyms).slice(0, 3);
 
     const rows = [
       COLUMNS,
