@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 import { and, eq } from 'drizzle-orm';
-import { verifyToken } from '@/lib/auth';
+import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { users, companyUsers, companies, subscriptions } from '@/db/schema';
 import { reserveScopedConnection } from '@/lib/db-scope';
@@ -37,12 +37,8 @@ const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>(
  */
 export const tenantDerive = new Elysia({ name: 'tenant.derive' })
   .derive(async ({ headers, request, set }) => {
-    const auth = headers['authorization'];
-    if (!auth?.startsWith('Bearer ')) {
-      set.status = 401;
-      throw new Error('Missing bearer token');
-    }
-    const token = await verifyToken(auth.slice(7));
+    // CU-868kmvaf7: un token vencido devolvía 500 con el texto de `jose`. Ver bearer.ts.
+    const token = await verifyBearerOr401(headers['authorization'], set);
 
     const [user] = await rootDb
       .select()

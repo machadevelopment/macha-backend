@@ -1,5 +1,5 @@
 import { Elysia } from 'elysia';
-import { verifyToken } from '@/lib/auth';
+import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { reserveScopedConnection } from '@/lib/db-scope';
 import { resolveOrProvisionUser } from '@/lib/user-provisioning';
@@ -33,12 +33,8 @@ const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>(
  */
 export const identityDerive = new Elysia({ name: 'identity.derive' })
   .derive(async ({ headers, request, set }) => {
-    const auth = headers['authorization'];
-    if (!auth?.startsWith('Bearer ')) {
-      set.status = 401;
-      throw new Error('Missing bearer token');
-    }
-    const token = await verifyToken(auth.slice(7));
+    // CU-868kmvaf7: un token vencido devolvía 500 con el texto de `jose`. Ver bearer.ts.
+    const token = await verifyBearerOr401(headers['authorization'], set);
 
     // CU-868kjkfdf: ESTE es el único punto donde una identidad de WorkOS obtiene su fila
     // en `users`. Va aquí y no en `tenant.derive` ni en `admin.guard` a propósito: los
