@@ -72,7 +72,11 @@ export const documents = pgTable(
       () => industryTemplateVersions.id,
     ),
     status: text('status')
-      .$type<'queued' | 'processing' | 'review' | 'promoted' | 'reverted' | 'failed'>()
+      // `unsupported` (migración 0018): terminal, el archivo no se pudo leer y
+      // reintentarlo da lo mismo — distinto de `failed`, que sí es reintentable.
+      .$type<
+        'queued' | 'processing' | 'review' | 'promoted' | 'reverted' | 'failed' | 'unsupported'
+      >()
       .notNull()
       .default('queued'),
     rowCount: integer('row_count'),

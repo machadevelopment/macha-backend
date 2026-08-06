@@ -28,6 +28,12 @@ export const INTAKE_MESSAGES = {
       `El archivo incluye montos en ${quote}, pero esta empresa (base ${base}) no tiene ninguna ` +
       `tasa de cambio registrada. Pide al equipo de Macha que registre la tasa ${quote}→${base} ` +
       `y vuelve a subir el archivo.`,
+    // La salida de escape: el motor sí intentó clasificar y no encontró nada que
+    // clasificar. El texto NO culpa al cliente ni le pide reintentar (reintentar el
+    // mismo archivo da el mismo resultado) — le da la única acción que sirve.
+    unsupportedContent: (reason: string | null) =>
+      `No pudimos leer movimientos financieros en este archivo${reason ? `: ${reason}` : '.'}` +
+      ` Descarga la plantilla de esta pantalla, llénala con tus movimientos y súbela.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -45,7 +51,24 @@ export const INTAKE_MESSAGES = {
       `The file includes amounts in ${quote}, but this company (base ${base}) has no exchange ` +
       `rate on record. Ask the Macha team to register the ${quote}→${base} rate and upload the ` +
       `file again.`,
+    unsupportedContent: (reason: string | null) =>
+      `We couldn't find any financial movements in this file${reason ? `: ${reason}` : '.'}` +
+      ` Download the template on this screen, fill it in with your movements and upload it.`,
   },
 } as const;
 
 export type IntakeLocale = keyof typeof INTAKE_MESSAGES;
+
+/**
+ * Junta las razones de "no procesable" que reportó el modelo en una sola frase.
+ *
+ * Función aparte —y no un `.join()` en línea en el worker— por lo mismo que
+ * `assertNotTruncated` en lib/anthropic.ts: lo que hay que poder probar es la regla,
+ * no el worker. Un libro de doce hojas de notas devuelve doce veces la misma frase, y
+ * lo que el cliente debe leer es una explicación, no un muro.
+ */
+export function summarizeUnusableReasons(reasons: Iterable<string>): string | null {
+  const unique = [...new Set(reasons)].map((r) => r.trim()).filter((r) => r.length > 0);
+  if (unique.length === 0) return null;
+  return unique.slice(0, 2).join(' ');
+}
