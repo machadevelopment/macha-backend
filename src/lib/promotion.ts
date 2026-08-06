@@ -2,6 +2,7 @@ import { eq, and } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { stagingRows, documents, transactions, invoices, bills, companies } from '@/db/schema';
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
+import { ProductResolver } from '@/lib/product-dimension';
 
 export type PromotionResult =
   | { promoted: true; transactionCount: number; invoiceCount: number; billCount: number }
@@ -25,6 +26,8 @@ type TransactionPayload = {
   description?: string;
   originalAmount: number;
   originalCurrency: 'GTQ' | 'USD';
+  /** Nombre del producto cuando la fila lo trae; `null` si no aplica. */
+  product?: string | null;
 };
 
 type InvoiceLikePayload = {
@@ -103,13 +106,19 @@ export async function promoteDocument(
   let invoiceCount = 0;
   let billCount = 0;
 
+  // Un resolvedor por promoción: su caché evita repetir consultas para el mismo
+  // producto, que en un libro de ventas se repite en cientos de filas.
+  const productos = new ProductResolver(db, companyId);
+
   for (const row of rows) {
     if (row.targetEntity === 'transaction') {
       const p = row.payload as unknown as TransactionPayload;
       const fx = await resolveFxRate(db, companyId, p.originalCurrency, p.date);
+      const productId = await productos.resolve(p.product);
       await db.insert(transactions).values({
         companyId,
         documentId,
+        productId,
         date: p.date,
         type: p.type,
         category: p.category,

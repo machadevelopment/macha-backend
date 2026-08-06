@@ -52,7 +52,8 @@ const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros pa
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
 2. Mapear los campos al esquema común usando el diccionario de sinónimos de la industria (bloque adjunto).
-3. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema.`;
+3. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema.
+4. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso.`;
 
 // JSON Schema for structured outputs (output_config.format) — guarantees a valid,
 // parseable shape instead of asking for JSON in prose and hoping. additionalProperties
@@ -67,8 +68,20 @@ const TRANSACTION_PAYLOAD_SCHEMA = {
     description: { type: ['string', 'null'] },
     originalAmount: { type: 'number' },
     originalCurrency: { type: 'string', enum: ['GTQ', 'USD'] },
+    // Nombre del producto o servicio, cuando la fila lo trae. `null` explícito y no
+    // campo ausente: structured outputs exige listar todas las claves en `required`, y
+    // dejar que el modelo omita el campo produciría payloads de forma variable.
+    product: { type: ['string', 'null'], description: 'Nombre del producto o servicio' },
   },
-  required: ['type', 'category', 'date', 'description', 'originalAmount', 'originalCurrency'],
+  required: [
+    'type',
+    'category',
+    'date',
+    'description',
+    'originalAmount',
+    'originalCurrency',
+    'product',
+  ],
   additionalProperties: false,
 } as const;
 
