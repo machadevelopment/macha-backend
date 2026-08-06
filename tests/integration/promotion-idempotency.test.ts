@@ -123,6 +123,61 @@ describe('idempotencia de la promoción', () => {
     expect(await cuantasTransacciones(documento)).toBe(0);
   });
 
+  /**
+   * `rejected` tiene que significar algo.
+   *
+   * Antes, `promoteDocument` contaba `pending` Y `rejected` como bloqueantes, así que
+   * rechazar una sola fila dejaba el documento entero trabado en `review` para siempre: la
+   * única forma de terminar un upload era aprobar el 100% de sus filas, incluida la que
+   * staff acababa de declarar mala. El estado `rejected` existía en el esquema y no tenía
+   * ningún uso posible.
+   *
+   * Los dos tests de abajo fijan las DOS mitades del arreglo, y la segunda es la que
+   * importa de verdad: dejar de contar `rejected` como bloqueante sin excluirla de la
+   * inserción habría promovido a producción justo las filas marcadas como malas. El bucle
+   * de inserción no miraba `review_status`.
+   */
+  test('una fila rechazada no bloquea la promoción', async () => {
+    const documento = await documentoListo(3);
+    await owner`
+      update staging_rows set review_status = 'rejected'
+      where id = (select id from staging_rows where document_id = ${documento} limit 1)`;
+
+    const resultado = await promoteDocument(db, empresa, documento);
+    expect(resultado.promoted).toBe(true);
+
+    const [doc] = await owner`select status from documents where id = ${documento}`;
+    expect(doc!.status).toBe('promoted');
+  });
+
+  test('la fila rechazada NO entra a producción', async () => {
+    const documento = await documentoListo(3);
+    await owner`
+      update staging_rows set review_status = 'rejected'
+      where id = (select id from staging_rows where document_id = ${documento} limit 1)`;
+
+    await promoteDocument(db, empresa, documento);
+
+    // 3 filas, 1 rechazada -> 2 transacciones. Con 3 acá, el rechazo no sirvió de nada.
+    expect(await cuantasTransacciones(documento)).toBe(2);
+  });
+
+  test('todas rechazadas: no promueve, y se distingue de un archivo ilegible', async () => {
+    const documento = await documentoListo(2);
+    await owner`
+      update staging_rows set review_status = 'rejected' where document_id = ${documento}`;
+
+    const resultado = await promoteDocument(db, empresa, documento);
+    // `all_rejected` y no `no_rows`: el archivo SÍ traía filas y un humano las descartó. Al
+    // cliente se le dice algo distinto en cada caso.
+    expect(resultado).toMatchObject({ promoted: false, reason: 'all_rejected' });
+    expect(await cuantasTransacciones(documento)).toBe(0);
+
+    const [doc] = await owner`select status, promoted_at from documents where id = ${documento}`;
+    expect(doc!.status).not.toBe('promoted');
+    expect(doc!.promoted_at).toBeNull();
+  });
+
   test('la reserva es exclusiva: dos intentos SIMULTÁNEOS y solo uno gana', async () => {
     // El caso de producción tal cual, probado sobre el mecanismo que lo impide: la reserva
     // es un `UPDATE ... WHERE status <> 'promoted'`, y es el lock de fila de Postgres el

@@ -5,6 +5,7 @@ initSentry();
 import { createApp, type App } from '@/app';
 import { startQueue } from '@/queue';
 import { startExcelIngestWorker } from '@/queue/workers/excel-ingest';
+import { startDocumentPromoteWorker } from '@/queue/workers/document-promote';
 import { startAlertEvaluateWorker } from '@/queue/workers/alert-evaluate';
 import { startReportGenerateWorker } from '@/queue/workers/report-generate';
 import { startReportTickWorker } from '@/queue/workers/report-tick';
@@ -54,6 +55,7 @@ startQueue()
   .then(() =>
     Promise.all([
       startExcelIngestWorker(),
+      startDocumentPromoteWorker(),
       startAlertEvaluateWorker(),
       startReportGenerateWorker(),
       startReportTickWorker(),
