@@ -87,15 +87,31 @@ export const billingWebhooks = new Elysia({ prefix: '/webhooks/recurrente' }).po
           // `company_id` explícito además del GUC: RLS es el backstop, no el filtro
           // (regla no negociable). Sin él, este UPDATE se apoyaba solo en que
           // provider_checkout_id fuera único entre TODAS las empresas.
-          await db
-            .update(subscriptions)
-            .set({ status: 'active' })
-            .where(
-              and(
-                eq(subscriptions.companyId, companyId),
-                eq(subscriptions.providerCheckoutId, event.providerPaymentId ?? ''),
-              ),
-            );
+          //
+          // CU-868kn4ken — SE CASA POR CHECKOUT, NO POR PAGO. Esta línea comparaba
+          // `provider_checkout_id` (donde el registro guarda `checkout.id`) contra el id
+          // del PAGO. Son identificadores distintos, así que el UPDATE no encontraba
+          // nunca su fila y la suscripción se quedaba en `pending_checkout` incluso tras
+          // un pago real y exitoso. No se notaba porque el acceso no depende de esto
+          // —`tenant.derive` solo bloquea `cancelled`— así que el cliente entraba
+          // normal y el estado quedaba mal para siempre: el panel lo mostraba como que
+          // nunca completó el checkout, y la renovación y la baja se apoyan en ese
+          // estado.
+          //
+          // Además es la única forma de que funcione en modo prueba: los pagos de test
+          // de Recurrente no traen objeto `payment`, solo el checkout.
+          const checkoutRef = event.providerCheckoutId;
+          if (checkoutRef) {
+            await db
+              .update(subscriptions)
+              .set({ status: 'active' })
+              .where(
+                and(
+                  eq(subscriptions.companyId, companyId),
+                  eq(subscriptions.providerCheckoutId, checkoutRef),
+                ),
+              );
+          }
         }
       } else if (event.kind === 'payment_failed') {
         const [inserted] = await db
