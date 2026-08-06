@@ -28,6 +28,10 @@ type TransactionPayload = {
   originalCurrency: 'GTQ' | 'USD';
   /** Nombre del producto cuando la fila lo trae; `null` si no aplica. */
   product?: string | null;
+  /** Unidades de la fila; `null` cuando la fila no habla de unidades. */
+  quantity?: number | null;
+  /** Familia comercial del producto; distinta de `category`, que clasifica el movimiento. */
+  productCategory?: string | null;
 };
 
 type InvoiceLikePayload = {
@@ -43,6 +47,24 @@ type InvoiceLikePayload = {
  * conversión de moneda sin una fila real de staging_rows/fx_rates. */
 export function computeAmountBase(originalAmount: number, fxRate: number): string {
   return String(originalAmount * fxRate);
+}
+
+/**
+ * Unidades de la fila -> columna `numeric` (string) o NULL.
+ *
+ * Todo lo que no sea un número positivo y finito se convierte en NULL en vez de tumbar la
+ * promoción. La cantidad es un dato de enriquecimiento: si la IA devuelve 0, un negativo o
+ * basura, la respuesta correcta es "no sabemos cuántas unidades", no perder el movimiento
+ * financiero —que sí está bien— por un campo accesorio. El CHECK
+ * `transactions_quantity_chk` de la migración 0019 rechazaría esos valores de todas
+ * formas, y ahí el fallo sería de la carga entera: la promoción es atómica, una fila mala
+ * arrastra el documento completo.
+ *
+ * Se exporta para poder probar esa frontera sin montar una promoción con Postgres.
+ */
+export function normalizeQuantity(quantity: number | null | undefined): string | null {
+  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return null;
+  return String(quantity);
 }
 
 /**
@@ -114,11 +136,12 @@ export async function promoteDocument(
     if (row.targetEntity === 'transaction') {
       const p = row.payload as unknown as TransactionPayload;
       const fx = await resolveFxRate(db, companyId, p.originalCurrency, p.date);
-      const productId = await productos.resolve(p.product);
+      const productId = await productos.resolve(p.product, p.productCategory);
       await db.insert(transactions).values({
         companyId,
         documentId,
         productId,
+        quantity: normalizeQuantity(p.quantity),
         date: p.date,
         type: p.type,
         category: p.category,

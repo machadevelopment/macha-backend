@@ -61,6 +61,51 @@ describe('ProductResolver (dimensión de productos)', () => {
     expect(await r.resolve('   ')).toBeNull();
   });
 
+  test('la categoría se guarda al crear el producto', async () => {
+    const r = resolver();
+    const id = await r.resolve('Cerveza Gallo 350ml', 'bebidas');
+    const [fila] = await owner`select category from products where id = ${id!}`;
+    expect(fila!.category).toBe('bebidas');
+  });
+
+  test('una fila sin categoría no borra la que el producto ya tenía', async () => {
+    // El caso real: el archivo trae la familia comercial en la hoja de ventas y no en la
+    // de compras. Si la segunda pisara a la primera, la categoría del producto dependería
+    // de en qué orden se procesaron las hojas.
+    const r = resolver();
+    const id = await r.resolve('Ron Botran Añejo', 'licores');
+    await r.resolve('Ron Botran Añejo', null);
+    await r.resolve('ron botran añejo');
+    const [fila] = await owner`select category from products where id = ${id!}`;
+    expect(fila!.category).toBe('licores');
+  });
+
+  test('una categoría distinta NO pisa la primera: el resultado no puede depender del orden de las filas', async () => {
+    // Dos cargas del mismo Excel tienen que dejar la misma categoría. Si cada fila
+    // sobrescribiera, ganaría la última procesada — un detalle interno de la ingesta.
+    // Reclasificar es editar el producto, no recargar el libro.
+    const r = resolver();
+    const id = await r.resolve('Tortrix Original', 'snacks');
+    await r.resolve('Tortrix Original', 'abarrotes');
+    const [fila] = await owner`select category from products where id = ${id!}`;
+    expect(fila!.category).toBe('snacks');
+  });
+
+  test('un producto creado sin categoría la recibe cuando una fila posterior sí la trae', async () => {
+    // Es la otra mitad de lo anterior: no pisar lo que ya hay no puede significar dejar el
+    // producto sin clasificar para siempre porque la primera fila que lo nombró venía
+    // incompleta. Y funciona también cuando el producto ya está en el caché del
+    // resolvedor, que es el camino que recorren las cientos de filas siguientes.
+    const r = resolver();
+    const id = await r.resolve('Harina Ideal 5lb');
+    const [antes] = await owner`select category from products where id = ${id!}`;
+    expect(antes!.category).toBeNull();
+
+    await r.resolve('HARINA IDEAL 5LB', 'abarrotes');
+    const [despues] = await owner`select category from products where id = ${id!}`;
+    expect(despues!.category).toBe('abarrotes');
+  });
+
   test('dos empresas pueden tener el mismo producto sin mezclarse', async () => {
     const otra = randomUUID();
     await owner`

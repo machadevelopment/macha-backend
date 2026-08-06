@@ -74,7 +74,9 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 5. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.
 6. "sheetUsable" es tu válvula de escape y debe ser TRUE casi siempre. Ponlo en false SOLO si esta hoja no contiene movimientos financieros identificables de ninguna forma: es texto libre o notas, es una hoja de gráficas o imágenes, está vacía, o su estructura es tan inconsistente que no se pueden delimitar filas ni distinguir montos de fechas. Que los encabezados sean raros, estén en otro idioma, mezclen mayúsculas, traigan categorías que no reconoces o vengan desordenados NO es razón para false: eso se resuelve clasificando con tu criterio. Si puedes extraer aunque sea algunas filas, "sheetUsable" es true.
 7. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
-8. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.`;
+8. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
+9. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
+10. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "category" del punto 2, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
 // JSON Schema for structured outputs (output_config.format) — guarantees a valid,
 // parseable shape instead of asking for JSON in prose and hoping. additionalProperties
@@ -93,6 +95,20 @@ const TRANSACTION_PAYLOAD_SCHEMA = {
     // campo ausente: structured outputs exige listar todas las claves en `required`, y
     // dejar que el modelo omita el campo produciría payloads de forma variable.
     product: { type: ['string', 'null'], description: 'Nombre del producto o servicio' },
+    // Unidades de la fila. `number|null` y no un default 0: 0 unidades vendidas y "esta
+    // fila no habla de unidades" (un alquiler, un total) son cosas distintas, y sobre la
+    // segunda no se puede promediar.
+    quantity: {
+      type: ['number', 'null'],
+      description: 'Unidades que mueve la fila, solo si la fila las trae explícitamente',
+    },
+    // Familia comercial del producto. Distinta de `category`, que clasifica el MOVIMIENTO
+    // contable (revenue/cogs/opex): un mismo producto puede aparecer en una fila de venta
+    // y en una de compra, y su familia es la misma en ambas.
+    productCategory: {
+      type: ['string', 'null'],
+      description: 'Familia comercial del producto de esta fila (bebidas, abarrotes…)',
+    },
   },
   required: [
     'type',
@@ -102,6 +118,8 @@ const TRANSACTION_PAYLOAD_SCHEMA = {
     'originalAmount',
     'originalCurrency',
     'product',
+    'quantity',
+    'productCategory',
   ],
   additionalProperties: false,
 } as const;
