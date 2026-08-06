@@ -4,6 +4,7 @@ import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { industryTemplates, industryTemplateVersions } from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
+import { normalizeIndustry } from '@/lib/industry-template';
 
 /**
  * CU-868kfvafg: CRUD + historial de versiones de plantillas de mapeo por industria
@@ -30,9 +31,13 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
     '/',
     async ({ staffId, tier, body, set, db }) => {
       assertStaffCapability(tier, 'manage_plans_and_templates', set);
+      // Normalizada al escribir, igual que la industria de la empresa: si el staff crea
+      // la plantilla como "Tech" y el cliente se registró como "TECH", tienen que
+      // encontrarse (lib/industry-template.ts).
+      const industry = normalizeIndustry(body.industry);
       const [template] = await db
         .insert(industryTemplates)
-        .values({ industry: body.industry, name: body.name })
+        .values({ industry, name: body.name })
         .returning();
       const [version] = await db
         .insert(industryTemplateVersions)
@@ -54,7 +59,7 @@ export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-temp
         action: 'industry_template.create',
         targetTable: 'industry_templates',
         targetId: template!.id,
-        metadata: { industry: body.industry },
+        metadata: { industry },
       });
 
       set.status = 201;

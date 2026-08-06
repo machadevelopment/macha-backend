@@ -15,6 +15,7 @@ import {
 import { isBillingConfigured } from '@/lib/billing/recurrente-client';
 import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
 import { env } from '@/lib/env';
+import { normalizeIndustry } from '@/lib/industry-template';
 
 /**
  * CU-868kfvae1/868kfvaem: registro autoservicio — alta automática de empresa+owner
@@ -86,7 +87,10 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
         // — placeholder estable y único por empresa.
         workosOrgId: `self_serve_${randomUUID()}`,
         name: body.name,
-        industry: body.industry,
+        // Normalizada al escribir (lib/industry-template.ts): este es el campo de texto
+        // libre que el cliente llena en el wizard de registro, y la llave con la que se
+        // busca su plantilla de mapeo. De aquí salió el "TECH" que no encontraba nada.
+        industry: normalizeIndustry(body.industry),
         baseCurrency: body.baseCurrency,
         locale: body.locale,
       })
