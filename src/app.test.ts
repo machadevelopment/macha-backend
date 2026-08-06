@@ -94,6 +94,13 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/alerts/', undefined],
     ['/alert-rules/', undefined],
     ['/alert-rules/ar_overdue', { method: 'PATCH', body: '{}' }],
+    // El ledger fila por fila: el dato más sensible que sirve la app de cliente, así que
+    // que exija token es justamente lo que no puede regresarse por un cambio de montaje.
+    ['/transactions/', undefined],
+    // Gestión de equipo (CU-868kh8pwv). La aceptación de invitación NO va acá: vive bajo
+    // identityDerive porque quien acepta todavía no es miembro de ninguna empresa.
+    ['/members/', undefined],
+    ['/members/invitations', undefined],
   ];
 
   for (const [path, init] of tenantScoped) {
