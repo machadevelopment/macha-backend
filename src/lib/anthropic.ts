@@ -43,17 +43,38 @@ export type ClassifiedRow = {
 
 export type ClassifySheetResult = {
   rows: ClassifiedRow[];
+  /**
+   * `false` = esta hoja no es procesable y hay que decírselo al cliente. Distinto de
+   * `rows: []` con `sheetUsable: true`, que es una hoja sin movimientos (una portada,
+   * un índice) y es normal en cualquier libro.
+   */
+  sheetUsable: boolean;
+  unusableReason: string | null;
   inputTokens: number;
   outputTokens: number;
   model: string;
 };
 
+/**
+ * El diccionario adjunto es una AYUDA, no la autoridad del mapeo (decisión de Keneth,
+ * 2026-08-06). El motor tiene que poder con el archivo que traiga el cliente, venga como
+ * venga: la contabilidad de una PYME no está normalizada y esperar que sus encabezados
+ * caigan en un diccionario curado es exactamente la suposición que dejaba cargas
+ * muertas. Por eso el punto 2 obliga a clasificar SIEMPRE —inventando el nombre de
+ * categoría si hace falta, que es texto libre aguas abajo (lib/staging-rules.ts solo
+ * exige que no sea vacío)— y la duda se expresa en `confidence`, que es el canal que sí
+ * tiene salida: una fila de confianza baja va a revisión interna, no a la basura.
+ */
 const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
-2. Mapear los campos al esquema común usando el diccionario de sinónimos de la industria (bloque adjunto).
-3. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema.
-4. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso.`;
+2. Mapear los campos al esquema común. Clasifica SIEMPRE cada fila con tu propio criterio contable: "type" está limitado a revenue/cogs/opex/other, pero "category" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
+3. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
+4. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
+5. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.
+6. "sheetUsable" es tu válvula de escape y debe ser TRUE casi siempre. Ponlo en false SOLO si esta hoja no contiene movimientos financieros identificables de ninguna forma: es texto libre o notas, es una hoja de gráficas o imágenes, está vacía, o su estructura es tan inconsistente que no se pueden delimitar filas ni distinguir montos de fechas. Que los encabezados sean raros, estén en otro idioma, mezclen mayúsculas, traigan categorías que no reconoces o vengan desordenados NO es razón para false: eso se resuelve clasificando con tu criterio. Si puedes extraer aunque sea algunas filas, "sheetUsable" es true.
+7. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
+8. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.`;
 
 // JSON Schema for structured outputs (output_config.format) — guarantees a valid,
 // parseable shape instead of asking for JSON in prose and hoping. additionalProperties
@@ -114,8 +135,25 @@ const CLASSIFY_ROWS_SCHEMA = {
         additionalProperties: false,
       },
     },
+    /**
+     * La válvula de escape. Sin ella, un archivo que no es un libro contable —notas
+     * sueltas, una hoja de gráficas, un formato tan inconsistente que no se pueden
+     * delimitar filas— no tenía forma de reportarse: el modelo devolvía `rows: []` y
+     * el documento terminaba en `review` con cero filas que revisar. El cliente veía
+     * "En revisión" para siempre y Macha una revisión interna vacía.
+     *
+     * Es un campo aparte y no un `rows` vacío porque hacen falta las dos cosas
+     * distinguidas: "no había nada que clasificar en esta hoja" (una pestaña de
+     * portada, normal en cualquier libro) vs. "esto no es procesable y hay que
+     * decírselo al cliente".
+     */
+    sheetUsable: { type: 'boolean' },
+    unusableReason: {
+      type: ['string', 'null'],
+      description: 'Solo si sheetUsable es false: qué tiene el archivo, en una frase.',
+    },
   },
-  required: ['rows'],
+  required: ['rows', 'sheetUsable', 'unusableReason'],
   additionalProperties: false,
 } as const;
 
@@ -199,7 +237,7 @@ export async function classifySheetRows(params: {
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
 
-  let parsed: { rows: ClassifiedRow[] };
+  let parsed: { rows: ClassifiedRow[]; sheetUsable: boolean; unusableReason: string | null };
   try {
     parsed = JSON.parse(textBlock.text);
   } catch (err) {
@@ -208,6 +246,12 @@ export async function classifySheetRows(params: {
 
   return {
     rows: parsed.rows,
+    // `?? true` deliberado: ante la duda, procesable. El campo es `required` en el
+    // esquema, pero si alguna vez faltara, el sesgo correcto es seguir clasificando —
+    // el costo de tratar un archivo bueno como ilegible (se lo rebotamos al cliente)
+    // es peor que el de intentar procesar uno malo (termina en revisión).
+    sheetUsable: parsed.sheetUsable ?? true,
+    unusableReason: parsed.unusableReason ?? null,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
     model: message.model,
