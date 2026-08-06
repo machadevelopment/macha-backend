@@ -1,12 +1,14 @@
 import { Elysia, t } from 'elysia';
-import { and, asc, eq, getTableColumns } from 'drizzle-orm';
+import { and, asc, count, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { stagingRows, companies } from '@/db/schema';
+import { stagingRows, companies, documents } from '@/db/schema';
 import { classifySheetRows } from '@/lib/anthropic';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { logAdminAction } from '@/lib/admin-audit';
+import { enqueue, QUEUES } from '@/queue';
+import type { DB } from '@/db/client';
 
 /**
  * CU-868kfvaf5 criterio 2: revisión de filas marcadas con edición directa +
@@ -19,6 +21,55 @@ import { logAdminAction } from '@/lib/admin-audit';
  * el payload actual + flag_reason como entrada (pidiéndole que reconsidere), no
  * re-parsear el Excel desde cero — es lo que la forma real de los datos permite.
  */
+/**
+ * Cierra el ciclo de la revisión interna: si al documento de la fila que se acaba de
+ * revisar ya no le queda ninguna `pending`, encola su promoción.
+ *
+ * Se llama SOLO desde el `PATCH`, que es el único camino que resuelve una fila. La
+ * re-extracción (`POST /:id/reextract`) reescribe payload/confianza pero deja
+ * `review_status` en `pending` a propósito: que Claude reconsidere no es que un humano
+ * aprobó, y la fila todavía tiene que pasar por el `PATCH`. Llamar a esto desde ahí no
+ * haría nada más que una consulta de más.
+ *
+ * Es best-effort a propósito y no revienta la respuesta del `PATCH`: la revisión de la
+ * fila YA se confirmó y auditó cuando llegamos acá. Si la cola está caída, lo correcto es
+ * que el operador vea su cambio guardado —no un 500 que le haga pensar que no se
+ * guardó— y que el documento se quede en `review`, que es el estado honesto y del que
+ * ahora sí hay salida. Se registra en consola para que el fallo no sea invisible.
+ */
+async function encolarPromocionSiYaNoQuedaNadaPendiente(
+  db: DB,
+  companyId: string,
+  documentId: string,
+): Promise<void> {
+  try {
+    const [pendientes] = await db
+      .select({ n: count() })
+      .from(stagingRows)
+      .where(
+        and(
+          eq(stagingRows.companyId, companyId),
+          eq(stagingRows.documentId, documentId),
+          eq(stagingRows.reviewStatus, 'pending'),
+        ),
+      );
+    if (Number(pendientes?.n ?? 0) > 0) return;
+
+    // Solo un documento en `review` se promueve por esta vía. Sin este filtro, resolver
+    // una fila vieja de un documento ya `reverted` o `failed` lo resucitaría: la reserva de
+    // `promoteDocument` solo excluye `promoted`.
+    const [doc] = await db
+      .select({ status: documents.status })
+      .from(documents)
+      .where(eq(documents.id, documentId));
+    if (doc?.status !== 'review') return;
+
+    await enqueue(QUEUES.documentPromote, { documentId, companyId });
+  } catch (err) {
+    console.error('[admin/staging-rows] no se pudo encolar la promoción:', documentId, err);
+  }
+}
+
 export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
   .use(adminGuard)
   .get(
@@ -93,6 +144,8 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
           reviewStatus: body.reviewStatus,
         },
       });
+
+      await encolarPromocionSiYaNoQuedaNadaPendiente(db, before.companyId, before.documentId);
 
       return { id: params.id, reviewStatus: body.reviewStatus };
     },
