@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, ne } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { stagingRows, documents, transactions, invoices, bills, companies } from '@/db/schema';
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
@@ -8,7 +8,14 @@ export type PromotionResult =
   | { promoted: true; transactionCount: number; invoiceCount: number; billCount: number }
   | {
       promoted: false;
-      reason: 'pending_rows' | 'no_rows';
+      /**
+       * `already_promoted`: otra ejecución de este mismo documento ganó la carrera y ya
+       * insertó sus filas. No es un error — es la salida correcta cuando el worker corre
+       * dos veces a la vez (ver la nota de la reserva en `promoteDocument`). El worker lo
+       * trata como "no hay nada que hacer aquí" y NO toca el estado del documento, que ya
+       * dejó bien la ejecución ganadora.
+       */
+      reason: 'pending_rows' | 'no_rows' | 'already_promoted';
       /**
        * CU-868kn5hqu: cuántas filas están frenando la promoción. Antes esto no salía de
        * aquí, así que `documents.flagged_count` quedaba en NULL y el cliente veía su
@@ -109,18 +116,60 @@ export async function promoteDocument(
   companyId: string,
   documentId: string,
 ): Promise<PromotionResult> {
+  /**
+   * RESERVA DEL DOCUMENTO ANTES DE INSERTAR NADA. Es un `UPDATE ... WHERE status <>
+   * 'promoted'` que sirve de cerrojo: en Postgres toma el lock de esa fila, así que dos
+   * promociones simultáneas se serializan —la segunda espera al commit de la primera, ve
+   * `promoted` y no afecta ninguna fila— y sale por acá sin insertar.
+   *
+   * POR QUÉ HACE FALTA. Esta función no era idempotente y el worker no impedía dos
+   * ejecuciones a la vez. Observado en producción el 2026-08-06 (documento `ce2a824b`):
+   * pg-boss venció el job a los 15 minutos —vencer es una marca, no una cancelación— y
+   * encoló un segundo intento mientras el primero seguía trabajando. Los lotes ya estaban
+   * protegidos por el índice único de `document_ingest_batches`, pero la promoción no
+   * tenía nada: las dos ejecuciones habrían insertado el MISMO `staging_rows` completo,
+   * duplicando ingresos y costos del cliente en un producto financiero. La causa de raíz
+   * se corrige con `expireInSeconds` en la cola; esto es la defensa que no depende de que
+   * la cola esté bien configurada.
+   *
+   * `rowCount` se corrige después, cuando ya se sabe cuántas filas se insertaron. Lo que
+   * importa acá es ganar la carrera, no el conteo.
+   */
+  const [reservado] = await db
+    .update(documents)
+    .set({ status: 'promoted', promotedAt: new Date(), flaggedCount: 0 })
+    .where(and(eq(documents.id, documentId), ne(documents.status, 'promoted')))
+    .returning({ id: documents.id });
+
+  if (!reservado) {
+    return { promoted: false, reason: 'already_promoted', pendingCount: 0 };
+  }
+
   const rows = await db
     .select()
     .from(stagingRows)
     .where(and(eq(stagingRows.companyId, companyId), eq(stagingRows.documentId, documentId)));
 
+  // Los tres caminos que NO promueven tienen que devolver el documento a un estado
+  // honesto: la reserva de arriba ya lo marcó `promoted` y aquí todavía no se insertó
+  // nada. El `status` definitivo lo escribe el worker según el motivo (`unsupported`,
+  // `review`), pero dejarlo en `promoted` un instante sería mentir si algo lanza en medio.
+  async function liberar(estado: 'queued' | 'processing' = 'processing') {
+    await db
+      .update(documents)
+      .set({ status: estado, promotedAt: null })
+      .where(eq(documents.id, documentId));
+  }
+
   if (rows.length === 0) {
+    await liberar();
     return { promoted: false, reason: 'no_rows', pendingCount: 0 };
   }
   const pendientes = rows.filter(
     (r) => r.reviewStatus === 'pending' || r.reviewStatus === 'rejected',
   ).length;
   if (pendientes > 0) {
+    await liberar();
     return { promoted: false, reason: 'pending_rows', pendingCount: pendientes };
   }
 
