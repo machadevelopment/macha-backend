@@ -15,7 +15,7 @@ export type PromotionResult =
        * trata como "no hay nada que hacer aquí" y NO toca el estado del documento, que ya
        * dejó bien la ejecución ganadora.
        */
-      reason: 'pending_rows' | 'no_rows' | 'already_promoted';
+      reason: 'pending_rows' | 'no_rows' | 'all_rejected' | 'already_promoted';
       /**
        * CU-868kn5hqu: cuántas filas están frenando la promoción. Antes esto no salía de
        * aquí, así que `documents.flagged_count` quedaba en NULL y el cliente veía su
@@ -145,7 +145,7 @@ export async function promoteDocument(
     return { promoted: false, reason: 'already_promoted', pendingCount: 0 };
   }
 
-  const rows = await db
+  const todas = await db
     .select()
     .from(stagingRows)
     .where(and(eq(stagingRows.companyId, companyId), eq(stagingRows.documentId, documentId)));
@@ -161,16 +161,44 @@ export async function promoteDocument(
       .where(eq(documents.id, documentId));
   }
 
-  if (rows.length === 0) {
+  if (todas.length === 0) {
     await liberar();
     return { promoted: false, reason: 'no_rows', pendingCount: 0 };
   }
-  const pendientes = rows.filter(
-    (r) => r.reviewStatus === 'pending' || r.reviewStatus === 'rejected',
-  ).length;
+
+  /**
+   * SOLO `pending` FRENA LA PROMOCIÓN. Antes `rejected` también contaba como pendiente, y
+   * eso volvía inútil el propio estado: `staging_rows.review_status` admite `rejected`
+   * (data model §4.12) pero rechazar una sola fila dejaba el documento entero trabado en
+   * `review` PARA SIEMPRE, sin más salida que aprobar hasta la fila que staff acababa de
+   * declarar mala. La única forma de terminar un upload era aprobar el 100% de sus filas.
+   *
+   * La regla del data model §4.12 es "ninguna fila se promueve mientras existan
+   * `flag_reason` SIN RESOLVER", y una fila rechazada sí está resuelta: la resolución es
+   * "esta fila no entra". Así que se excluye de la inserción y no bloquea.
+   *
+   * El filtro de abajo es la otra mitad, y sin él esto sería un agujero de datos: el bucle
+   * de inserción no distinguía `review_status`, así que promovía TODAS las filas que
+   * encontraba. Dejar de contar `rejected` como bloqueante sin excluirla de la inserción
+   * habría metido a producción justamente las filas que un humano marcó como malas.
+   */
+  const pendientes = todas.filter((r) => r.reviewStatus === 'pending').length;
   if (pendientes > 0) {
     await liberar();
     return { promoted: false, reason: 'pending_rows', pendingCount: pendientes };
+  }
+
+  const rows = todas.filter((r) => r.reviewStatus !== 'rejected');
+
+  /**
+   * Staff revisó todo y rechazó todo. Es un desenlace distinto de `no_rows` (la IA no
+   * extrajo nada) y no debe compartir su mensaje: acá el archivo sí tenía filas, un humano
+   * las miró y decidió que ninguna servía. Se devuelve con nombre propio para que quien
+   * llama no lo reporte como "archivo no legible".
+   */
+  if (rows.length === 0) {
+    await liberar();
+    return { promoted: false, reason: 'all_rejected', pendingCount: 0 };
   }
 
   let transactionCount = 0;

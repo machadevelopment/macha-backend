@@ -16,6 +16,16 @@ export const boss = new PgBoss({ connectionString: env.databaseUrl, schedule: tr
 
 export const QUEUES = {
   excelIngest: 'excel.ingest',
+  /**
+   * Reintento de la promoción de un documento que ya está en `review`, disparado cuando
+   * staff resuelve su última fila pendiente. Va por cola y no por llamada directa desde la
+   * ruta admin por una razón estructural, no de estilo: `promoteDocument` escribe en
+   * `transactions`/`invoices`/`bills`, que son tenant-scoped con RLS y `FORCE ROW LEVEL
+   * SECURITY`, y necesita la conexión reservada con el GUC `app.company_id` puesto
+   * (`withCompanyScope`). El namespace `/admin/*` está estructuralmente FUERA de esa
+   * cadena de guards (CLAUDE.md), así que desde ahí esos INSERT no tienen dónde escribir.
+   */
+  documentPromote: 'document.promote',
   reportTick: 'report.tick',
   reportGenerate: 'report.generate',
   alertEvaluate: 'alert.evaluate',
@@ -61,6 +71,19 @@ export const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
     retryDelay: 30,
     retryBackoff: true,
     expireInSeconds: 3_600,
+  },
+  // Promover no llama a Claude: es un INSERT masivo dentro de una transacción. Lo que
+  // puede tardar es el volumen (un libro de miles de filas) y lo que puede fallar es
+  // transitorio (contención de locks con otra promoción del mismo tenant). Diez minutos
+  // cubren con holgura el archivo de una PYME; 3 reintentos porque el modo de fallo real
+  // —falta la tasa de cambio— es DETERMINISTA y reintentarlo no lo arregla: agota los
+  // intentos y deja el job `failed` para que se vea en el monitoreo, que es exactamente lo
+  // que se quiere de un fallo que necesita a un humano.
+  [QUEUES.documentPromote]: {
+    retryLimit: 3,
+    retryDelay: 30,
+    retryBackoff: true,
+    expireInSeconds: 600,
   },
   [QUEUES.reportTick]: { retryLimit: 1, retryDelay: 60, retryBackoff: false },
   // Generar un reporte es UNA llamada a Claude, no una por lote, pero con narrativa larga
