@@ -72,6 +72,12 @@ export interface NormalizedBillingEvent {
   eventId: string;
   kind: 'payment_succeeded' | 'payment_failed' | 'subscription_status' | 'unhandled';
   providerPaymentId?: string;
+  /**
+   * CU-868kn4ken — id del CHECKOUT, que es lo que `subscriptions.provider_checkout_id`
+   * guarda y por tanto lo único con lo que se puede casar la suscripción. Antes el
+   * handler comparaba contra `providerPaymentId`, que es otro identificador distinto.
+   */
+  providerCheckoutId?: string;
   providerSubscriptionId?: string;
   amountUsdCents?: number;
   subscriptionStatus?: 'active' | 'paused' | 'past_due' | 'cancelled';
@@ -106,6 +112,10 @@ export function verifyAndParseWebhook(params: {
         eventId: raw.id,
         kind: 'payment_succeeded',
         providerPaymentId: raw.payment?.id,
+        // CU-868kn4ken: los pagos de PRUEBA de Recurrente no traen objeto `payment`
+        // (su intent lleva prefijo `pa_test_` y no hay pago enlazado), así que
+        // `providerPaymentId` viene vacío. El checkout sí está en las dos modalidades.
+        providerCheckoutId: raw.checkout?.id,
         amountUsdCents: raw.amount_in_cents,
         metadata,
       };
@@ -115,6 +125,7 @@ export function verifyAndParseWebhook(params: {
         eventId: raw.id,
         kind: 'payment_failed',
         providerPaymentId: raw.payment?.id,
+        providerCheckoutId: raw.checkout?.id,
         amountUsdCents: raw.amount_in_cents,
         metadata,
       };
