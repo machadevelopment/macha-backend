@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * CU-868kjc5pj: ningún camino de código puede hacer UPDATE ni DELETE sobre los seis
+ * CU-868kjc5pj: ningún camino de código puede hacer UPDATE ni DELETE sobre los siete
  * ledgers append-only de CLAUDE.md.
  *
  * POR QUÉ ESTE TEST EXISTE Y NO BASTABA CON EL DE INTEGRACIÓN. `tests/integration/
@@ -30,6 +30,7 @@ const APPEND_ONLY_ENTITIES = [
   'reportVersions',
   'industryTemplateVersions',
   'payments',
+  'inventoryMovements',
 ] as const;
 
 function sourceFiles(dir: string): string[] {

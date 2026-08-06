@@ -1,8 +1,9 @@
-// Barrel export — all 28 tables across domains. Import from '@/db/schema'.
+// Barrel export — all 30 tables across domains. Import from '@/db/schema'.
 export * from './companies';
 export * from './identity'; // users, company_users, staff
 export * from './dimensions'; // products, stores, fx_rates
 export * from './ledger'; // transactions, invoices, bills (partitioned)
+export * from './inventory'; // inventory_items, inventory_movements
 export * from './ingestion'; // documents, staging_rows, industry_templates(+versions)
 export * from './dashboard'; // metric_rollups
 export * from './chat'; // chats, chat_messages, chat_segments

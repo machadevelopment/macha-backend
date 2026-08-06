@@ -94,10 +94,16 @@ describe('precondiciones del rol de aplicación (CU-868kh8zbj)', () => {
     const rows = await owner`
       select relname, relrowsecurity, relforcerowsecurity
       from pg_class
-      where relname in ('documents', 'ai_usage_events', 'metric_rollups', 'company_users')
+      where relname in (
+        'documents', 'ai_usage_events', 'metric_rollups', 'company_users',
+        -- Migración 0019. Las tablas nuevas se agregan aquí y no en otra prueba: una
+        -- tabla de negocio sin RLS forzado es el mismo agujero se llame como se llame, y
+        -- la lista es lo único que hace que una tabla nueva no se quede fuera en silencio.
+        'inventory_items', 'inventory_movements'
+      )
         and relkind = 'r'
     `;
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBe(6);
     for (const row of rows) {
       expect({
         table: row.relname,

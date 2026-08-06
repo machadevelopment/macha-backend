@@ -36,6 +36,21 @@ export const transactions = pgTable(
     fxRate: numeric('fx_rate', { precision: 18, scale: 8 }).notNull(),
     fxRateDate: date('fx_rate_date').notNull(),
     productId: uuid('product_id'),
+    /**
+     * Unidades del movimiento, cuando la fila del Excel las trae. Es lo que hace
+     * calculables "unidades vendidas" y "ticket promedio" de la pantalla de Ventas por
+     * producto: sin esto solo se puede rankear por dinero.
+     *
+     * `numeric` y no `integer` porque una PYME guatemalteca vende por libra, quintal o
+     * metro tanto como por unidad; un entero obligaría a redondear el dato del cliente
+     * en la ingesta, que es justo donde no se debe.
+     *
+     * Nullable, y ese null significa algo: "esta fila no expresa cantidades" (el
+     * alquiler, una comisión bancaria, un total). Un default 0 haría que el promedio de
+     * unidades por venta se calculara sobre filas que nunca fueron ventas de unidades.
+     * Las queries de unidades filtran `quantity IS NOT NULL` por eso.
+     */
+    quantity: numeric('quantity', { precision: 18, scale: 3 }),
     storeId: uuid('store_id'),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
