@@ -29,6 +29,7 @@ import {
   BILLING_NOT_CONFIGURED_MESSAGE,
 } from '@/lib/billing/billing-errors';
 import { members, invitationAcceptance } from '@/modules/members';
+import { transactionsList } from '@/modules/transactions';
 import { reports_ } from '@/modules/reports';
 
 /**
@@ -67,6 +68,7 @@ export function createApp() {
     .use(creditsTopup)
     .use(billingWebhooks)
     .use(me)
+    .use(transactionsList)
     .use(members)
     .use(invitationAcceptance)
     .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
