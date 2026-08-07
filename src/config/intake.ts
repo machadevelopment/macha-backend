@@ -34,4 +34,25 @@ export const intakeConfig = {
    * llamada de más.
    */
   outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 40_000),
+  /**
+   * Cuántos lotes se mandan a Claude EN PARALELO.
+   *
+   * Antes los lotes se procesaban en serie y era, medido, el problema más grande de la
+   * ingesta desde la vista del cliente. Tres archivos reales en producción (2026-08-06):
+   *
+   *   Cafe_Andino (1.174 filas, 25 lotes)     68,7 min
+   *   Cafeteria_Excel (1.881 filas, 21 lotes) 42,2 min
+   *   Reporte preliminar (1.316, 68 lotes)    23,7 min
+   *
+   * Cada llamada a Claude tarda 140-220 s y no depende de las otras: el cuello es espera
+   * de red, no CPU ni base. En serie, 25 lotes × ~165 s son ~69 minutos de alguien mirando
+   * una pantalla que dice "procesando".
+   *
+   * 5 y no 20: el techo real son los límites de tasa de la API de Anthropic, que dependen
+   * del tier de la cuenta y no se pueden leer desde acá. El SDK ya reintenta 429/5xx con
+   * backoff (`maxRetries` por defecto), así que pasarse no rompe — solo desperdicia
+   * latencia en reintentos. 5 baja el archivo de 69 a ~14 minutos y deja margen; se sube
+   * por env cuando se mida el límite real de la cuenta, sin tocar código.
+   */
+  batchConcurrency: Math.max(1, Number(process.env.INTAKE_BATCH_CONCURRENCY || 5)),
 };
