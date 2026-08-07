@@ -1,6 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { eq } from 'drizzle-orm';
 import { ownerConnection, setupTestDatabase } from './setup';
 import * as schema from '@/db/schema';
 import { promoteDocument } from '@/lib/promotion';
@@ -234,16 +233,37 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
     expect(rows[1]!.review_status).toBe('pending');
     expect(rows[1]!.flag_reason).toBe(`${MISSING_FX_FLAG}:USD:2024-01-15`);
 
-    // Y el efecto que importa: el documento queda para revisión, no fallido — las filas
-    // siguen ahí, esperando a que alguien registre la tasa.
+    /**
+     * Y el efecto que importa, que CAMBIÓ con la migración 0020 (promoción parcial).
+     *
+     * Antes esto devolvía `{promoted: false, reason: 'pending_rows'}`: la fila en USD sin
+     * tasa dejaba fuera de producción también a la fila en GTQ, que no tenía ningún
+     * problema. Era el caso exacto que motivó el cambio — la falta de una tasa de cambio es
+     * un dato que falta de NUESTRO lado, y frenaba el archivo entero del cliente.
+     *
+     * Ahora la de GTQ entra y la de USD se retiene. `pendingCount` sigue siendo el número
+     * con el que el cliente entiende por qué sus totales no cuadran con su Excel.
+     */
     const promotion = await promoteDocument(db, companyId, documentId);
-    // `pendingCount` se agregó en CU-868kn5hqu: es lo que deja que el cliente sepa
-    // CUÁNTAS filas frenan su carga en vez de ver el dashboard en cero sin explicación.
-    expect(promotion).toEqual({ promoted: false, reason: 'pending_rows', pendingCount: 1 });
+    expect(promotion).toEqual({
+      promoted: true,
+      transactionCount: 1,
+      invoiceCount: 0,
+      billCount: 0,
+      pendingCount: 1,
+    });
 
-    await db
-      .update(schema.documents)
-      .set({ status: 'review' })
-      .where(eq(schema.documents.id, documentId));
+    // La que entró es la de la moneda base, y SOLO ella: la fila en USD no puede convertirse
+    // sin tasa, así que si apareciera acá sería con un `amount_base` inventado.
+    const promovidas = await owner`
+      select original_currency from transactions where document_id = ${documentId}`;
+    expect(promovidas.map((r) => r.original_currency)).toEqual(['GTQ']);
+
+    // Y la de USD sigue en staging, sin sellar, lista para cuando se registre la tasa.
+    const [retenida] = await owner`
+      select review_status, promoted_at from staging_rows
+      where document_id = ${documentId} and payload->>'originalCurrency' = 'USD'`;
+    expect(retenida!.review_status).toBe('pending');
+    expect(retenida!.promoted_at).toBeNull();
   });
 });
