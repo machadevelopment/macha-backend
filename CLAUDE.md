@@ -40,7 +40,15 @@ Conventions & gotchas:
 - **Dos GUC por request, no uno** (CU-868kj3utc, migración `0012`): `app.user_id` se setea con `SET LOCAL` en cuanto se verifica el JWT, y `app.company_id` solo después de resolver la membresía — ambos sobre **la misma conexión reservada**. La política de `company_users` permite leer por empresa **o por usuario**, porque es la tabla donde se descubre la empresa y no se puede filtrar por algo que aún no se conoce. Un `SECURITY DEFINER` no sirve aquí: `FORCE ROW LEVEL SECURITY` (0010) también sujeta al dueño. Y toda política usa `nullif(current_setting(...), '')`: un GUC revertido al cerrar la transacción vale cadena vacía, no NULL, y `''::uuid` lanza error en la siguiente request de esa conexión.
 - **Two DB roles, not one**: `DATABASE_URL` (owner, runs migrations/seed/provision CLI) vs `APP_DATABASE_URL` (restricted `macha_app`, what the running app actually connects as — `src/db/client.ts`). Falls back to `DATABASE_URL` if `APP_DATABASE_URL` is unset, but the RLS/append-only guarantees are then no-ops for the app's own queries (owner bypasses both). `macha_app`'s password isn't in any migration/env file — an operator sets it once directly against Railway's Postgres, then sets `APP_DATABASE_URL`.
 - **Schema migrations auto-apply on deploy** (gated by manual promote to prod). Data/seed migrations run as separate manual scripts — never mix them.
-- **Excel ingestion is async via pg-boss.** One Claude call per sheet; rows land in a single staging table, flagged rows get internal review, then **atomic promotion** (all-or-nothing in one SQL tx). Revert = soft-delete by `document_id`.
+- **Excel ingestion is async via pg-boss.** One Claude call per sheet; rows land in a single staging table.
+  **Promotion is PARTIAL (Keneth's call, 2026-08-07 — migration `0020`)**: clean rows promote on their own, only
+  flagged rows are held back for internal review, and each one promotes incrementally as staff resolves it. A
+  `promoted` document with `flagged_count > 0` is the normal state, not a contradiction. The SQL atomicity still
+  holds (one tx, all-or-nothing) but over the *promotable* rows, not the whole document — the previous rule
+  ("no row promotes while any flagged row is unresolved") turned internal review, meant to be the exception, into
+  the mandatory path for every upload: 0 rows in production against 3,195 in staging, measured 2026-08-06.
+  Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
+  lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.

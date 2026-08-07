@@ -36,8 +36,21 @@ export function startDocumentPromoteWorker(): Promise<string> {
       const promovido = await withCompanyScope(companyId, async (db) => {
         const resultado = await promoteDocument(db, companyId, documentId);
 
-        // Ganó otra ejecución: el documento ya quedó bien y no hay que tocarlo.
-        if (!resultado.promoted && resultado.reason === 'already_promoted') return false;
+        if (!resultado.promoted && resultado.reason === 'already_promoted') {
+          /**
+           * No hay nada nuevo que insertar. Pero SÍ hay que reconciliar `flagged_count`, y
+           * este es el caso que lo necesita: cuando staff RECHAZA las últimas filas
+           * pendientes de un documento ya promovido, no se promueve nada nuevo y sin esto el
+           * contador se quedaría en el número viejo — el cliente vería "3 filas en revisión"
+           * de filas que ya no están pendientes de nada. `pendingCount` viene recalculado
+           * desde `staging_rows`, así que es la cifra real y no un decremento a ojo.
+           */
+          await db
+            .update(documents)
+            .set({ flaggedCount: resultado.pendingCount })
+            .where(eq(documents.id, documentId));
+          return false;
+        }
 
         if (!resultado.promoted && resultado.reason === 'pending_rows') {
           // Alguien subió filas nuevas, o dos revisiones corrieron a la vez y esta perdió.
@@ -56,6 +69,19 @@ export function startDocumentPromoteWorker(): Promise<string> {
           // 0018). El `error_reason` los distingue, porque para el cliente NO son lo mismo:
           // uno es "no pudimos leer tu archivo", el otro "lo revisamos y no había nada
           // aprovechable".
+          //
+          // NUNCA SOBRE UN DOCUMENTO YA PROMOVIDO. `no_rows` significa "no hay filas en
+          // staging", y eso también sería cierto el día que se implemente la purga de
+          // `staging_rows` post-promoción (data model §22/§23, pendiente). Sin esta guarda,
+          // esa purga futura convertiría documentos buenos en `unsupported` con `row_count`
+          // 0 — borrando de la vista del cliente un archivo cuyos datos SÍ están en
+          // producción. Es una guarda contra algo que todavía no existe, y es barata.
+          const [doc] = await db
+            .select({ status: documents.status })
+            .from(documents)
+            .where(eq(documents.id, documentId));
+          if (doc?.status === 'promoted') return false;
+
           await db
             .update(documents)
             .set({

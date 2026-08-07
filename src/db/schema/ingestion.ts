@@ -114,12 +114,23 @@ export const stagingRows = pgTable(
       .default('pending'),
     reviewedBy: uuid('reviewed_by'),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    /**
+     * Migración 0020: instante en que esta fila se insertó en
+     * `transactions`/`invoices`/`bills`. `null` = todavía no.
+     *
+     * Es la protección POR FILA contra doble inserción, y lo que hace posible promover un
+     * documento en varias pasadas: primero sus filas limpias, después las que staff
+     * resuelva. El cerrojo anterior era por documento (`documents.status <> 'promoted'`) y
+     * con promoción parcial habría impedido justamente la segunda pasada legítima.
+     */
+    promotedAt: timestamp('promoted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     docIdx: index('staging_rows_company_document_idx').on(t.companyId, t.documentId),
     reviewIdx: index('staging_rows_company_review_idx').on(t.companyId, t.reviewStatus),
-    // Partial index WHERE flag_reason IS NOT NULL is applied in SQL migration.
+    // Partial indexes (WHERE flag_reason IS NOT NULL, WHERE promoted_at IS NULL) are
+    // applied in SQL migrations — drizzle-kit doesn't generate them.
   }),
 );
 

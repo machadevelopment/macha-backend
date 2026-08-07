@@ -107,20 +107,75 @@ describe('idempotencia de la promoción', () => {
     expect(doc!.promoted_at).toBeNull();
   });
 
-  test('un documento con filas pendientes tampoco queda marcado como promovido', async () => {
-    const documento = await documentoListo(2);
+  /**
+   * PROMOCIÓN PARCIAL (migración 0020). Esta prueba decía lo contrario hasta el 2026-08-07:
+   * "un documento con filas pendientes tampoco queda marcado como promovido". Esa era la
+   * regla vieja —todo o nada por documento— y es justo la que se eliminó: una fila dudosa
+   * entre mil dejaba fuera de producción a las otras 999 hasta que un humano de Macha la
+   * mirara.
+   */
+  test('las filas limpias entran aunque queden pendientes; solo la pendiente se retiene', async () => {
+    const documento = await documentoListo(3);
     await owner`
       update staging_rows set review_status = 'pending'
       where id = (select id from staging_rows where document_id = ${documento} limit 1)`;
 
     const resultado = await promoteDocument(db, empresa, documento);
-    expect(resultado).toMatchObject({ promoted: false, reason: 'pending_rows', pendingCount: 1 });
+    expect(resultado).toMatchObject({ promoted: true, transactionCount: 2, pendingCount: 1 });
+    expect(await cuantasTransacciones(documento)).toBe(2);
+
+    // El documento SÍ queda promovido, y `flagged_count` es lo que le explica al cliente por
+    // qué sus totales no cuadran con su Excel. Los dos a la vez es el estado normal ahora.
+    const [doc] = await owner`
+      select status, flagged_count, row_count from documents where id = ${documento}`;
+    expect(doc!.status).toBe('promoted');
+    expect(doc!.flagged_count).toBe(1);
+    expect(doc!.row_count).toBe(2);
+  });
+
+  test('un documento con TODAS sus filas pendientes sí queda para revisión', async () => {
+    // El caso que la revisión interna existe para atender: no hay nada promovible, así que
+    // esto es un archivo genuinamente trabado y no debe reportarse como promovido.
+    const documento = await documentoListo(2);
+    await owner`update staging_rows set review_status = 'pending' where document_id = ${documento}`;
+
+    const resultado = await promoteDocument(db, empresa, documento);
+    expect(resultado).toMatchObject({ promoted: false, reason: 'pending_rows', pendingCount: 2 });
+    expect(await cuantasTransacciones(documento)).toBe(0);
 
     const [doc] = await owner`select status, promoted_at from documents where id = ${documento}`;
     expect(doc!.status).not.toBe('promoted');
     expect(doc!.promoted_at).toBeNull();
-    // Y lo más importante: no insertó nada a medias.
-    expect(await cuantasTransacciones(documento)).toBe(0);
+  });
+
+  test('promover en dos pasadas no duplica, y acumula el row_count', async () => {
+    // La segunda pasada es la que existe gracias a `staging_rows.promoted_at`: con el cerrojo
+    // viejo por documento (`status <> 'promoted'`) esta llamada habría salido por
+    // `already_promoted` sin insertar la fila que staff acaba de aprobar.
+    const documento = await documentoListo(3);
+    await owner`
+      update staging_rows set review_status = 'pending'
+      where id = (select id from staging_rows where document_id = ${documento} limit 1)`;
+
+    await promoteDocument(db, empresa, documento);
+    expect(await cuantasTransacciones(documento)).toBe(2);
+
+    // Staff aprueba la que faltaba.
+    await owner`
+      update staging_rows set review_status = 'approved'
+      where document_id = ${documento} and review_status = 'pending'`;
+
+    const segunda = await promoteDocument(db, empresa, documento);
+    expect(segunda).toMatchObject({ promoted: true, transactionCount: 1, pendingCount: 0 });
+
+    // 3 y no 4: las dos primeras no se reinsertaron.
+    expect(await cuantasTransacciones(documento)).toBe(3);
+
+    const [doc] = await owner`
+      select row_count, flagged_count from documents where id = ${documento}`;
+    // Acumulado. Con `reclamadas.length` a secas diría 1 — que el archivo aportó una fila.
+    expect(doc!.row_count).toBe(3);
+    expect(doc!.flagged_count).toBe(0);
   });
 
   /**

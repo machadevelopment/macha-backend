@@ -10,6 +10,7 @@ import { classifySheetRows } from '@/lib/anthropic';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import { insertStagingRows } from '@/lib/staging';
+import { runWithConcurrency } from '@/lib/concurrency';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { promoteDocument } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
@@ -159,6 +160,18 @@ export function startExcelIngestWorker(): Promise<string> {
         // veces y el cliente leería un muro. Se deduplica y se muestran las primeras.
         const unusableReasons = new Set<string>();
 
+        /**
+         * PRIMERA PASADA: planear todo el trabajo sin llamar a Claude ni tocar la base.
+         *
+         * Antes esto era un doble bucle que llamaba a Claude en medio, así que el plan y la
+         * ejecución estaban entrelazados y no había forma de paralelizar. Separarlos es lo
+         * que permite la segunda pasada concurrente, y de paso deja el conteo de las filas ya
+         * confirmadas (y el chequeo de plan cambiado) fuera de la parte concurrente, donde
+         * razonar sobre él sería más difícil.
+         */
+        type Pendiente = { sheetName: string; batchIndex: number; batch: unknown[][] };
+        const pendientes: Pendiente[] = [];
+
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
           if (!sheet) continue;
@@ -200,55 +213,82 @@ export function startExcelIngestWorker(): Promise<string> {
               continue;
             }
 
-            const result = await classifySheetRows({ templateVersion, sheetName, rows: batch });
-
-            // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
-            // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
-            // terminal es si el documento COMPLETO no produjo ninguna fila (abajo).
-            if (!result.sheetUsable && result.unusableReason) {
-              unusableReasons.add(result.unusableReason);
-            }
-
-            await withCompanyScope(companyId, async (db) => {
-              // La marca va en la MISMA transacción que los tres efectos de abajo: o se
-              // confirma todo el lote (y el reintento lo salta) o no queda nada (y el
-              // reintento lo rehace entero). `onConflictDoNothing` cubre el caso de dos
-              // ejecuciones solapadas del mismo job — el árbitro es el índice único.
-              const [claimed] = await db
-                .insert(documentIngestBatches)
-                .values({ companyId, documentId, sheetName, batchIndex, rowCount: batch.length })
-                .onConflictDoNothing()
-                .returning({ id: documentIngestBatches.id });
-              if (!claimed) return;
-
-              await insertAiUsageEvent(db, {
-                companyId,
-                kind: 'excel',
-                refId: documentId,
-                model: result.model,
-                inputTokens: result.inputTokens,
-                outputTokens: result.outputTokens,
-                billableUnits: batch.length,
-              });
-              await insertStagingRows(db, companyId, documentId, result.rows);
-
-              // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
-              // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
-              // (no bloquea ni descuenta) — mismo comportamiento que antes de F0.
-              if (creditRule) {
-                await debitCredits(db, {
-                  companyId,
-                  actionKind: 'excel',
-                  credits: estimateRequiredCredits(creditRule, 1),
-                  creditRuleId: creditRule.id,
-                  refId: documentId,
-                });
-              }
-            });
-
-            totalRowsProcessed += batch.length;
+            pendientes.push({ sheetName, batchIndex, batch });
           }
         }
+
+        /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
+        async function procesarLote({ sheetName, batchIndex, batch }: Pendiente): Promise<void> {
+          const result = await classifySheetRows({ templateVersion, sheetName, rows: batch });
+
+          // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
+          // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
+          // terminal es si el documento COMPLETO no produjo ninguna fila (abajo).
+          if (!result.sheetUsable && result.unusableReason) {
+            unusableReasons.add(result.unusableReason);
+          }
+
+          await withCompanyScope(companyId, async (db) => {
+            // La marca va en la MISMA transacción que los tres efectos de abajo: o se
+            // confirma todo el lote (y el reintento lo salta) o no queda nada (y el
+            // reintento lo rehace entero). `onConflictDoNothing` cubre el caso de dos
+            // ejecuciones solapadas del mismo job — el árbitro es el índice único.
+            const [claimed] = await db
+              .insert(documentIngestBatches)
+              .values({ companyId, documentId, sheetName, batchIndex, rowCount: batch.length })
+              .onConflictDoNothing()
+              .returning({ id: documentIngestBatches.id });
+            if (!claimed) return;
+
+            await insertAiUsageEvent(db, {
+              companyId,
+              kind: 'excel',
+              refId: documentId,
+              model: result.model,
+              inputTokens: result.inputTokens,
+              outputTokens: result.outputTokens,
+              billableUnits: batch.length,
+            });
+            await insertStagingRows(db, companyId, documentId, result.rows);
+
+            // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
+            // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
+            // (no bloquea ni descuenta) — mismo comportamiento que antes de F0.
+            //
+            // Concurrente sin riesgo: `credit_transactions` es append-only y `debitCredits`
+            // es un INSERT sin lectura de saldo previa, así que dos débitos en vuelo no se
+            // pisan ni pueden leer un saldo obsoleto.
+            if (creditRule) {
+              await debitCredits(db, {
+                companyId,
+                actionKind: 'excel',
+                credits: estimateRequiredCredits(creditRule, 1),
+                creditRuleId: creditRule.id,
+                refId: documentId,
+              });
+            }
+          });
+
+          totalRowsProcessed += batch.length;
+        }
+
+        /**
+         * SEGUNDA PASADA: los lotes van a Claude en paralelo, de a
+         * `intakeConfig.batchConcurrency`.
+         *
+         * Que un lote falle siga tumbando el job es deliberado: el documento va a `failed`,
+         * pg-boss reintenta, y la reanudación por lote (CU-868kkgypv) salta lo ya confirmado.
+         * Lo que `runWithConcurrency` garantiza —y por eso no se usa un `Promise.all`— es que
+         * antes de lanzar se espera a que TODO lo que está en vuelo confirme su transacción:
+         * cada una de esas tareas es una llamada a Claude ya pagada, y cortarlas a mitad de
+         * camino obligaría a pagarlas otra vez en el reintento.
+         */
+        const { errors } = await runWithConcurrency(
+          pendientes,
+          procesarLote,
+          intakeConfig.batchConcurrency,
+        );
+        if (errors.length > 0) throw errors[0];
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
           const promotion = await promoteDocument(db, companyId, documentId);
