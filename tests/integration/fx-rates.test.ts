@@ -145,7 +145,20 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
     });
   });
 
-  test('una tasa posterior a la fila no la cubre: la vigencia es hacia atrás', async () => {
+  /**
+   * CAMBIÓ EL 2026-08-07. Este test decía "una tasa posterior a la fila no la cubre: la
+   * vigencia es hacia atrás", y comprobaba que la promoción LANZARA.
+   *
+   * Ese comportamiento era el footgun que se arregló: el operador registraba una tasa
+   * siguiendo el mensaje de la fila marcada, volvía a procesar, y no pasaba nada — porque su
+   * libro tenía movimientos anteriores a la tasa recién registrada. Para que funcionara tenía
+   * que adivinar que había que retrofecharla antes del movimiento más antiguo del archivo.
+   *
+   * Ahora cae a la tasa más antigua disponible. Es una aproximación, y el test fija justamente
+   * lo que la hace auditable: `fx_rate_date` guarda la fecha de la tasa que se usó, NO la de la
+   * fila, así que se ve que la conversión vino de otro período.
+   */
+  test('una tasa posterior a la fila la cubre, y se ve de qué fecha era', async () => {
     const documentId = await newDocument();
     // Fecha anterior a la única tasa del catálogo (2026-01-01).
     await owner`
@@ -162,13 +175,17 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
               0.99, 'clean')
     `;
 
-    let message = '';
-    try {
-      await promoteDocument(db, companyId, documentId);
-    } catch (err) {
-      message = err instanceof Error ? err.message : String(err);
-    }
-    expect(message).toContain('2025-06-30');
+    const resultado = await promoteDocument(db, companyId, documentId);
+    expect(resultado.promoted).toBe(true);
+
+    const [fila] = await owner`
+      select amount_base::float8 as base, fx_rate::float8 as rate, fx_rate_date::text as rate_date
+      from transactions where document_id = ${documentId}
+    `;
+    expect(fila!.rate).toBe(7.75);
+    expect(fila!.base).toBe(77.5);
+    // La fecha de la TASA, no la de la fila (2025-06-30). Es lo que deja ver la aproximación.
+    expect(fila!.rate_date).toBe('2026-01-01');
   });
 
   test('registrar la tasa NO recalcula lo ya promovido (criterio 5)', async () => {
@@ -193,16 +210,46 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
     expect(after!.rate).toBe(7.75);
   });
 
-  test('al clasificar, una fila sin tasa vigente se marca en vez de tumbar el documento', async () => {
-    const documentId = await newDocument();
+  /**
+   * REESCRITO EL 2026-08-07. Antes este test usaba una fila con fecha anterior a todo el
+   * catálogo y esperaba que se marcara. Eso ya no se marca: cae a la tasa más antigua.
+   *
+   * El único caso en que una fila SIGUE retenida por falta de tasa es cuando la empresa no
+   * tiene NINGUNA registrada para el par — y ese caso importa mucho que siga funcionando,
+   * porque es el límite del cambio: caer a una tasa de otra fecha es una aproximación
+   * auditable, pero convertir por 1 un monto en otra moneda sería escribir dinero incorrecto
+   * en silencio. Así que se prueba con una empresa SIN catálogo, no con una fecha temprana.
+   */
+  test('sin ninguna tasa registrada, la fila en otra moneda se retiene y la base entra', async () => {
+    // Empresa aparte, a propósito: la de este describe ya tiene tasas de los tests de arriba.
+    const [sinTasas] = await owner`
+      insert into companies (workos_org_id, name, industry, base_currency)
+      values ('org_fx_vacia', 'FX Vacia SA', 'retail', 'GTQ') returning id
+    `;
+    const otraEmpresa = sinTasas!.id as string;
+    const suffix = otraEmpresa.replace(/-/g, '_');
+    for (const table of ['transactions', 'invoices', 'bills']) {
+      await owner.unsafe(
+        `create table if not exists "${table}_${suffix}" partition of ${table}
+           for values in ('${otraEmpresa}')`,
+      );
+    }
+    const [doc] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${otraEmpresa}, ${userId}, ${otraEmpresa + '/x'}, 'x.xlsx', 1024, 'text/csv',
+              'processing')
+      returning id
+    `;
+    const documentId = doc!.id as string;
 
-    await insertStagingRows(db, companyId, documentId, [
+    await insertStagingRows(db, otraEmpresa, documentId, [
       {
         targetEntity: 'transaction',
         payload: {
           type: 'revenue',
           category: 'ventas',
-          date: '2024-01-15', // antes de toda tasa del catálogo
+          date: '2024-01-15',
           originalAmount: 10,
           originalCurrency: 'USD',
         },
@@ -233,37 +280,12 @@ describe('conversión de moneda en la promoción (CU-868kjc6h1)', () => {
     expect(rows[1]!.review_status).toBe('pending');
     expect(rows[1]!.flag_reason).toBe(`${MISSING_FX_FLAG}:USD:2024-01-15`);
 
-    /**
-     * Y el efecto que importa, que CAMBIÓ con la migración 0020 (promoción parcial).
-     *
-     * Antes esto devolvía `{promoted: false, reason: 'pending_rows'}`: la fila en USD sin
-     * tasa dejaba fuera de producción también a la fila en GTQ, que no tenía ningún
-     * problema. Era el caso exacto que motivó el cambio — la falta de una tasa de cambio es
-     * un dato que falta de NUESTRO lado, y frenaba el archivo entero del cliente.
-     *
-     * Ahora la de GTQ entra y la de USD se retiene. `pendingCount` sigue siendo el número
-     * con el que el cliente entiende por qué sus totales no cuadran con su Excel.
-     */
-    const promotion = await promoteDocument(db, companyId, documentId);
-    expect(promotion).toEqual({
-      promoted: true,
-      transactionCount: 1,
-      invoiceCount: 0,
-      billCount: 0,
-      pendingCount: 1,
-    });
+    // Promoción parcial (migración 0020): la de moneda base entra, la otra queda retenida.
+    const promotion = await promoteDocument(db, otraEmpresa, documentId);
+    expect(promotion).toMatchObject({ promoted: true, transactionCount: 1, pendingCount: 1 });
 
-    // La que entró es la de la moneda base, y SOLO ella: la fila en USD no puede convertirse
-    // sin tasa, así que si apareciera acá sería con un `amount_base` inventado.
     const promovidas = await owner`
       select original_currency from transactions where document_id = ${documentId}`;
     expect(promovidas.map((r) => r.original_currency)).toEqual(['GTQ']);
-
-    // Y la de USD sigue en staging, sin sellar, lista para cuando se registre la tasa.
-    const [retenida] = await owner`
-      select review_status, promoted_at from staging_rows
-      where document_id = ${documentId} and payload->>'originalCurrency' = 'USD'`;
-    expect(retenida!.review_status).toBe('pending');
-    expect(retenida!.promoted_at).toBeNull();
   });
 });
