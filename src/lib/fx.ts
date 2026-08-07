@@ -1,4 +1,4 @@
-import { and, desc, eq, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, lte } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { fxRates } from '@/db/schema';
 
@@ -33,8 +33,29 @@ export function counterCurrency(base: Currency): Currency {
 export type FxRateHit = { rate: number; effectiveDate: string };
 
 /**
- * Tasa vigente ≤ la fecha dada (data model §4.10): la más reciente que no sea
- * posterior. La moneda base siempre resuelve a 1 sin necesidad de fila.
+ * Tasa aplicable a una fecha. Preferencia: la más reciente que NO sea posterior a la fecha
+ * (data model §4.10). La moneda base siempre resuelve a 1 sin necesidad de fila.
+ *
+ * SI NINGUNA PRECEDE A LA FECHA, CAE A LA MÁS ANTIGUA DISPONIBLE en vez de devolver `null`.
+ * Eso es nuevo (2026-08-07) y arregla un footgun con dientes: el operador registraba una tasa
+ * siguiendo al pie de la letra el mensaje de la fila marcada, volvía a procesar… y no se
+ * desbloqueaba nada, porque su libro tenía movimientos de 2025 y la tasa que acababa de
+ * registrar era de hoy. Para que funcionara tenía que adivinar que hacía falta retrofecharla
+ * antes del movimiento más antiguo del archivo — algo que el mensaje no decía y que no hay
+ * forma de deducir desde la pantalla. Medido en producción el 2026-08-06: 617 filas retenidas
+ * por falta de tasa, sobre 228 fechas distintas desde 2025-01-01.
+ *
+ * ES UNA APROXIMACIÓN, Y ESTÁ ELEGIDA A CONCIENCIA. Convertir un movimiento de enero de 2025
+ * con la tasa de agosto de 2026 no da la cifra exacta. La alternativa REAL no era "la cifra
+ * exacta" sino "la fila no entra nunca", que deja al cliente con un dashboard incompleto y sin
+ * saber por qué. Y la aproximación no queda escondida: cada fila de negocio congela
+ * `fx_rate` + `fx_rate_date`, así que se ve exactamente qué tasa se aplicó y de qué fecha era.
+ * Quien quiera la cifra exacta registra la tasa con la vigencia correcta, revierte la carga y
+ * la vuelve a promover.
+ *
+ * Lo que NO se hace es inventar una tasa: sin ninguna fila para el par, sigue devolviendo
+ * `null` y la fila se retiene. Multiplicar por 1 un monto en otra moneda escribiría dinero
+ * incorrecto en silencio, que es peor que retener la fila.
  */
 export async function findFxRate(
   db: DB,
@@ -45,21 +66,36 @@ export async function findFxRate(
 ): Promise<FxRateHit | null> {
   if (quote === base) return { rate: 1, effectiveDate: onOrBefore };
 
-  const [fx] = await db
+  const delPar = and(
+    eq(fxRates.companyId, companyId),
+    eq(fxRates.baseCurrency, base),
+    eq(fxRates.quoteCurrency, quote),
+  );
+
+  const [vigente] = await db
     .select({ rate: fxRates.rate, effectiveDate: fxRates.effectiveDate })
     .from(fxRates)
-    .where(
-      and(
-        eq(fxRates.companyId, companyId),
-        eq(fxRates.baseCurrency, base),
-        eq(fxRates.quoteCurrency, quote),
-        lte(fxRates.effectiveDate, onOrBefore),
-      ),
-    )
+    .where(and(delPar, lte(fxRates.effectiveDate, onOrBefore)))
     .orderBy(desc(fxRates.effectiveDate))
     .limit(1);
 
-  return fx ? { rate: Number(fx.rate), effectiveDate: fx.effectiveDate } : null;
+  if (vigente) {
+    return { rate: Number(vigente.rate), effectiveDate: vigente.effectiveDate };
+  }
+
+  // Segunda query y no un `OR` en la primera: son dos preguntas con orden distinto (la más
+  // reciente hacia atrás, la más antigua hacia adelante) y la segunda solo corre cuando la
+  // primera no encontró nada, que es el caso raro.
+  const [masAntigua] = await db
+    .select({ rate: fxRates.rate, effectiveDate: fxRates.effectiveDate })
+    .from(fxRates)
+    .where(delPar)
+    .orderBy(asc(fxRates.effectiveDate))
+    .limit(1);
+
+  return masAntigua
+    ? { rate: Number(masAntigua.rate), effectiveDate: masAntigua.effectiveDate }
+    : null;
 }
 
 /**
@@ -92,9 +128,22 @@ export async function loadFxCatalog(
   return rows.map((r) => ({ rate: Number(r.rate), effectiveDate: r.effectiveDate }));
 }
 
-/** Misma semántica que `findFxRate` pero contra un catálogo ya cargado (ordenado desc). */
+/**
+ * Misma semántica que `findFxRate` pero contra un catálogo ya cargado (ordenado desc),
+ * incluida la caída a la tasa más antigua cuando ninguna precede a la fecha.
+ *
+ * Tiene que coincidir con `findFxRate` o el producto se contradice consigo mismo: esta
+ * función decide si la fila se MARCA durante la ingesta, y `findFxRate` decide si se puede
+ * CONVERTIR al promover. Si una encontrara tasa y la otra no, o se retendría una fila que sí
+ * se podía convertir, o la promoción lanzaría sobre una fila que la ingesta dio por buena
+ * —y la promoción es atómica, así que se llevaría por delante al resto del lote.
+ */
 export function resolveFromCatalog(catalog: FxRateHit[], onOrBefore: string): FxRateHit | null {
-  return catalog.find((r) => r.effectiveDate <= onOrBefore) ?? null;
+  const vigente = catalog.find((r) => r.effectiveDate <= onOrBefore);
+  if (vigente) return vigente;
+  // Ordenado desc, así que la última es la más antigua. `at(-1)` sobre un catálogo vacío es
+  // `undefined`, que es exactamente el caso "no hay ninguna tasa para el par".
+  return catalog.at(-1) ?? null;
 }
 
 /**
@@ -103,6 +152,12 @@ export function resolveFromCatalog(catalog: FxRateHit[], onOrBefore: string): Fx
  * exacto y operativamente inútil: no decía qué hacer ni dónde. El `company_id` sale
  * (quien lee el monitoreo de uploads ya está mirando la fila de esa empresa) y entra
  * la acción concreta (criterio 3).
+ *
+ * Ya NO pide una fecha de vigencia concreta, y esa frase era el problema: decía "con una
+ * fecha igual o anterior a esa", lo cual obligaba a mirar el movimiento más antiguo del
+ * archivo y retrofechar. Desde que la resolución cae a la tasa más antigua disponible
+ * (2026-08-07), registrar UNA tasa cualquiera alcanza para que el archivo entero se
+ * convierta — así que el mensaje pide lo mínimo que de verdad hace falta.
  */
 export function missingFxRateMessage(params: {
   quote: Currency;
@@ -110,9 +165,10 @@ export function missingFxRateMessage(params: {
   onOrBefore: string;
 }): string {
   return (
-    `Falta la tasa de cambio ${params.quote}→${params.base} vigente al ${params.onOrBefore}. ` +
-    `Regístrala en el panel admin (Empresa › Tasas de cambio) con una fecha de vigencia ` +
-    `igual o anterior a esa y vuelve a procesar la carga.`
+    `Esta empresa no tiene ninguna tasa de cambio ${params.quote}→${params.base} registrada, ` +
+    `así que no se pudo convertir un movimiento del ${params.onOrBefore}. Registra una en el ` +
+    `panel admin (Empresa › Tasas de cambio) —con cualquier fecha de vigencia, se usa la más ` +
+    `cercana disponible— y vuelve a procesar la carga.`
   );
 }
 
