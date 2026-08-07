@@ -1,11 +1,23 @@
-import { eq, and, ne } from 'drizzle-orm';
+import { eq, and, inArray, isNull } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { stagingRows, documents, transactions, invoices, bills, companies } from '@/db/schema';
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 import { ProductResolver } from '@/lib/product-dimension';
 
 export type PromotionResult =
-  | { promoted: true; transactionCount: number; invoiceCount: number; billCount: number }
+  | {
+      promoted: true;
+      transactionCount: number;
+      invoiceCount: number;
+      billCount: number;
+      /**
+       * Migración 0020: cuántas filas del documento quedaron esperando revisión de Macha
+       * DESPUÉS de esta promoción. Con promoción parcial `promoted: true` y
+       * `pendingCount > 0` conviven — es el estado normal ahora, no una contradicción: el
+       * archivo entró a producción con lo que se pudo y estas filas siguen retenidas.
+       */
+      pendingCount: number;
+    }
   | {
       promoted: false;
       /**
@@ -104,101 +116,113 @@ async function resolveFxRate(
 }
 
 /**
- * Atomic promotion (CU-868kfva9z): staging_rows -> transactions/invoices/bills, all
- * or nothing. The caller's `db` MUST already be inside a transaction — the worker
- * (CU-868kfva8v) uses withCompanyScope, which wraps the whole job in begin/commit/
- * rollback, so a throw here rolls back every insert. Refuses to promote while any row
- * for this document is still pending/rejected (data model §16: "ninguna fila se
- * promueve mientras existan flag_reason sin resolver").
+ * `staging_rows` -> `transactions`/`invoices`/`bills`.
+ *
+ * PROMOCIÓN PARCIAL (decisión de Keneth, 2026-08-07 — migración 0020). Promueve lo que se
+ * puede y retiene SOLO lo marcado. Antes era todo-o-nada por documento: una fila dudosa
+ * entre mil dejaba fuera de producción a las otras 999 hasta que un humano de Macha entrara
+ * al backoffice, así que la revisión interna —pensada como excepción— era el camino
+ * obligatorio de todo upload. Medido el 2026-08-06: cero filas en producción con 3.195 en
+ * staging, y de 414 filas marcadas de un archivo real 313 lo estaban por una tasa de cambio
+ * que faltaba de nuestro lado.
+ *
+ * LA ATOMICIDAD SQL NO SE TOCA, y no hay que confundirla con la regla anterior: el `db` que
+ * recibe DEBE venir ya dentro de una transacción (el worker usa `withCompanyScope`, que
+ * envuelve el job en begin/commit/rollback), así que un throw acá revierte cada INSERT. Lo
+ * que cambió es el CONJUNTO que entra en esa transacción: antes "todas las filas del
+ * documento o ninguna", ahora "todas las promovibles o ninguna".
+ *
+ * IDEMPOTENCIA POR FILA, NO POR DOCUMENTO. El cerrojo era
+ * `UPDATE documents ... WHERE status <> 'promoted'`, y con promoción parcial ese mismo
+ * cerrojo impediría la segunda pasada legítima (la de las filas que staff resuelva después).
+ * Ahora se reclaman las FILAS: el `UPDATE staging_rows SET promoted_at = now() WHERE
+ * promoted_at IS NULL RETURNING` toma el lock de cada fila, así que dos ejecuciones
+ * simultáneas no pueden reclamar la misma y la segunda ve cero filas que reclamar. Es la
+ * misma garantía que daba el cerrojo de documento —verificada en producción el 2026-08-06,
+ * cuando pg-boss venció un job y encoló un segundo intento encima del primero— pero al grano
+ * correcto.
+ *
+ * Reclamar ANTES de insertar es deliberado: si el INSERT lanza (p. ej. falta la tasa de
+ * cambio), la transacción entera se revierte y con ella el sello de `promoted_at`, así que la
+ * fila vuelve a estar disponible para el próximo intento. No se puede "perder" una fila por
+ * haberla marcado antes de tiempo.
  */
 export async function promoteDocument(
   db: DB,
   companyId: string,
   documentId: string,
 ): Promise<PromotionResult> {
-  /**
-   * RESERVA DEL DOCUMENTO ANTES DE INSERTAR NADA. Es un `UPDATE ... WHERE status <>
-   * 'promoted'` que sirve de cerrojo: en Postgres toma el lock de esa fila, así que dos
-   * promociones simultáneas se serializan —la segunda espera al commit de la primera, ve
-   * `promoted` y no afecta ninguna fila— y sale por acá sin insertar.
-   *
-   * POR QUÉ HACE FALTA. Esta función no era idempotente y el worker no impedía dos
-   * ejecuciones a la vez. Observado en producción el 2026-08-06 (documento `ce2a824b`):
-   * pg-boss venció el job a los 15 minutos —vencer es una marca, no una cancelación— y
-   * encoló un segundo intento mientras el primero seguía trabajando. Los lotes ya estaban
-   * protegidos por el índice único de `document_ingest_batches`, pero la promoción no
-   * tenía nada: las dos ejecuciones habrían insertado el MISMO `staging_rows` completo,
-   * duplicando ingresos y costos del cliente en un producto financiero. La causa de raíz
-   * se corrige con `expireInSeconds` en la cola; esto es la defensa que no depende de que
-   * la cola esté bien configurada.
-   *
-   * `rowCount` se corrige después, cuando ya se sabe cuántas filas se insertaron. Lo que
-   * importa acá es ganar la carrera, no el conteo.
-   */
-  const [reservado] = await db
-    .update(documents)
-    .set({ status: 'promoted', promotedAt: new Date(), flaggedCount: 0 })
-    .where(and(eq(documents.id, documentId), ne(documents.status, 'promoted')))
-    .returning({ id: documents.id });
-
-  if (!reservado) {
-    return { promoted: false, reason: 'already_promoted', pendingCount: 0 };
-  }
-
+  // Foto de TODAS las filas del documento, promovidas o no. Hace falta completa para poder
+  // distinguir los desenlaces: un documento sin filas (`no_rows`) no es lo mismo que uno
+  // cuyas filas ya se promovieron todas (`already_promoted`).
   const todas = await db
-    .select()
+    .select({
+      id: stagingRows.id,
+      reviewStatus: stagingRows.reviewStatus,
+      promotedAt: stagingRows.promotedAt,
+    })
     .from(stagingRows)
     .where(and(eq(stagingRows.companyId, companyId), eq(stagingRows.documentId, documentId)));
 
-  // Los tres caminos que NO promueven tienen que devolver el documento a un estado
-  // honesto: la reserva de arriba ya lo marcó `promoted` y aquí todavía no se insertó
-  // nada. El `status` definitivo lo escribe el worker según el motivo (`unsupported`,
-  // `review`), pero dejarlo en `promoted` un instante sería mentir si algo lanza en medio.
-  async function liberar(estado: 'queued' | 'processing' = 'processing') {
-    await db
-      .update(documents)
-      .set({ status: estado, promotedAt: null })
-      .where(eq(documents.id, documentId));
-  }
-
   if (todas.length === 0) {
-    await liberar();
     return { promoted: false, reason: 'no_rows', pendingCount: 0 };
   }
 
   /**
-   * SOLO `pending` FRENA LA PROMOCIÓN. Antes `rejected` también contaba como pendiente, y
-   * eso volvía inútil el propio estado: `staging_rows.review_status` admite `rejected`
-   * (data model §4.12) pero rechazar una sola fila dejaba el documento entero trabado en
-   * `review` PARA SIEMPRE, sin más salida que aprobar hasta la fila que staff acababa de
-   * declarar mala. La única forma de terminar un upload era aprobar el 100% de sus filas.
+   * Qué entra y qué se queda:
    *
-   * La regla del data model §4.12 es "ninguna fila se promueve mientras existan
-   * `flag_reason` SIN RESOLVER", y una fila rechazada sí está resuelta: la resolución es
-   * "esta fila no entra". Así que se excluye de la inserción y no bloquea.
-   *
-   * El filtro de abajo es la otra mitad, y sin él esto sería un agujero de datos: el bucle
-   * de inserción no distinguía `review_status`, así que promovía TODAS las filas que
-   * encontraba. Dejar de contar `rejected` como bloqueante sin excluirla de la inserción
-   * habría metido a producción justamente las filas que un humano marcó como malas.
+   *  · `clean`/`approved` sin promover  -> entra ahora.
+   *  · `pending`                        -> se queda esperando revisión de Macha. NO bloquea.
+   *  · `rejected`                       -> nunca entra. Un humano dijo que esa fila no sirve,
+   *                                        y el bucle de inserción no mira `review_status`,
+   *                                        así que excluirla acá es lo único que lo impide.
+   *  · ya promovida (`promoted_at`)     -> no se vuelve a insertar.
    */
   const pendientes = todas.filter((r) => r.reviewStatus === 'pending').length;
-  if (pendientes > 0) {
-    await liberar();
-    return { promoted: false, reason: 'pending_rows', pendingCount: pendientes };
+  const promovibles = todas.filter(
+    (r) => r.promotedAt === null && (r.reviewStatus === 'clean' || r.reviewStatus === 'approved'),
+  );
+
+  if (promovibles.length === 0) {
+    // Nada nuevo que insertar. Los tres desenlaces son distintos para quien llama, porque
+    // cada uno le dice algo distinto al cliente.
+    if (pendientes > 0) {
+      // Todo lo que traía el archivo está marcado: esto SÍ es un archivo trabado, el caso
+      // que la revisión interna existe para atender.
+      return { promoted: false, reason: 'pending_rows', pendingCount: pendientes };
+    }
+    if (todas.some((r) => r.promotedAt !== null)) {
+      return { promoted: false, reason: 'already_promoted', pendingCount: 0 };
+    }
+    // Quedan filas, ninguna pendiente, ninguna promovida: staff las rechazó todas. Es un
+    // desenlace distinto de `no_rows` (la IA no extrajo nada) y no debe compartir su
+    // mensaje — acá el archivo sí traía filas y un humano decidió que ninguna servía.
+    return { promoted: false, reason: 'all_rejected', pendingCount: 0 };
   }
 
-  const rows = todas.filter((r) => r.reviewStatus !== 'rejected');
+  // El reclamo. Solo las filas que este UPDATE devuelve son nuestras para insertar; si otra
+  // ejecución concurrente ya reclamó alguna, no vuelve en `reclamadas`.
+  const ids = promovibles.map((r) => r.id);
+  const reclamadas = await db
+    .update(stagingRows)
+    .set({ promotedAt: new Date() })
+    .where(
+      and(
+        eq(stagingRows.companyId, companyId),
+        eq(stagingRows.documentId, documentId),
+        inArray(stagingRows.id, ids),
+        isNull(stagingRows.promotedAt),
+      ),
+    )
+    .returning({
+      id: stagingRows.id,
+      targetEntity: stagingRows.targetEntity,
+      payload: stagingRows.payload,
+    });
 
-  /**
-   * Staff revisó todo y rechazó todo. Es un desenlace distinto de `no_rows` (la IA no
-   * extrajo nada) y no debe compartir su mensaje: acá el archivo sí tenía filas, un humano
-   * las miró y decidió que ninguna servía. Se devuelve con nombre propio para que quien
-   * llama no lo reporte como "archivo no legible".
-   */
-  if (rows.length === 0) {
-    await liberar();
-    return { promoted: false, reason: 'all_rejected', pendingCount: 0 };
+  if (reclamadas.length === 0) {
+    // Otra ejecución ganó la carrera por todas.
+    return { promoted: false, reason: 'already_promoted', pendingCount: pendientes };
   }
 
   let transactionCount = 0;
@@ -209,7 +233,7 @@ export async function promoteDocument(
   // producto, que en un libro de ventas se repite en cientos de filas.
   const productos = new ProductResolver(db, companyId);
 
-  for (const row of rows) {
+  for (const row of reclamadas) {
     if (row.targetEntity === 'transaction') {
       const p = row.payload as unknown as TransactionPayload;
       const fx = await resolveFxRate(db, companyId, p.originalCurrency, p.date);
@@ -256,12 +280,35 @@ export async function promoteDocument(
     }
   }
 
+  /**
+   * `row_count` es ACUMULADO, no el de esta pasada: en la segunda promoción de un mismo
+   * documento (la de las filas que staff resolvió) sobrescribirlo con `reclamadas.length`
+   * diría que el archivo aportó 3 filas cuando aportó 1.003.
+   *
+   * `flagged_count` queda en las que siguen pendientes, no en 0. Es el número con el que el
+   * cliente entiende por qué sus totales no cuadran con su Excel, y con promoción parcial un
+   * documento puede estar `promoted` Y tener filas esperando revisión — el estado normal
+   * ahora, no una excepción.
+   */
+  const yaPromovidas = todas.filter((r) => r.promotedAt !== null).length;
+
   await db
     .update(documents)
-    .set({ status: 'promoted', promotedAt: new Date(), rowCount: rows.length, flaggedCount: 0 })
+    .set({
+      status: 'promoted',
+      promotedAt: new Date(),
+      rowCount: yaPromovidas + reclamadas.length,
+      flaggedCount: pendientes,
+    })
     .where(eq(documents.id, documentId));
 
-  return { promoted: true, transactionCount, invoiceCount, billCount };
+  return {
+    promoted: true,
+    transactionCount,
+    invoiceCount,
+    billCount,
+    pendingCount: pendientes,
+  };
 }
 
 /**

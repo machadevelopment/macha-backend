@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { and, asc, count, eq, getTableColumns } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { stagingRows, companies, documents } from '@/db/schema';
@@ -22,47 +22,42 @@ import type { DB } from '@/db/client';
  * re-parsear el Excel desde cero — es lo que la forma real de los datos permite.
  */
 /**
- * Cierra el ciclo de la revisión interna: si al documento de la fila que se acaba de
- * revisar ya no le queda ninguna `pending`, encola su promoción.
+ * Cierra el ciclo de la revisión interna: encola la promoción de la fila que se acaba de
+ * resolver.
+ *
+ * NO ESPERA A QUE NO QUEDE NINGUNA PENDIENTE, y esa es la diferencia con la primera versión
+ * de esta función. Con promoción parcial (migración 0020) cada fila aprobada entra por su
+ * cuenta, así que hacer esperar a la última pendiente retrasaría sin motivo a las 400 ya
+ * resueltas de un archivo de 414 — y si una sola fila nunca se resuelve, no entrarían nunca.
+ *
+ * Los estados que sí reciben filas nuevas son `promoted` (el normal ahora: el archivo ya
+ * entró con lo limpio y le quedan filas retenidas) y `review` (el archivo entero venía
+ * marcado y no se pudo promover nada). Se filtra por esos dos a propósito: sin el filtro,
+ * resolver una fila vieja de un documento `reverted` o `failed` lo resucitaría a `promoted`,
+ * reinsertando en producción datos que alguien había dado de baja.
  *
  * Se llama SOLO desde el `PATCH`, que es el único camino que resuelve una fila. La
  * re-extracción (`POST /:id/reextract`) reescribe payload/confianza pero deja
  * `review_status` en `pending` a propósito: que Claude reconsidere no es que un humano
- * aprobó, y la fila todavía tiene que pasar por el `PATCH`. Llamar a esto desde ahí no
- * haría nada más que una consulta de más.
+ * aprobó, y la fila todavía tiene que pasar por el `PATCH`.
  *
- * Es best-effort a propósito y no revienta la respuesta del `PATCH`: la revisión de la
- * fila YA se confirmó y auditó cuando llegamos acá. Si la cola está caída, lo correcto es
- * que el operador vea su cambio guardado —no un 500 que le haga pensar que no se
- * guardó— y que el documento se quede en `review`, que es el estado honesto y del que
- * ahora sí hay salida. Se registra en consola para que el fallo no sea invisible.
+ * Es best-effort y no revienta la respuesta del `PATCH`: la revisión de la fila YA se
+ * confirmó y auditó cuando llegamos acá. Si la cola está caída, lo correcto es que el
+ * operador vea su cambio guardado —no un 500 que le haga pensar que no se guardó— y que la
+ * fila quede pendiente de promover, que es recuperable. Se registra en consola para que el
+ * fallo no sea invisible.
  */
-async function encolarPromocionSiYaNoQuedaNadaPendiente(
+async function encolarPromocionDeLoResuelto(
   db: DB,
   companyId: string,
   documentId: string,
 ): Promise<void> {
   try {
-    const [pendientes] = await db
-      .select({ n: count() })
-      .from(stagingRows)
-      .where(
-        and(
-          eq(stagingRows.companyId, companyId),
-          eq(stagingRows.documentId, documentId),
-          eq(stagingRows.reviewStatus, 'pending'),
-        ),
-      );
-    if (Number(pendientes?.n ?? 0) > 0) return;
-
-    // Solo un documento en `review` se promueve por esta vía. Sin este filtro, resolver
-    // una fila vieja de un documento ya `reverted` o `failed` lo resucitaría: la reserva de
-    // `promoteDocument` solo excluye `promoted`.
     const [doc] = await db
       .select({ status: documents.status })
       .from(documents)
       .where(eq(documents.id, documentId));
-    if (doc?.status !== 'review') return;
+    if (doc?.status !== 'review' && doc?.status !== 'promoted') return;
 
     await enqueue(QUEUES.documentPromote, { documentId, companyId });
   } catch (err) {
@@ -145,7 +140,7 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
         },
       });
 
-      await encolarPromocionSiYaNoQuedaNadaPendiente(db, before.companyId, before.documentId);
+      await encolarPromocionDeLoResuelto(db, before.companyId, before.documentId);
 
       return { id: params.id, reviewStatus: body.reviewStatus };
     },
