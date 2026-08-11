@@ -1,17 +1,16 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
 import { enforceTokenBucketForUser } from '@/lib/rate-limit';
-import { companies, companyUsers, subscriptions, users } from '@/db/schema';
+import { companies, companyUsers, plans, subscriptions, users } from '@/db/schema';
 import { provisionTenantPartitions } from '@/lib/tenant-provisioning';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { grantInitialCredits } from '@/lib/credits';
-import {
-  startSubscriptionCheckout,
-  BASE_PLAN_AMOUNT_USD_CENTS,
-  appBaseUrl,
-} from '@/lib/billing/provider';
+// `BASE_PLAN_AMOUNT_USD_CENTS` deja de usarse acá (ticket B3): el precio sale del plan
+// elegido del catálogo, no de una constante. La constante sigue exportada en
+// `provider.ts` porque documenta el precio original de CU-868kfvae6.
+import { startSubscriptionCheckout, appBaseUrl } from '@/lib/billing/provider';
 import { isBillingConfigured } from '@/lib/billing/recurrente-client';
 import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
 import { env } from '@/lib/env';
@@ -121,7 +120,39 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
     // para tener créditos, cuando el PRD trata la compra self-serve como algo que se
     // suma al plan, no como la puerta de entrada. Va dentro de la transacción del
     // request: una empresa a medio crear no debe quedar con créditos.
-    await grantInitialCredits(db, company!.id);
+    /*
+     * EL PLAN, resuelto contra el catálogo (ticket B3). Antes esto era el literal `'base'`
+     * escrito más abajo y `BASE_PLAN_AMOUNT_USD_CENTS` (USD 49) como precio: la empresa
+     * nacía en un plan que no existía en ninguna tabla.
+     *
+     * `planCode` es OPCIONAL a propósito, y esto no es indecisión. El selector de plan en
+     * el alta es el ticket B4, que todavía no está; si lo hiciera obligatorio, el registro
+     * se rompería hasta que ese ticket aterrice. Sin él se toma el primer plan ACTIVO por
+     * `sort_order`, que es el de entrada — y hay una razón dura además de la comodidad:
+     * `subscriptions.plan_code` ahora tiene FK contra `plans`, así que caer al literal
+     * `'base'` reventaría en cualquier base recién migrada y sembrada, donde `base` no
+     * existe (la migración 0021 solo lo da de alta si HABÍA suscripciones que lo usaran).
+     */
+    const [planElegido] = body.planCode
+      ? await db.select().from(plans).where(eq(plans.code, body.planCode))
+      : await db
+          .select()
+          .from(plans)
+          .where(eq(plans.active, true))
+          .orderBy(asc(plans.sortOrder), asc(plans.code))
+          .limit(1);
+
+    if (!planElegido || !planElegido.active) {
+      // 422 y no 500: el cliente mandó un plan que no existe o que ya se retiró, y eso lo
+      // puede corregir eligiendo otro.
+      set.status = 422;
+      return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
+    }
+
+    // CU-868kjc7g5 criterio 3 + B3: el abono inicial ahora sale de los créditos del PLAN,
+    // con el ajuste global de `platform_settings` como respaldo para los planes que no
+    // declaran los suyos.
+    await grantInitialCredits(db, company!.id, planElegido.monthlyCredits);
 
     // CU-868kmxu41 — EL CHECKOUT SE DECIDE, NO SE ASUME.
     //
@@ -153,9 +184,13 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
       throw new BillingNotConfiguredError();
     }
 
-    const checkout = cobraEsteEntorno
+    // Un plan GRATUITO no pasa por checkout aunque el entorno cobre: no hay nada que
+    // cobrar, y mandar a Recurrente por USD 0 sería un checkout que no puede completarse.
+    const cobraEstePlan = cobraEsteEntorno && planElegido.amountUsdCents > 0;
+
+    const checkout = cobraEstePlan
       ? await startSubscriptionCheckout({
-          amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
+          amountUsdCents: planElegido.amountUsdCents,
           companyId: company!.id,
           successUrl: `${appBaseUrl}/?registered=1`,
           cancelUrl: `${appBaseUrl}/register?cancelled=1`,
@@ -164,8 +199,8 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
 
     await db.insert(subscriptions).values({
       companyId: company!.id,
-      planCode: 'base',
-      amountUsdCents: BASE_PLAN_AMOUNT_USD_CENTS,
+      planCode: planElegido.code,
+      amountUsdCents: planElegido.amountUsdCents,
       status: 'pending_checkout',
       providerCheckoutId: checkout?.providerCheckoutId,
     });
@@ -181,6 +216,9 @@ export const register = new Elysia({ prefix: '/register' }).use(identityDerive).
       industry: t.String(),
       baseCurrency: t.Union([t.Literal('GTQ'), t.Literal('USD')]),
       locale: t.Union([t.Literal('es'), t.Literal('en')]),
+      // Opcional hasta que B4 ponga el selector en el alta; sin él se toma el plan de
+      // entrada del catálogo. Ver el comentario en el handler.
+      planCode: t.Optional(t.String()),
     }),
   },
 );

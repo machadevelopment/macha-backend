@@ -6,7 +6,13 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { companies, creditRules, industryTemplates, industryTemplateVersions } from '@/db/schema';
+import {
+  companies,
+  creditRules,
+  industryTemplates,
+  industryTemplateVersions,
+  plans,
+} from '@/db/schema';
 import { alertCatalog } from '@/config/alert-catalog';
 import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { creditsConfig } from '@/config/credits';
@@ -89,6 +95,43 @@ async function main() {
     insightRule[0]?.id,
     'report_generation',
     reportRule[0]?.id,
+  );
+
+  /**
+   * Catálogo de planes (ticket B3, ronda de QA 2026-08-11). La migración `0021` crea la
+   * TABLA; estas tres filas son DATOS DE NEGOCIO y por eso viven acá y no allá — CLAUDE.md
+   * separa las migraciones de schema (auto-aplican al desplegar) de las de datos (scripts
+   * manuales), y un precio que se ajusta sin desplegar no puede vivir en una migración.
+   *
+   * LOS VALORES SON PROVISIONALES, a propósito y con la misma lógica que el resto de F0
+   * ("mecanismo ahora, números después"). Lo que el ticket pedía cerrar era que los planes
+   * fueran EDITABLES sin desplegar, no cuánto vale cada uno: los montos exactos se definen
+   * después, desde el panel de administración.
+   *
+   * Los créditos son distintos entre planes solo para el demo (starter el más bajo,
+   * enterprise el más alto), que era el criterio explícito del ticket.
+   *
+   * `onConflictDoNothing` y no `DoUpdate`: si un operador ya ajustó el precio desde el
+   * panel, volver a correr el seed NO debe pisárselo. Un seed que revierte configuración
+   * de producción es una trampa que se dispara justo cuando alguien está depurando otra
+   * cosa.
+   */
+  await db
+    .insert(plans)
+    .values([
+      { code: 'starter', name: 'Starter', amountUsdCents: 0, monthlyCredits: 250, sortOrder: 1 },
+      { code: 'medium', name: 'Medium', amountUsdCents: 2000, monthlyCredits: 1_000, sortOrder: 2 },
+      {
+        code: 'enterprise',
+        name: 'Enterprise',
+        amountUsdCents: 4000,
+        monthlyCredits: 3_000,
+        sortOrder: 3,
+      },
+    ])
+    .onConflictDoNothing();
+  console.log(
+    'seeded plans (provisional, editable desde /admin/plans): starter, medium, enterprise',
   );
 
   // CU-868kfva91: primera plantilla de mapeo por industria (retail, matching la
