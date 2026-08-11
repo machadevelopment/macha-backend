@@ -1,111 +1,98 @@
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, gte, isNull, lte, sql as rawSql } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import {
-  reports,
-  reportVersions,
-  transactions,
-  invoices,
-  bills,
-  companies,
-  companyUsers,
-  users,
-} from '@/db/schema';
+import { reports, reportVersions, companies, companyUsers, users } from '@/db/schema';
 import { generateReportNarrative } from '@/lib/anthropic';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { uploadObject, reportRenderKey } from '@/lib/s3';
 import { sendReportReadyEmail } from '@/lib/email';
 import { reportUrl } from '@/lib/app-urls';
-import { grossProfit, grossMarginPct } from '@/lib/margin';
-
-/**
- * CU-868kfvacr/868kfvacg: métricas calculadas en SQL directo sobre el ledger para el
- * rango exacto del reporte (periodStart..periodEnd) — NO vía metric_rollups, porque
- * los reportes son diarios/semanales (data model.md reports.frequency) y los rollups
- * solo tienen granularidad month/quarter/year; forzarlos a ese molde perdería
- * precisión en el rango real del reporte. La IA nunca ve esta query, solo su
- * resultado (regla no negociable: "la IA narra, nunca calcula").
- */
-async function computeReportMetrics(
-  db: DB,
-  companyId: string,
-  periodStart: string,
-  periodEnd: string,
-) {
-  const byType = await db
-    .select({ type: transactions.type, total: rawSql<string>`sum(${transactions.amountBase})` })
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.companyId, companyId),
-        isNull(transactions.deletedAt),
-        gte(transactions.date, periodStart),
-        lte(transactions.date, periodEnd),
-      ),
-    )
-    .groupBy(transactions.type);
-
-  const totals: Record<string, number> = { revenue: 0, cogs: 0, opex: 0, other: 0 };
-  for (const row of byType) totals[row.type] = Number(row.total);
-
-  const [arRow] = await db
-    .select({ total: rawSql<string>`coalesce(sum(${invoices.amountBase}), 0)` })
-    .from(invoices)
-    .where(
-      and(
-        eq(invoices.companyId, companyId),
-        eq(invoices.status, 'open'),
-        isNull(invoices.deletedAt),
-      ),
-    );
-  const [apRow] = await db
-    .select({ total: rawSql<string>`coalesce(sum(${bills.amountBase}), 0)` })
-    .from(bills)
-    .where(and(eq(bills.companyId, companyId), eq(bills.status, 'open'), isNull(bills.deletedAt)));
-
-  return {
-    periodStart,
-    periodEnd,
-    revenue: totals.revenue,
-    cogs: totals.cogs,
-    opex: totals.opex,
-    other: totals.other,
-    // CU-868kh8y58: misma definición que el KPI y que la alerta `margin_drop`, vía
-    // lib/margin.ts. Antes era una resta suelta aquí y otra en modules/metrics.
-    grossProfit: grossProfit(totals.revenue!, totals.cogs!),
-    grossMarginPct: grossMarginPct(totals.revenue!, totals.cogs!),
-    // El alias sobrevive por una razón más fuerte que en el endpoint de métricas: este
-    // objeto se GUARDA en `report_versions.metrics`, que es un ledger append-only
-    // (REVOKE UPDATE,DELETE en 0010). Las versiones ya emitidas conservan para siempre
-    // la forma vieja y no hay migración posible, así que el lector tiene que aguantar
-    // las dos formas de todos modos; emitirlo también en las nuevas mantiene un solo
-    // campo común entre ambas generaciones. Sale del mismo cálculo, no puede divergir.
-    margin: grossProfit(totals.revenue!, totals.cogs!),
-    accountsReceivableOpen: Number(arRow?.total ?? 0),
-    accountsPayableOpen: Number(apRow?.total ?? 0),
-  };
-}
+import { debitCredits, estimateRequiredCredits, getActiveCreditRule } from '@/lib/credits';
+import {
+  computeReportSections,
+  toStoredMetrics,
+  DEFAULT_SECTIONS,
+  type ReportSection,
+  type ReportType,
+} from '@/lib/report-sections';
+import { buildReportSystemPrompt } from '@/lib/report-prompt';
+import { renderReportHtml } from '@/lib/report-render';
 
 export interface GenerateReportResult {
   reportId: string;
   versionId: string;
 }
 
+export interface GenerateReportParams {
+  periodStart: string;
+  periodEnd: string;
+  frequency: 'daily' | 'weekly' | 'on_demand';
+  reportType?: ReportType;
+  sections?: ReportSection[];
+  instructions?: string | null;
+  /**
+   * Fila de `reports` ya creada por quien pidió el reporte. El endpoint a demanda la crea
+   * ANTES de encolar para poder devolverle su id al cliente y que pueda consultar el
+   * estado; el tick diario no pasa nada y deja que se busque-o-cree aquí, como siempre.
+   */
+  reportId?: string;
+  /**
+   * Si se debitan créditos por esta generación.
+   *
+   * FALSO POR DEFECTO, y es una decisión, no un olvido: el tick diario genera un reporte
+   * para CADA empresa activa todos los días sin que nadie lo pida (report-tick.ts).
+   * Cobrarle créditos a una empresa por un trabajo que no solicitó vaciaría el saldo con
+   * el que se paga lo que sí pide —un insight, un chat— y convertiría una cortesía del
+   * producto en una sangría silenciosa. Se debita solo la vía a demanda, que es la que
+   * tiene un usuario detrás decidiendo.
+   */
+  debit?: boolean;
+}
+
+/**
+ * Genera una versión de reporte: calcula las secciones pedidas por SQL, pide la narrativa
+ * a Claude, sube el render HTML a S3 e inserta la fila del ledger.
+ *
+ * CU-B2-QA-20260811 cambió la firma a un objeto de parámetros. Los valores por defecto
+ * reproducen EXACTAMENTE el comportamiento anterior (secciones `kpis` +
+ * `recommendations`, sin débito), que es lo que necesita el tick diario y también lo que
+ * necesitan los jobs que ya estuvieran encolados con el payload viejo en el momento del
+ * despliegue.
+ */
 export async function generateReport(
   db: DB,
   companyId: string,
-  periodStart: string,
-  periodEnd: string,
-  frequency: 'daily' | 'weekly',
+  params: GenerateReportParams,
 ): Promise<GenerateReportResult> {
+  const { periodStart, periodEnd, frequency } = params;
+  const reportType: ReportType = params.reportType ?? 'executive_summary';
+  const sections =
+    params.sections && params.sections.length > 0 ? params.sections : DEFAULT_SECTIONS[reportType];
+
   const [company] = await db
-    .select({ locale: companies.locale })
+    .select({
+      locale: companies.locale,
+      name: companies.name,
+      baseCurrency: companies.baseCurrency,
+    })
     .from(companies)
     .where(eq(companies.id, companyId));
   const locale = company?.locale ?? 'es';
 
-  const metrics = await computeReportMetrics(db, companyId, periodStart, periodEnd);
-  const result = await generateReportNarrative(metrics, locale);
+  const data = await computeReportSections(
+    db,
+    companyId,
+    periodStart,
+    periodEnd,
+    reportType,
+    sections,
+  );
+
+  const result = await generateReportNarrative(
+    data,
+    locale,
+    buildReportSystemPrompt({ locale, reportType, sections, instructions: params.instructions }),
+  );
 
   await insertAiUsageEvent(db, {
     companyId,
@@ -115,16 +102,36 @@ export async function generateReport(
     outputTokens: result.outputTokens,
   });
 
-  let [report] = await db
-    .select()
-    .from(reports)
-    .where(
-      and(
-        eq(reports.companyId, companyId),
-        eq(reports.periodStart, periodStart),
-        eq(reports.periodEnd, periodEnd),
-      ),
-    );
+  // La fila de `reports` se busca-o-crea por (empresa, período, FRECUENCIA). La
+  // frecuencia entra en la clave desde CU-B2-QA-20260811: sin ella, un reporte a demanda
+  // sobre el mismo día que el automático se colgaría como una versión más de aquél, y
+  // `report_versions` es append-only, así que esa mezcla no se deshace.
+  let report: typeof reports.$inferSelect | undefined;
+  if (params.reportId) {
+    [report] = await db
+      .select()
+      .from(reports)
+      .where(and(eq(reports.id, params.reportId), eq(reports.companyId, companyId)));
+  }
+  // La búsqueda por período NO es un `else`: si el id vino y no se encontró, se cae aquí
+  // a propósito. Ese caso es la carrera del endpoint a demanda —encola el job dentro de su
+  // transacción y la confirma justo después—, y buscar por (empresa, período, frecuencia)
+  // da la MISMA fila en cuanto se confirme. Sin este segundo intento, la alternativa sería
+  // insertar una fila nueva y dejar dos reportes idénticos donde el usuario pidió uno.
+  if (!report) {
+    [report] = await db
+      .select()
+      .from(reports)
+      .where(
+        and(
+          eq(reports.companyId, companyId),
+          eq(reports.periodStart, periodStart),
+          eq(reports.periodEnd, periodEnd),
+          eq(reports.frequency, frequency),
+        ),
+      );
+  }
+
   if (!report) {
     [report] = await db
       .insert(reports)
@@ -145,17 +152,13 @@ export async function generateReport(
   // s3_render_key, porque la clave de S3 se construye con el id de la versión. Con el
   // rol macha_app ese UPDATE es `permission denied` y el reporte no se genera nunca.
   const versionId = randomUUID();
-  const renderHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Reporte ${periodStart} — ${periodEnd}</title></head>
-<body>
-  <h1>Reporte ejecutivo (${periodStart} — ${periodEnd})</h1>
-  <p><strong>Ingresos:</strong> ${metrics.revenue} · <strong>Costo directo de ventas:</strong> ${metrics.cogs} · <strong>Utilidad bruta:</strong> ${metrics.grossProfit} · <strong>Margen bruto:</strong> ${
-    metrics.grossMarginPct === null
-      ? 'sin ventas en el período'
-      : `${metrics.grossMarginPct.toFixed(1)}%`
-  }</p>
-  <p><strong>Por cobrar abierto:</strong> ${metrics.accountsReceivableOpen} · <strong>Por pagar abierto:</strong> ${metrics.accountsPayableOpen}</p>
-  <div>${result.narrative.replace(/\n/g, '<br/>')}</div>
-</body></html>`;
+  const renderHtml = renderReportHtml({
+    companyName: company?.name ?? '',
+    baseCurrency: company?.baseCurrency ?? 'GTQ',
+    locale,
+    data,
+    narrative: result.narrative,
+  });
 
   // El render sube ANTES del insert: si falla, no queda una fila de ledger apuntando a
   // un objeto inexistente. Al revés (insert y luego subida fallida) sería irreparable,
@@ -170,13 +173,33 @@ export async function generateReport(
       companyId,
       reportId: report!.id,
       version: (lastVersion?.version ?? 0) + 1,
-      metrics,
+      metrics: toStoredMetrics(data),
       narrative: result.narrative,
       s3RenderKey: renderKey,
     })
     .returning();
 
   await db.update(reports).set({ currentVersionId: version!.id }).where(eq(reports.id, report!.id));
+
+  // Débito de créditos — MISMO patrón que insight y que la carga de Excel: el valor sale
+  // del motor de reglas (`credit_rules`, versionadas y editables desde /admin), nunca de
+  // una constante en el código, y sin regla activa no se cobra nada. Va DESPUÉS de que la
+  // versión existe: si la generación falló, no se cobró (y el bloqueo duro por saldo
+  // insuficiente ya ocurrió en el endpoint, antes de encolar el job).
+  if (params.debit) {
+    const creditRule = await getActiveCreditRule(db, 'report_generation');
+    if (creditRule) {
+      await debitCredits(db, {
+        companyId,
+        actionKind: 'report_generation',
+        credits: estimateRequiredCredits(creditRule, 1),
+        creditRuleId: creditRule.id,
+        // `ref_id` es el objeto origen: el REPORTE, que es lo que el usuario ve y lo que
+        // aparece en su historial de consumo. La versión es un detalle interno.
+        refId: report!.id,
+      });
+    }
+  }
 
   const recipients = await db
     .select({ email: users.email })
