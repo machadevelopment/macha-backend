@@ -142,10 +142,40 @@ describe('rutas guardadas — 401 sin token', () => {
     '/admin/companies/00000000-0000-0000-0000-000000000000/fx-rates/',
     // CU-868kjc7g5: el ledger de créditos de una empresa, misma razón.
     '/admin/companies/00000000-0000-0000-0000-000000000000/credits/',
+    /**
+     * Ticket B5 — la vista consolidada. Exige token como todo `/admin/*`, y con más
+     * motivo: la respuesta lleva el costo real en USD y los tokens consumidos, cifras de
+     * plataforma que el cliente NUNCA debe ver.
+     */
+    '/admin/companies/overview',
   ];
   for (const path of adminScoped) {
     test(`GET ${path} exige token`, async () => {
       expect((await call(path)).status).toBe(401);
     });
   }
+});
+
+/**
+ * Ticket B5 — la vista consolidada vive en `modules/admin/company-overview.ts`, un
+ * módulo aparte que reusa el prefijo `/admin/companies` de `modules/admin/companies.ts`.
+ * Eso pone `/overview` a competir con el `/:id` del detalle de empresa.
+ *
+ * La lista de arriba NO alcanza para cubrir esto: las dos rutas están detrás del mismo
+ * guard, así que si `/overview` cayera en el handler de `/:id` el 401 saldría igual y
+ * nadie se enteraría hasta ver un 404 de "Company not found" con id `overview` en
+ * producción. Por eso se comprueba el REGISTRO de la ruta, que es lo que decide a qué
+ * handler entra (el router de Elysia resuelve el segmento estático antes que el
+ * dinámico).
+ */
+describe('composición de /admin/companies (ticket B5)', () => {
+  const paths = createApp().routes.map((r) => r.path);
+
+  test('/admin/companies/overview está montada como ruta estática propia', () => {
+    expect(paths).toContain('/admin/companies/overview');
+  });
+
+  test('el detalle por id sigue montado — la consolidada no lo reemplaza', () => {
+    expect(paths).toContain('/admin/companies/:id');
+  });
 });
