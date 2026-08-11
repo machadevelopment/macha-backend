@@ -115,10 +115,38 @@ export async function recordCreditAdjustment(
  * punto 4. Mientras tanto: abono inicial automático + top-up manual de super_admin, que
  * son mecanismo puro y no comprometen ninguna de las respuestas posibles.
  */
-export async function grantInitialCredits(db: DB, companyId: string): Promise<{ granted: number }> {
-  const amount = Number(
-    await getPlatformSetting(db, SETTINGS_KEYS.creditInitialGrant, creditsConfig.monthlyAllotment),
-  );
+export async function grantInitialCredits(
+  db: DB,
+  companyId: string,
+  /**
+   * Créditos que trae el PLAN elegido (ticket B3, 2026-08-11). Es lo que el ticket pedía
+   * con "los créditos del plan alimentan la asignación del motor existente".
+   *
+   * Cuando viene, MANDA sobre `platform_settings.credit_initial_grant`, y el orden importa:
+   * si el ajuste global ganara, elegir Enterprise en vez de Starter no cambiaría nada y el
+   * catálogo de planes sería decorativo. El setting global queda como lo que siempre fue —
+   * el valor para quien no tiene plan con créditos declarados, que hoy es toda empresa en
+   * el plan histórico `base` (la migración 0021 lo dio de alta con 0 créditos justamente
+   * para no cambiarle el comportamiento a nadie).
+   *
+   * SIGUE SIN HABER ASIGNACIÓN MENSUAL RECURRENTE. Este es el abono INICIAL. El motor
+   * mensual no entró en v1 (criterio 6 de CU-868kjc7g5) porque necesita la política de
+   * reseteo/rollover que sigue abierta en PRD §12 punto 4, y el catálogo de planes no la
+   * responde: saber cuántos créditos trae Enterprise no dice qué pasa con los que sobraron
+   * de agosto.
+   */
+  planMonthlyCredits?: number | null,
+): Promise<{ granted: number }> {
+  const amount =
+    planMonthlyCredits && planMonthlyCredits > 0
+      ? planMonthlyCredits
+      : Number(
+          await getPlatformSetting(
+            db,
+            SETTINGS_KEYS.creditInitialGrant,
+            creditsConfig.monthlyAllotment,
+          ),
+        );
   if (!Number.isFinite(amount) || amount <= 0) return { granted: 0 };
 
   await recordCreditAdjustment(db, {
