@@ -193,3 +193,46 @@ describe('CLASSIFY_ROWS_SCHEMA — el 400 que la API devuelve antes de generar',
     expect(t?.anyOf?.some((o) => o.enum?.includes('revenue'))).toBe(true);
   });
 });
+
+describe('estimateCostUsd con caché — el subconteo que arrastraba el ledger', () => {
+  const dia = (iso: string) => new Date(`${iso}T12:00:00Z`);
+  const UN_MILLON = 1_000_000;
+
+  test('los tokens de caché SE COBRAN: omitirlos subestimaba cost_usd', () => {
+    /*
+     * `usage.input_tokens` de la API EXCLUYE lo servido desde caché y lo escrito al crearla.
+     * Como el ledger solo guardaba `input_tokens`, todo lo que entraba por caché se costeaba
+     * como CERO desde que existe el bloque cacheable (CU-868kfva91).
+     *
+     * El error iba hacia el lado peligroso: creer que la IA sale más barata de lo que sale.
+     */
+    const sinCache = estimateCostUsd(UN_MILLON, 0, 'claude-sonnet-5', dia('2026-08-12'));
+    const conCache = estimateCostUsd(UN_MILLON, 0, 'claude-sonnet-5', dia('2026-08-12'), UN_MILLON);
+    expect(conCache).toBeGreaterThan(sinCache);
+  });
+
+  test('leer del caché cuesta 0,1x y escribirlo 1,25x la tarifa de entrada', () => {
+    const dic = dia('2026-08-12'); // tarifa introductoria: entrada USD 2 por millón
+    expect(estimateCostUsd(0, 0, 'claude-sonnet-5', dic, UN_MILLON, 0)).toBeCloseTo(0.2, 6);
+    expect(estimateCostUsd(0, 0, 'claude-sonnet-5', dic, 0, UN_MILLON)).toBeCloseTo(2.5, 6);
+  });
+
+  test('escribir el caché es MÁS caro que no usarlo — por eso solo conviene si se reusa', () => {
+    // Si esta desigualdad se invirtiera, cachear sería gratis y la decisión de dónde poner
+    // el `cache_control` daría igual. No lo es: se paga en la primera llamada y se recupera
+    // de la segunda en adelante. Con ~10 lotes por documento, se recupera.
+    const dic = dia('2026-08-12');
+    expect(estimateCostUsd(0, 0, 'claude-sonnet-5', dic, 0, UN_MILLON)).toBeGreaterThan(
+      estimateCostUsd(UN_MILLON, 0, 'claude-sonnet-5', dic),
+    );
+  });
+
+  test('los multiplicadores siguen la tarifa vigente, no una tabla aparte', () => {
+    // El 2026-09-01 la entrada pasa de USD 2 a USD 3 por millón. El caché tiene que subir
+    // con ella sola: una segunda tabla de precios de caché sería justo lo que CU-868kjc9d6
+    // eliminó — un número que alguien tendría que acordarse de actualizar.
+    const antes = estimateCostUsd(0, 0, 'claude-sonnet-5', dia('2026-08-12'), UN_MILLON);
+    const despues = estimateCostUsd(0, 0, 'claude-sonnet-5', dia('2026-09-01'), UN_MILLON);
+    expect(despues / antes).toBeCloseTo(1.5, 6);
+  });
+});

@@ -355,6 +355,8 @@ export function startExcelIngestWorker(): Promise<string> {
               model: result.model,
               inputTokens: result.inputTokens,
               outputTokens: result.outputTokens,
+              cacheReadTokens: result.cacheReadTokens,
+              cacheCreationTokens: result.cacheCreationTokens,
               billableUnits: batch.length,
             });
             await insertStagingRows(db, companyId, documentId, result.rows);

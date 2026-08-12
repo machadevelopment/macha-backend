@@ -110,6 +110,8 @@ export async function runChatTurn(params: {
       model: response.model,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+      cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
     });
 
     if (response.stop_reason !== 'tool_use') {

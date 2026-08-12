@@ -3,7 +3,7 @@ import { desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { aiUsageEvents, companies, documents } from '@/db/schema';
-import { aiUsageTotals } from '@/lib/ai-usage';
+import { aiUsageTotals, cacheHitRate } from '@/lib/ai-usage';
 
 /**
  * CU-868kfvag7: costo de IA por empresa (SUM(cost_usd) GROUP BY company_id, con
@@ -21,7 +21,7 @@ export const adminMonitoring = new Elysia({ prefix: '/admin' })
   .use(adminGuard)
   .get('/ai-cost', async ({ tier, set, db }) => {
     assertStaffCapability(tier, 'view_ai_usage_cost', set);
-    return db
+    const rows = await db
       .select({
         companyId: aiUsageEvents.companyId,
         companyName: companies.name,
@@ -31,6 +31,24 @@ export const adminMonitoring = new Elysia({ prefix: '/admin' })
       .from(aiUsageEvents)
       .innerJoin(companies, eq(companies.id, aiUsageEvents.companyId))
       .groupBy(aiUsageEvents.companyId, companies.name, aiUsageEvents.kind);
+
+    /*
+     * La tasa de acierto del caché se calcula ACÁ y no en el panel, por la misma razón por
+     * la que los `sum()` viven en `aiUsageTotals`: es una cifra que dos pantallas van a
+     * mostrar y que no puede diferir entre ellas.
+     *
+     * Los `sum()` de Postgres llegan como string (numeric/bigint no caben en un number de
+     * JS sin perder precisión). Se convierten solo para el cociente, que es un ratio chico
+     * y no arrastra el problema; los totales siguen viajando como string.
+     */
+    return rows.map((r) => ({
+      ...r,
+      cacheHitRate: cacheHitRate({
+        totalInputTokens: Number(r.totalInputTokens),
+        totalCacheReadTokens: Number(r.totalCacheReadTokens),
+        totalCacheCreationTokens: Number(r.totalCacheCreationTokens),
+      }),
+    }));
   })
   .get(
     '/documents',
