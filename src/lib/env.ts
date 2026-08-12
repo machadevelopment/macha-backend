@@ -52,6 +52,29 @@ export const env = {
   workosApiKey: process.env.WORKOS_API_KEY ?? '',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
+  /*
+   * Modelo SOLO para la clasificación de Excel, separado del general a propósito.
+   *
+   * La ingesta es el 98 % del gasto de IA (ledger del 2026-08-12) y, desde que el modelo
+   * dejó de reconstruir las filas, es la tarea más simple del producto: entidad, tipo,
+   * categoría. El chat y los insights son lo contrario — poco volumen, cara al cliente,
+   * donde la calidad se nota.
+   *
+   * Un solo `ANTHROPIC_MODEL` obligaba a decidir por los dos a la vez. Con esta variable, el
+   * día que se confirme ZDR para un modelo más barato se cambia la ingesta sin tocar nada
+   * más. Vacía = mismo modelo que todo lo demás, que es el estado actual.
+   *
+   * ⚠️ AL CAMBIARLO, MIRAR EL MÍNIMO DE CACHÉ DEL MODELO NUEVO. El caché de prompt solo
+   * existe si el prefijo supera un mínimo que DEPENDE DEL MODELO y no es monótono entre
+   * generaciones: 1.024 tokens en Sonnet 5, 4.096 en Haiku 4.5. Por debajo no cachea y no
+   * avisa — `cache_creation_input_tokens` simplemente queda en 0.
+   *
+   * Nuestro prefijo (prompt de sistema + bloque de plantilla) mide ~4.817 tokens medidos el
+   * 2026-08-12: pasa el umbral de Haiku, pero por 700 tokens. Acortar el prompt de sistema
+   * lo dejaría por debajo y mataría el 44 % de acierto de caché sin que nada falle.
+   */
+  anthropicIntakeModel:
+    process.env.ANTHROPIC_INTAKE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
   s3Region: process.env.S3_REGION || 'us-east-1',
   s3Bucket: process.env.S3_BUCKET ?? '',
   // Estas dos existían en `.env.example` y en la tabla de "requeridas" del README desde
