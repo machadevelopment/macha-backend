@@ -10,6 +10,7 @@ import { seedDefaultAlertRules } from '@/lib/alert-rules-seed';
 import { grantInitialCredits } from '@/lib/credits';
 import { dejariaSinOwner, MENSAJE_SIN_OWNER } from '@/lib/membership-invariants';
 import { normalizeIndustry } from '@/lib/industry-template';
+import { reportFrequencySchema } from '@/lib/report-schedule';
 
 /**
  * CU-868kfvaex/868kfvagj/868kfvaf5: namespace admin — companies + gestión de
@@ -141,6 +142,47 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
     { body: t.Object({ status: t.Union([t.Literal('active'), t.Literal('suspended')]) }) },
   )
   /**
+   * CU-868kjc7t0 criterio 4 (lado staff): la frecuencia de reportes automáticos de una
+   * empresa, editable desde el detalle de empresa del admin. El cliente la edita solo
+   * (`PUT /reports/frequency`); esto existe para el onboarding asistido y para poder
+   * apagarle los reportes a una empresa que se está quejando sin esperar a que entre.
+   *
+   * `manage_companies` (super_admin), la misma capacidad que el cambio de estado de arriba:
+   * esto decide cuántas llamadas a Claude y cuántos correos genera un tenant. Y como toda
+   * mutación del namespace admin, escribe `admin_audit_log` con el antes y el después.
+   */
+  .patch(
+    '/:id/report-frequency',
+    async ({ staffId, tier, params, body, set, db }) => {
+      assertStaffCapability(tier, 'manage_companies', set);
+      const [before] = await db
+        .select({ reportFrequency: companies.reportFrequency })
+        .from(companies)
+        .where(eq(companies.id, params.id));
+      if (!before) {
+        set.status = 404;
+        return { error: 'Company not found' };
+      }
+
+      await db
+        .update(companies)
+        .set({ reportFrequency: body.frequency, updatedAt: new Date() })
+        .where(eq(companies.id, params.id));
+
+      await logAdminAction(db, {
+        actorStaffId: staffId,
+        companyId: params.id,
+        action: 'company.report_frequency_change',
+        targetTable: 'companies',
+        targetId: params.id,
+        metadata: { before: before.reportFrequency, after: body.frequency },
+      });
+
+      return { id: params.id, reportFrequency: body.frequency };
+    },
+    { body: t.Object({ frequency: reportFrequencySchema }) },
+  )
+  /**
    * CU-868khvzqn criterio 2: `/admin/companies/<id>` en el frontend titulaba
    * "EMPRESA / Detalle" y no había forma de saber en cuál estabas — desde esa pantalla
    * se cambian roles de usuarios y umbrales de alerta. No existía endpoint de detalle:
@@ -162,6 +204,9 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         baseCurrency: companies.baseCurrency,
         status: companies.status,
         locale: companies.locale,
+        // CU-868kjc7t0: la pantalla de detalle es donde staff la edita, así que tiene que
+        // poder mostrar el valor vigente sin adivinarlo.
+        reportFrequency: companies.reportFrequency,
         createdAt: companies.createdAt,
       })
       .from(companies)
