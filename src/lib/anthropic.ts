@@ -108,14 +108,56 @@ export function resolveRatePerMtok(
   return { ...tarifaMasCara(), exact: false };
 }
 
+/**
+ * Multiplicadores del caché de prompt sobre la tarifa de ENTRADA del modelo.
+ *
+ * No son tarifas propias: Anthropic los define como un factor sobre el precio de entrada,
+ * así que expresarlos así hace que el cruce de tarifa del 2026-09-01 los arrastre solo, sin
+ * una segunda tabla que alguien tendría que acordarse de actualizar.
+ *
+ * Escribir en el caché cuesta MÁS que no usarlo (1,25x) y leerlo cuesta mucho menos (0,1x).
+ * Por eso el caché solo conviene cuando el mismo prefijo se reusa: con una sola llamada por
+ * documento sería más caro. Con ~10 lotes por documento —el número de hoy— se paga en la
+ * segunda llamada.
+ */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
+/**
+ * Costo de una llamada.
+ *
+ * ═══ LOS TOKENS DE CACHÉ SE COBRAN Y NO SE ESTABAN CONTANDO ═══
+ *
+ * `usage.input_tokens` de la API EXCLUYE lo servido desde caché y lo escrito al crearla —
+ * van en `cache_read_input_tokens` y `cache_creation_input_tokens`. Como esta función solo
+ * recibía `inputTokens`, todo lo que entraba por caché se costeaba como CERO desde que
+ * existe el bloque cacheable (CU-868kfva91).
+ *
+ * El error iba hacia el lado peligroso, el mismo que motivó las tarifas con vigencia de
+ * CU-868kjc9d6: hacia creer que la IA sale más barata de lo que sale. Es chico en valor
+ * absoluto —la lectura de caché vale una décima parte— pero un ledger de costos que
+ * subestima no sirve para decidir nada.
+ *
+ * Los dos parámetros son opcionales y default 0 para que las llamadas sin caché no cambien
+ * de resultado, y para que el histórico se pueda recalcular tal como se registró.
+ */
 export function estimateCostUsd(
   inputTokens: number,
   outputTokens: number,
   model: string = anthropicModel,
   at: Date = new Date(),
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number {
   const tarifa = resolveRatePerMtok(model, at);
-  return (inputTokens / 1_000_000) * tarifa.input + (outputTokens / 1_000_000) * tarifa.output;
+  const porMillon = (tokens: number, precio: number) => (tokens / 1_000_000) * precio;
+
+  return (
+    porMillon(inputTokens, tarifa.input) +
+    porMillon(outputTokens, tarifa.output) +
+    porMillon(cacheCreationTokens, tarifa.input * CACHE_WRITE_MULTIPLIER) +
+    porMillon(cacheReadTokens, tarifa.input * CACHE_READ_MULTIPLIER)
+  );
 }
 
 export type ClassifiedRow = {
@@ -135,6 +177,9 @@ export type ClassifySheetResult = {
   unusableReason: string | null;
   inputTokens: number;
   outputTokens: number;
+  /** Ver `estimateCostUsd`: NO están incluidos en `inputTokens`. */
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   model: string;
 };
 
@@ -408,6 +453,11 @@ export async function classifySheetRows(params: {
     unusableReason: parsed.unusableReason ?? null,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }
@@ -441,6 +491,9 @@ export type NarrativeResult = {
   narrative: string;
   inputTokens: number;
   outputTokens: number;
+  /** Ver `estimateCostUsd`: NO están incluidos en `inputTokens`. */
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   model: string;
 };
 
@@ -564,6 +617,11 @@ export async function generateInsightNarrative(
     narrative,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }
@@ -638,6 +696,11 @@ export async function generateReportNarrative(
     narrative: textBlock.text,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }

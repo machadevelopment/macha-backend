@@ -212,6 +212,8 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       model: result.model,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
     });
 
     await logAdminAction(db, {
