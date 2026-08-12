@@ -54,27 +54,40 @@ export const intakeConfig = {
   /**
    * Cuántos lotes se mandan a Claude EN PARALELO.
    *
-   * Antes los lotes se procesaban en serie y era, medido, el problema más grande de la
-   * ingesta desde la vista del cliente. Tres archivos reales en producción (2026-08-06):
+   * Antes los lotes iban en serie y era, medido, el problema más grande de la ingesta desde
+   * la vista del cliente. Tres archivos reales en producción (2026-08-06):
    *
    *   Cafe_Andino (1.174 filas, 25 lotes)     68,7 min
    *   Cafeteria_Excel (1.881 filas, 21 lotes) 42,2 min
    *   Reporte preliminar (1.316, 68 lotes)    23,7 min
    *
-   * Cada llamada a Claude tarda 140-220 s y no depende de las otras: el cuello es espera
-   * de red, no CPU ni base. En serie, 25 lotes × ~165 s son ~69 minutos de alguien mirando
-   * una pantalla que dice "procesando".
+   * Cada llamada es espera de red, no CPU ni base: en serie, 25 lotes son alguien mirando una
+   * pantalla que dice "procesando".
    *
-   * 5 y no 20: el techo real son los límites de tasa de la API de Anthropic, que dependen
-   * del tier de la cuenta y no se pueden leer desde acá. El SDK ya reintenta 429/5xx con
-   * backoff (`maxRetries` por defecto), así que pasarse no rompe — solo desperdicia
-   * latencia en reintentos. 5 baja el archivo de 69 a ~14 minutos y deja margen; se sube
-   * por env cuando se mida el límite real de la cuenta, sin tocar código.
+   * ═══ 5 → 10, Y AHORA CON EL LÍMITE MEDIDO EN VEZ DE SUPUESTO (2026-08-12) ═══
    *
-   * SE QUEDA EN 5 tras el recorte de `outputTokenBudget` del 2026-08-12, aunque el archivo
-   * ahora se parta en más lotes. Con ~10 lotes de ~35 s son dos tandas, ~70 s: la meta de
-   * 3 minutos ya se cumple sin tocar la concurrencia, y subirla sería apostarle a un
-   * límite de tasa que no hemos medido para ganar tiempo que no hace falta.
+   * El 5 se eligió a ciegas: "el techo son los límites de tasa de Anthropic, que dependen del
+   * tier y no se pueden leer desde acá". Sí se pueden — vienen en las cabeceras
+   * `anthropic-ratelimit-*` de cualquier respuesta. Leídas de la cuenta real:
+   *
+   *   salida    400.000 tokens/min
+   *   entrada 2.000.000 tokens/min
+   *   requests      1.000/min
+   *
+   * El archivo completo, corrido de punta a punta, consumió ~33.000 tokens de salida por
+   * minuto: el 8 % del límite. La concurrencia 5 no estaba protegiendo de nada.
+   *
+   * 10 y no 46 (que es donde el cálculo dice que se toca el techo con un solo archivo): el
+   * límite es de CUENTA, no de documento. Varias empresas subiendo a la vez comparten esos
+   * 400.000, y con 10 hay margen para varias cargas simultáneas antes de ver un 429. El SDK
+   * ya reintenta 429/5xx con backoff, así que pasarse degrada en vez de romper — pero un
+   * reintento es tiempo perdido, que es justo lo que se está tratando de recuperar.
+   *
+   * Medido sobre el archivo real: 10 lotes en UNA tanda en vez de dos. ~72 s → ~35 s.
+   *
+   * El tope duro de 46 sale de ese mismo límite: cada llamada produce ~4.000 tokens de salida
+   * en ~28 s, o sea ~8.600 por minuto sostenidos. Está acá para que subir la variable de
+   * entorno sin pensar no convierta la ingesta en una fábrica de 429.
    */
-  batchConcurrency: Math.max(1, Number(process.env.INTAKE_BATCH_CONCURRENCY || 5)),
+  batchConcurrency: Math.min(46, Math.max(1, Number(process.env.INTAKE_BATCH_CONCURRENCY || 10))),
 };
