@@ -9,6 +9,7 @@ import {
   timestamp,
   index,
   uniqueIndex,
+  primaryKey,
 } from 'drizzle-orm/pg-core';
 import { companies } from './companies';
 
@@ -183,5 +184,42 @@ export const documentIngestBatches = pgTable(
       t.sheetName,
       t.batchIndex,
     ),
+  }),
+);
+
+/**
+ * Huellas de filas ya ingeridas — deduplicación ANTES de llamar a la IA (migración `0023`).
+ *
+ * El caso que resuelve: un cliente exporta su contabilidad COMPLETA y la sube cada semana.
+ * Sin esta tabla, las 5.000 filas de la semana pasada vuelven a Claude y se pagan otra vez.
+ * Con el 95,7 % del costo del recibo en tokens de salida (medido 2026-08-12), cada fila
+ * reprocesada es dinero tirado.
+ *
+ * No la cubría nada de lo que ya existía: `documentIngestBatches` protege contra reprocesar
+ * el mismo DOCUMENTO y `stagingRows.promotedAt` contra promover la misma FILA DE STAGING.
+ * Ninguna protege contra un documento nuevo con filas viejas.
+ *
+ * `fingerprint` sale de `lib/row-fingerprint.ts`, que documenta por qué incluye un ordinal
+ * de aparición: dos ventas iguales el mismo día NO son un duplicado.
+ *
+ * SIN DELETE en el rol de la app (ver la migración): revertir una carga no borra huellas. Si
+ * las borrara, resubir el archivo revertido lo reprocesaría entero.
+ */
+export const ingestedRows = pgTable(
+  'ingested_rows',
+  {
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id),
+    fingerprint: text('fingerprint').notNull(),
+    /** Trazabilidad, no identidad: la huella NO depende del documento. */
+    firstSeenDocumentId: uuid('first_seen_document_id')
+      .notNull()
+      .references(() => documents.id),
+    sheetName: text('sheet_name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.companyId, t.fingerprint] }),
   }),
 );
