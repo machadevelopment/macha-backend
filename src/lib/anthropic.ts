@@ -334,10 +334,21 @@ paragraph executive narrative: what happened, why it matters, and 1-2 recommenda
 NEVER invent or recompute figures — use only the snapshot's. Respond in English, plain
 text, no markdown.`;
 
-/** Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as insights. */
+/**
+ * Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as
+ * insights.
+ *
+ * CU-B2-QA-20260811: `systemPrompt` es opcional y lo arma el llamador
+ * (`lib/report-prompt.ts`) a partir de las SECCIONES pedidas. Se agrega como tercer
+ * parámetro opcional en vez de reemplazar `REPORT_SYSTEM_PROMPT` para que este módulo
+ * siga siendo un cliente puro de Claude —no sabe qué es una sección de reporte— y para
+ * que el fallback por defecto siga siendo exactamente el prompt del tick diario, que no
+ * cambia de comportamiento con este ticket.
+ */
 export async function generateReportNarrative(
   metricsSnapshot: unknown,
   locale: 'es' | 'en',
+  systemPrompt?: string,
 ): Promise<InsightResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
@@ -345,7 +356,7 @@ export async function generateReportNarrative(
   const stream = anthropic.messages.stream({
     model: anthropicModel,
     max_tokens: 2048,
-    system: REPORT_SYSTEM_PROMPT(locale),
+    system: systemPrompt ?? REPORT_SYSTEM_PROMPT(locale),
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
   const message = await runAi('report_narrative', () => stream.finalMessage());
