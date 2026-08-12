@@ -111,11 +111,33 @@ export const insights = new Elysia().use(tenantDerive).post(
     });
 
     const balanceAfter = await getCreditBalance(db, companyId);
-    return { narrative: result.narrative, creditBalance: balanceAfter };
+    /*
+     * `insights` se suma; `narrative` se CONSERVA. No es redundancia: el frontend degrada a
+     * `narrative` cuando el modelo no llamó a la herramienta y la lista viene vacía, y así
+     * este cambio no rompe a ningún consumidor que ya lea el texto.
+     */
+    return { insights: result.insights, narrative: result.narrative, creditBalance: balanceAfter };
   },
   {
     response: {
-      200: t.Object({ narrative: t.String(), creditBalance: t.Number() }),
+      200: t.Object({
+        insights: t.Array(
+          t.Object({
+            // Literales escritos a mano y no `INSIGHT_CATEGORIES.map(t.Literal)`: mapear
+            // una tupla `as const` colapsa el union a `never` en la inferencia de Elysia y
+            // el handler deja de encajar con su propio esquema de respuesta. El enum sigue
+            // siendo la fuente de verdad en `lib/anthropic.ts`; si crece, esto también.
+            category: t.Union([
+              t.Literal('collections'),
+              t.Literal('sales'),
+              t.Literal('financial'),
+            ]),
+            text: t.String(),
+          }),
+        ),
+        narrative: t.String(),
+        creditBalance: t.Number(),
+      }),
       402: t.Object({
         error: t.Literal('insufficient_credits'),
         required: t.Number(),
