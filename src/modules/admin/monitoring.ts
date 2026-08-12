@@ -1,14 +1,21 @@
 import { Elysia, t } from 'elysia';
-import { desc, eq, sql as rawSql } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { aiUsageEvents, companies, documents } from '@/db/schema';
+import { aiUsageTotals } from '@/lib/ai-usage';
 
 /**
  * CU-868kfvag7: costo de IA por empresa (SUM(cost_usd) GROUP BY company_id, con
  * drill-down por kind) + monitoreo de uploads/procesos. Costo real en USD/tokens
  * queda SOLO aquí (staff/super_admin) — el cliente nunca lo ve (criterio 3), solo su
  * saldo en créditos (GET /credits/balance, F4).
+ *
+ * Ticket B5: este endpoint SIGUE SIENDO el drill-down por tipo de acción y no lo
+ * reemplaza la vista consolidada — `GET /admin/companies/overview` da el TOTAL por
+ * empresa, y para saber en qué se fue ese total (excel/chat/insight/…) se sigue
+ * viniendo aquí. Los agregados los definen los dos desde `lib/ai-usage.ts` para que no
+ * puedan dejar de cuadrar.
  */
 export const adminMonitoring = new Elysia({ prefix: '/admin' })
   .use(adminGuard)
@@ -19,10 +26,7 @@ export const adminMonitoring = new Elysia({ prefix: '/admin' })
         companyId: aiUsageEvents.companyId,
         companyName: companies.name,
         kind: aiUsageEvents.kind,
-        totalCostUsd: rawSql<string>`sum(${aiUsageEvents.costUsd})`,
-        totalInputTokens: rawSql<string>`sum(${aiUsageEvents.inputTokens})`,
-        totalOutputTokens: rawSql<string>`sum(${aiUsageEvents.outputTokens})`,
-        callCount: rawSql<string>`count(*)`,
+        ...aiUsageTotals,
       })
       .from(aiUsageEvents)
       .innerJoin(companies, eq(companies.id, aiUsageEvents.companyId))

@@ -1,4 +1,4 @@
-import { and, eq, desc, sql as rawSql } from 'drizzle-orm';
+import { and, eq, desc, inArray, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { creditRules, creditTransactions } from '@/db/schema';
 import { creditsConfig } from '@/config/credits';
@@ -6,13 +6,44 @@ import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
 
 export type ActionKind = 'excel' | 'chat' | 'insight' | 'report_generation';
 
-/** Saldo de créditos por empresa = SUM(delta) (data model §13, §4.20). */
+/**
+ * El saldo NUNCA se lee de una columna materializada: es SUM(delta) sobre el ledger
+ * append-only (data model §13, §4.20). Definido una sola vez para que la lectura de una
+ * empresa y la de muchas no puedan divergir (ticket B5).
+ */
+const balanceSum = rawSql<string>`coalesce(sum(${creditTransactions.delta}), 0)`;
+
+/** Saldo de créditos de UNA empresa. */
 export async function getCreditBalance(db: DB, companyId: string): Promise<number> {
   const [row] = await db
-    .select({ balance: rawSql<string>`coalesce(sum(${creditTransactions.delta}), 0)` })
+    .select({ balance: balanceSum })
     .from(creditTransactions)
     .where(eq(creditTransactions.companyId, companyId));
   return Number(row?.balance ?? 0);
+}
+
+/**
+ * Saldo de créditos de VARIAS empresas en una sola consulta (ticket B5).
+ *
+ * Existe por la vista consolidada del backoffice: llamar a `getCreditBalance` en un
+ * bucle sobre la página de empresas son 50 viajes a la base para pintar una tabla, y
+ * todos van por la MISMA conexión reservada del request (`admin.guard`), así que se
+ * ejecutarían en serie.
+ *
+ * Una empresa sin ningún movimiento no aparece en el resultado del `GROUP BY`; el
+ * llamador la interpreta como saldo 0, que es lo que significa un ledger vacío.
+ */
+export async function getCreditBalances(
+  db: DB,
+  companyIds: string[],
+): Promise<Map<string, number>> {
+  if (companyIds.length === 0) return new Map();
+  const rows = await db
+    .select({ companyId: creditTransactions.companyId, balance: balanceSum })
+    .from(creditTransactions)
+    .where(inArray(creditTransactions.companyId, companyIds))
+    .groupBy(creditTransactions.companyId);
+  return new Map(rows.map((r) => [r.companyId, Number(r.balance)]));
 }
 
 /** Versión activa más reciente de la regla para una acción (CU-868kfv97x, §4.19a). */

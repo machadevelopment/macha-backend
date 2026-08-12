@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/bun';
 import { env } from '@/lib/env';
 import { AiProviderError, aiFailureMessage, aiFailureStatus } from '@/lib/ai-errors';
 import { adminCompanies } from '@/modules/admin/companies';
+import { adminCompanyOverview } from '@/modules/admin/company-overview';
 import { adminStagingRows } from '@/modules/admin/staging-rows';
 import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
 import { adminConfig } from '@/modules/admin/config';
@@ -88,6 +89,7 @@ const clientApi = new Elysia()
 
 const adminApi = new Elysia()
   .use(adminCompanies)
+  .use(adminCompanyOverview)
   .use(adminStagingRows)
   .use(adminIndustryTemplates)
   .use(adminConfig)
