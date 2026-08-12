@@ -23,6 +23,11 @@ import {
   type ReportType,
 } from '@/lib/report-sections';
 import { MAX_INSTRUCTIONS_LENGTH } from '@/lib/report-prompt';
+import {
+  DEFAULT_REPORT_FREQUENCY,
+  REPORT_FREQUENCIES,
+  reportFrequencySchema,
+} from '@/lib/report-schedule';
 import { renderReportPdf, renderReportXlsx, SECTION_LABELS } from '@/lib/report-render';
 
 /** Mismo formato de fecha que valida `/metrics/period`. */
@@ -95,6 +100,79 @@ export const reports_ = new Elysia({ prefix: '/reports' })
           maxInstructionsLength: t.Number(),
         }),
         429: rateLimitedResponse,
+      },
+    },
+  )
+  /**
+   * Preferencia de reportes AUTOMÁTICOS de la empresa (CU-868kjc7t0, criterio 4 — lado
+   * cliente; la pantalla que lo consume es Ajustes de empresa, CU-868kj3gm0).
+   *
+   * Vive en ESTE módulo y no en uno nuevo por la misma razón que la generación a demanda:
+   * la cadena de `.use()` de `src/app.ts` ya está al borde del `TS2589` que obligó a
+   * agrupar módulos en el PR #129, y esto comparte prefijo, guard y tenant-scoping con lo
+   * que ya está aquí.
+   *
+   * `companyId` sale de `tenantDerive` (JWT verificado en el servidor), NUNCA del cuerpo:
+   * si viniera del cliente, cualquiera podría apagarle los reportes a otra empresa.
+   */
+  .get(
+    '/frequency',
+    async ({ companyId, role, set, db }) => {
+      // Leer la preferencia es parte de ver la configuración de reportes: misma capacidad
+      // que ver los reportes. Cambiarla es otra cosa y va abajo.
+      assertClientCapability(role, 'view_dashboard_reports', set);
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /reports/frequency');
+      if (limited) return limited;
+
+      const [company] = await db
+        .select({ reportFrequency: companies.reportFrequency })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+
+      return {
+        frequency: company?.reportFrequency ?? DEFAULT_REPORT_FREQUENCY,
+        options: [...REPORT_FREQUENCIES],
+        defaultFrequency: DEFAULT_REPORT_FREQUENCY,
+      };
+    },
+    {
+      response: {
+        200: t.Object({
+          frequency: reportFrequencySchema,
+          options: t.Array(t.String()),
+          defaultFrequency: t.String(),
+        }),
+        429: rateLimitedResponse,
+      },
+    },
+  )
+  .put(
+    '/frequency',
+    async ({ companyId, role, body, set, db }) => {
+      // `edit_send_reports` = owner/admin (lib/permissions.ts). El ticket pide "editable por
+      // owner/admin" y ésa es exactamente la capacidad que ya expresa ese par sobre
+      // reportes: no se inventa una capacidad nueva, que sería tocar una matriz aprobada.
+      assertClientCapability(role, 'edit_send_reports', set);
+
+      const [updated] = await db
+        .update(companies)
+        .set({ reportFrequency: body.frequency, updatedAt: new Date() })
+        .where(eq(companies.id, companyId))
+        .returning({ reportFrequency: companies.reportFrequency });
+
+      if (!updated) {
+        set.status = 404;
+        return { error: 'Company not found' };
+      }
+      return { frequency: updated.reportFrequency };
+    },
+    {
+      // TypeBox de Elysia (no zod): el CHECK de la migración 0023 es el respaldo, no la
+      // primera línea.
+      body: t.Object({ frequency: reportFrequencySchema }),
+      response: {
+        200: t.Object({ frequency: reportFrequencySchema }),
+        404: t.Object({ error: t.String() }),
       },
     },
   )

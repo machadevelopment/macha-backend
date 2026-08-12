@@ -11,6 +11,23 @@ export const companies = pgTable(
     baseCurrency: text('base_currency').$type<'GTQ' | 'USD'>().notNull().default('GTQ'),
     status: text('status').$type<'active' | 'suspended'>().notNull().default('active'),
     locale: text('locale').$type<'es' | 'en'>().notNull().default('es'),
+    /**
+     * CU-868kjc7t0, migración 0023. Preferencia de reportes AUTOMÁTICOS: el tick diario
+     * (queue/workers/report-tick.ts) solo encola a quien toca en esa corrida. Default
+     * 'weekly' — diario es una decisión que el cliente toma activamente, no hereda.
+     *
+     * NO es `reports.frequency`: aquélla registra con qué frecuencia nació cada reporte ya
+     * creado (histórico), ésta dice qué debe generarse en adelante.
+     *
+     * El catálogo se escribe a mano aquí, en vez de importar `ReportFrequency` de
+     * `lib/report-schedule.ts`, para que los archivos de `db/schema/` sigan sin depender de
+     * nada más que Drizzle: los scripts de `scripts/` los cargan sueltos. El CHECK de la
+     * migración 0023 es lo que mantiene honestas a las dos declaraciones.
+     */
+    reportFrequency: text('report_frequency')
+      .$type<'daily' | 'weekly' | 'off'>()
+      .notNull()
+      .default('weekly'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
