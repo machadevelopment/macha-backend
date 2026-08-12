@@ -170,10 +170,23 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
     // pantalla donde el staff arregla las filas que esa misma falta de plantilla marcó.
     const templateVersion = await resolveIndustryTemplate(db, company.industry);
 
+    /*
+     * La fila marcada se le presenta al modelo como una FILA TABULAR de verdad —claves
+     * como encabezados, valores como celdas— y no como un JSON metido en una sola celda.
+     *
+     * Es obligatorio desde que el modelo dejó de devolver los valores (lib/row-assembly.ts):
+     * ahora devuelve índices de columna, y sobre una fila de una sola celda todos los
+     * índices tendrían que ser 0, así que cada campo saldría con el JSON entero de texto.
+     * Con encabezados reales, el mapa que devuelve vuelve a apuntar a algo.
+     */
+    const payloadObj = (row.payload ?? {}) as Record<string, unknown>;
+    const cabecera = Object.keys(payloadObj);
     const result = await classifySheetRows({
       templateVersion,
       sheetName: `revisión (${row.flagReason ?? 'sin razón registrada'})`,
-      rows: [[JSON.stringify(row.payload)]],
+      rows: [cabecera.map((k) => payloadObj[k])],
+      headerRow: cabecera,
+      baseCurrency: company.baseCurrency,
     });
 
     const [reclassified] = result.rows;
@@ -199,6 +212,8 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       model: result.model,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
     });
 
     await logAdminAction(db, {

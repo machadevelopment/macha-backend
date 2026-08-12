@@ -100,6 +100,8 @@ export async function generateReport(
     model: result.model,
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
+    cacheReadTokens: result.cacheReadTokens,
+    cacheCreationTokens: result.cacheCreationTokens,
   });
 
   // La fila de `reports` se busca-o-crea por (empresa, período, FRECUENCIA). La

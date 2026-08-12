@@ -3,12 +3,14 @@ import { and, eq } from 'drizzle-orm';
 import { registerWorker, enqueue, QUEUES } from '@/queue';
 import { withCompanyScope } from '@/lib/db-scope';
 import { downloadObject } from '@/lib/s3';
-import { documents, documentIngestBatches, companies } from '@/db/schema';
+import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
 import { classifySheetRows } from '@/lib/anthropic';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
+import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
+import { canSkipSheet } from '@/lib/sheet-classifier';
 import { insertStagingRows } from '@/lib/staging';
 import { runWithConcurrency } from '@/lib/concurrency';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
@@ -60,7 +62,7 @@ export function startExcelIngestWorker(): Promise<string> {
           db.update(documents).set({ status: 'processing' }).where(eq(documents.id, documentId)),
         );
 
-        const { templateVersion, s3Key, creditRule, locale } = await withCompanyScope(
+        const { templateVersion, s3Key, creditRule, locale, baseCurrency } = await withCompanyScope(
           companyId,
           async (db) => {
             const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
@@ -75,6 +77,13 @@ export function startExcelIngestWorker(): Promise<string> {
             // integrado: la plantilla por industria mejora la clasificación cuando
             // existe, pero ya no es una precondición para ingerir.
             const templateVersion = await resolveIndustryTemplate(db, company.industry);
+            /*
+             * La moneda base de la EMPRESA, no del archivo. El modelo ya no devuelve la
+             * moneda de cada fila: cuando la hoja no trae columna de moneda —el caso normal
+             * en los archivos reales— el código la resuelve a esta. Es el mismo default que
+             * el modelo aplicaba antes, ahora explícito y probable.
+             */
+            const baseCurrency = company.baseCurrency;
             if (templateVersion.source === 'default') {
               // No es un error del cliente ni interrumpe nada — es la señal para que
               // el staff sepa qué industria vale la pena curar (panel de plantillas).
@@ -87,7 +96,13 @@ export function startExcelIngestWorker(): Promise<string> {
             // consistent even if the rule version changes mid-processing.
             const creditRule = await getActiveCreditRule(db, 'excel');
 
-            return { templateVersion, s3Key: doc.s3Key, creditRule, locale: company.locale };
+            return {
+              templateVersion,
+              s3Key: doc.s3Key,
+              creditRule,
+              locale: company.locale,
+              baseCurrency,
+            };
           },
         );
 
@@ -169,8 +184,18 @@ export function startExcelIngestWorker(): Promise<string> {
          * confirmadas (y el chequeo de plan cambiado) fuera de la parte concurrente, donde
          * razonar sobre él sería más difícil.
          */
-        type Pendiente = { sheetName: string; batchIndex: number; batch: unknown[][] };
+        type Pendiente = {
+          sheetName: string;
+          /** Encabezados de la hoja: van en TODOS sus lotes, no solo en el primero. */
+          headerRow: unknown[];
+          batchIndex: number;
+          batch: unknown[][];
+          /** Alineadas con `batch`: se registran en la MISMA transacción que el lote. */
+          fingerprints: string[];
+        };
         const pendientes: Pendiente[] = [];
+        /** Filas que ya se habían ingerido antes y no vuelven a costar un token. */
+        let totalRowsSkipped = 0;
 
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
@@ -182,6 +207,67 @@ export function startExcelIngestWorker(): Promise<string> {
           });
           if (rows.length === 0) continue;
 
+          /*
+           * Se captura ANTES de filtrar: en la segunda subida del mismo archivo la fila de
+           * encabezados ya está deduplicada y no llega a ningún lote, pero el modelo la
+           * sigue necesitando para armar el mapa de columnas.
+           */
+          const headerRow = rows[0] ?? [];
+
+          /*
+           * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
+           * no son exportes contables: son volcados operativos completos. Los tres de
+           * prueba traen ocho hojas y CINCO son catálogos —clientes, proveedores, tiendas,
+           * inventario, productos— que hoy se le mandan a Claude para que conteste que no
+           * son transacciones. Son ~370 de 1.170 filas pagadas para nada.
+           *
+           * `canSkipSheet` solo descarta con evidencia positiva; la duda va al modelo. El
+           * modo de fallo que se evita es silencioso: descartar una hoja financiera haría
+           * que esos datos nunca aparecieran en el dashboard del cliente, sin error.
+           */
+          if (canSkipSheet(rows[0] ?? [])) {
+            totalRowsSkipped += rows.length;
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
+            );
+            continue;
+          }
+
+          /*
+           * DEDUPLICACIÓN ANTES DE LA IA (migración 0023). Es lo primero que pasa con las
+           * filas, y el orden importa: filtrar acá reduce el número de LOTES, así que
+           * ahorra costo y tiempo a la vez. Deduplicar más adelante —al insertar en
+           * staging o al promover— no ahorraría nada: la fila ya se le habría mostrado al
+           * modelo y ya estaría pagada.
+           *
+           * SE EXCLUYEN LAS HUELLAS DE ESTE MISMO DOCUMENTO, y no es un detalle: la
+           * reanudación por lote de más abajo exige que el lote `n` cubra las MISMAS filas
+           * entre intentos. Si el intento 1 registró huellas y el intento 2 las filtrara,
+           * el plan de lotes cambiaría y la guarda de reanudación abortaría la carga.
+           * Filtrando solo contra OTROS documentos, el plan es estable entre reintentos y
+           * sigue siendo correcto para un archivo nuevo.
+           */
+          const huellas = fingerprintSheet({ companyId, sheetName, rows });
+          const yaVistas = await withCompanyScope(companyId, (db) =>
+            findSeenFingerprints(db, companyId, documentId, huellas),
+          );
+
+          const filtradas: unknown[][] = [];
+          const huellasFiltradas: string[] = [];
+          for (let i = 0; i < rows.length; i++) {
+            if (yaVistas.has(huellas[i]!)) {
+              totalRowsSkipped++;
+              continue;
+            }
+            filtradas.push(rows[i]!);
+            huellasFiltradas.push(huellas[i]!);
+          }
+          if (filtradas.length === 0) continue;
+
+          // A partir de acá se trabaja SOLO con lo nuevo.
+          rows.length = 0;
+          rows.push(...filtradas);
+
           // CU-868kmwdqu: el tamaño de lote sale del presupuesto de tokens de SALIDA, no
           // solo del conteo de filas. El cap por filas de CU-868kfv972 sigue siendo el
           // techo; manda el menor de los dos. Ver lib/sheet-batching.ts.
@@ -190,6 +276,10 @@ export function startExcelIngestWorker(): Promise<string> {
           const batches = chunk(rows, batchSize);
           for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             const batch = batches[batchIndex]!;
+            const batchFingerprints = huellasFiltradas.slice(
+              batchIndex * batchSize,
+              batchIndex * batchSize + batch.length,
+            );
 
             // Reanudar, no reprocesar: el lote ya confirmado se salta ANTES de la
             // llamada a Claude. Eso es lo que evita el cobro doble, el costo duplicado
@@ -213,13 +303,31 @@ export function startExcelIngestWorker(): Promise<string> {
               continue;
             }
 
-            pendientes.push({ sheetName, batchIndex, batch });
+            pendientes.push({
+              sheetName,
+              headerRow,
+              batchIndex,
+              batch,
+              fingerprints: batchFingerprints,
+            });
           }
         }
 
         /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
-        async function procesarLote({ sheetName, batchIndex, batch }: Pendiente): Promise<void> {
-          const result = await classifySheetRows({ templateVersion, sheetName, rows: batch });
+        async function procesarLote({
+          sheetName,
+          headerRow,
+          batchIndex,
+          batch,
+          fingerprints,
+        }: Pendiente): Promise<void> {
+          const result = await classifySheetRows({
+            templateVersion,
+            sheetName,
+            rows: batch,
+            headerRow,
+            baseCurrency,
+          });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
           // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
@@ -247,9 +355,35 @@ export function startExcelIngestWorker(): Promise<string> {
               model: result.model,
               inputTokens: result.inputTokens,
               outputTokens: result.outputTokens,
+              cacheReadTokens: result.cacheReadTokens,
+              cacheCreationTokens: result.cacheCreationTokens,
               billableUnits: batch.length,
             });
             await insertStagingRows(db, companyId, documentId, result.rows);
+
+            /*
+             * Las huellas se registran en la MISMA transacción que el resto del lote. Si
+             * se registraran antes de llamar a Claude, un fallo dejaría las filas marcadas
+             * como vistas SIN haberse procesado: se perderían para siempre, porque la
+             * próxima carga las filtraría. Registrarlas al confirmar significa que una
+             * huella existe si y solo si su fila llegó a staging.
+             *
+             * `onConflictDoNothing` cubre dos ejecuciones solapadas del mismo job y el
+             * caso de una fila que aparezca en dos hojas con el mismo contenido.
+             */
+            if (fingerprints.length > 0) {
+              await db
+                .insert(ingestedRows)
+                .values(
+                  fingerprints.map((fingerprint) => ({
+                    companyId,
+                    fingerprint,
+                    firstSeenDocumentId: documentId,
+                    sheetName,
+                  })),
+                )
+                .onConflictDoNothing();
+            }
 
             // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
             // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
@@ -289,6 +423,25 @@ export function startExcelIngestWorker(): Promise<string> {
           intakeConfig.batchConcurrency,
         );
         if (errors.length > 0) throw errors[0];
+
+        /*
+         * El número con el que se verifica EN PRODUCCIÓN que la deduplicación funciona.
+         *
+         * Sin esto, el ahorro es invisible: el panel de costo mostraría un gasto menor y no
+         * habría forma de saber si fue por la deduplicación o porque el cliente subió menos
+         * filas. Con la proporción en el log, la primera carga semanal de cualquier cliente
+         * confirma o desmiente el arreglo de un vistazo.
+         *
+         * `console.info` y no una métrica: es diagnóstico de bajo volumen (una línea por
+         * documento) y el proyecto todavía no tiene un sink de métricas.
+         */
+        if (totalRowsSkipped > 0) {
+          const total = totalRowsProcessed + totalRowsSkipped;
+          const pct = Math.round((totalRowsSkipped / total) * 100);
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} dedup: ${totalRowsSkipped}/${total} filas (${pct}%) ya se habían ingerido y NO se mandaron al modelo`,
+          );
+        }
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
           const promotion = await promoteDocument(db, companyId, documentId);

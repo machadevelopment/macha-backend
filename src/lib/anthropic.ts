@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
 import { runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
+import { assemblePayload, type ColumnMap, type RowVerdict } from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -107,14 +108,56 @@ export function resolveRatePerMtok(
   return { ...tarifaMasCara(), exact: false };
 }
 
+/**
+ * Multiplicadores del caché de prompt sobre la tarifa de ENTRADA del modelo.
+ *
+ * No son tarifas propias: Anthropic los define como un factor sobre el precio de entrada,
+ * así que expresarlos así hace que el cruce de tarifa del 2026-09-01 los arrastre solo, sin
+ * una segunda tabla que alguien tendría que acordarse de actualizar.
+ *
+ * Escribir en el caché cuesta MÁS que no usarlo (1,25x) y leerlo cuesta mucho menos (0,1x).
+ * Por eso el caché solo conviene cuando el mismo prefijo se reusa: con una sola llamada por
+ * documento sería más caro. Con ~10 lotes por documento —el número de hoy— se paga en la
+ * segunda llamada.
+ */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
+/**
+ * Costo de una llamada.
+ *
+ * ═══ LOS TOKENS DE CACHÉ SE COBRAN Y NO SE ESTABAN CONTANDO ═══
+ *
+ * `usage.input_tokens` de la API EXCLUYE lo servido desde caché y lo escrito al crearla —
+ * van en `cache_read_input_tokens` y `cache_creation_input_tokens`. Como esta función solo
+ * recibía `inputTokens`, todo lo que entraba por caché se costeaba como CERO desde que
+ * existe el bloque cacheable (CU-868kfva91).
+ *
+ * El error iba hacia el lado peligroso, el mismo que motivó las tarifas con vigencia de
+ * CU-868kjc9d6: hacia creer que la IA sale más barata de lo que sale. Es chico en valor
+ * absoluto —la lectura de caché vale una décima parte— pero un ledger de costos que
+ * subestima no sirve para decidir nada.
+ *
+ * Los dos parámetros son opcionales y default 0 para que las llamadas sin caché no cambien
+ * de resultado, y para que el histórico se pueda recalcular tal como se registró.
+ */
 export function estimateCostUsd(
   inputTokens: number,
   outputTokens: number,
   model: string = anthropicModel,
   at: Date = new Date(),
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number {
   const tarifa = resolveRatePerMtok(model, at);
-  return (inputTokens / 1_000_000) * tarifa.input + (outputTokens / 1_000_000) * tarifa.output;
+  const porMillon = (tokens: number, precio: number) => (tokens / 1_000_000) * precio;
+
+  return (
+    porMillon(inputTokens, tarifa.input) +
+    porMillon(outputTokens, tarifa.output) +
+    porMillon(cacheCreationTokens, tarifa.input * CACHE_WRITE_MULTIPLIER) +
+    porMillon(cacheReadTokens, tarifa.input * CACHE_READ_MULTIPLIER)
+  );
 }
 
 export type ClassifiedRow = {
@@ -134,6 +177,9 @@ export type ClassifySheetResult = {
   unusableReason: string | null;
   inputTokens: number;
   outputTokens: number;
+  /** Ver `estimateCostUsd`: NO están incluidos en `inputTokens`. */
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   model: string;
 };
 
@@ -150,88 +196,94 @@ export type ClassifySheetResult = {
 const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
-2. Mapear los campos al esquema común. Clasifica SIEMPRE cada fila con tu propio criterio contable: "type" está limitado a revenue/cogs/opex/other, pero "category" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
-3. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
-4. Asignar "confidence" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
-5. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.
-6. "sheetUsable" es tu válvula de escape y debe ser TRUE casi siempre. Ponlo en false SOLO si esta hoja no contiene movimientos financieros identificables de ninguna forma: es texto libre o notas, es una hoja de gráficas o imágenes, está vacía, o su estructura es tan inconsistente que no se pueden delimitar filas ni distinguir montos de fechas. Que los encabezados sean raros, estén en otro idioma, mezclen mayúsculas, traigan categorías que no reconoces o vengan desordenados NO es razón para false: eso se resuelve clasificando con tu criterio. Si puedes extraer aunque sea algunas filas, "sheetUsable" es true.
-7. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
-8. Extraer "product" solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
-9. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
-10. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "category" del punto 2, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
+2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto y fecha de vencimiento. Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
+3. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
+4. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
+5. Asignar "cf" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
+6. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.
+7. "sheetUsable" es tu válvula de escape y debe ser TRUE casi siempre. Ponlo en false SOLO si esta hoja no contiene movimientos financieros identificables de ninguna forma: es texto libre o notas, es una hoja de gráficas o imágenes, está vacía, o su estructura es tan inconsistente que no se pueden delimitar filas ni distinguir montos de fechas. Que los encabezados sean raros, estén en otro idioma, mezclen mayúsculas, traigan categorías que no reconoces o vengan desordenados NO es razón para false: eso se resuelve clasificando con tu criterio. Si puedes extraer aunque sea algunas filas, "sheetUsable" es true.
+8. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
+9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
+10. La columna "quantity" del mapa se señala solo si la hoja trae unidades explícitas. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
+11. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
-// JSON Schema for structured outputs (output_config.format) — guarantees a valid,
-// parseable shape instead of asking for JSON in prose and hoping. additionalProperties
-// must be false on every object per the API's structured-output constraints; the two
-// payload shapes (transaction vs. invoice/bill) are expressed as anyOf.
-const TRANSACTION_PAYLOAD_SCHEMA = {
+/**
+ * ESQUEMA COMPACTO — el cambio que baja el costo y el tiempo a la vez (2026-08-12).
+ *
+ * El esquema anterior pedía la fila RECONSTRUIDA: nueve campos por fila con sus valores, y
+ * structured outputs obligaba a que vinieran los nueve incluso en null. Medido: ~71 tokens
+ * de salida por fila, y el 95,7 % del costo del recibo era salida. Como el modelo genera
+ * token por token, esos mismos tokens eran también los 40-50 minutos de espera.
+ *
+ * Siete de esos nueve campos ya los tenía el backend: se los mandó él en la fila cruda.
+ *
+ * Ahora el modelo devuelve UNA VEZ el mapa de columnas y POR FILA solo lo que exige criterio:
+ * a qué entidad va, el tipo contable, la categoría y su confianza. Los valores los arma el
+ * código con `lib/row-assembly.ts`, y el payload que sale es idéntico al de antes — nada
+ * aguas abajo se entera.
+ *
+ * Los nombres de campo son cortos a propósito (`i`, `e`, `t`, `c`, `cf`): en un arreglo de
+ * cientos de filas, el nombre de la clave se repite en cada una y es tokens de salida como
+ * cualquier otro.
+ */
+export const CLASSIFY_ROWS_SCHEMA = {
   type: 'object',
   properties: {
-    type: { type: 'string', enum: ['revenue', 'cogs', 'opex', 'other'] },
-    category: { type: 'string' },
-    date: { type: 'string', description: 'YYYY-MM-DD' },
-    description: { type: ['string', 'null'] },
-    originalAmount: { type: 'number' },
-    originalCurrency: { type: 'string', enum: ['GTQ', 'USD'] },
-    // Nombre del producto o servicio, cuando la fila lo trae. `null` explícito y no
-    // campo ausente: structured outputs exige listar todas las claves en `required`, y
-    // dejar que el modelo omita el campo produciría payloads de forma variable.
-    product: { type: ['string', 'null'], description: 'Nombre del producto o servicio' },
-    // Unidades de la fila. `number|null` y no un default 0: 0 unidades vendidas y "esta
-    // fila no habla de unidades" (un alquiler, un total) son cosas distintas, y sobre la
-    // segunda no se puede promediar.
-    quantity: {
-      type: ['number', 'null'],
-      description: 'Unidades que mueve la fila, solo si la fila las trae explícitamente',
+    /**
+     * El mapa de columnas de ESTA hoja, por índice base 0 sobre la fila cruda. `null` cuando
+     * la hoja no trae esa columna — que es información legítima, no un fallo.
+     */
+    columns: {
+      type: 'object',
+      properties: {
+        date: { type: ['integer', 'null'] },
+        amount: { type: ['integer', 'null'] },
+        currency: { type: ['integer', 'null'] },
+        description: { type: ['integer', 'null'] },
+        counterparty: { type: ['integer', 'null'] },
+        product: { type: ['integer', 'null'] },
+        quantity: { type: ['integer', 'null'] },
+        productCategory: { type: ['integer', 'null'] },
+        dueDate: { type: ['integer', 'null'] },
+      },
+      required: [
+        'date',
+        'amount',
+        'currency',
+        'description',
+        'counterparty',
+        'product',
+        'quantity',
+        'productCategory',
+        'dueDate',
+      ],
+      additionalProperties: false,
     },
-    // Familia comercial del producto. Distinta de `category`, que clasifica el MOVIMIENTO
-    // contable (revenue/cogs/opex): un mismo producto puede aparecer en una fila de venta
-    // y en una de compra, y su familia es la misma en ambas.
-    productCategory: {
-      type: ['string', 'null'],
-      description: 'Familia comercial del producto de esta fila (bebidas, abarrotes…)',
-    },
-  },
-  required: [
-    'type',
-    'category',
-    'date',
-    'description',
-    'originalAmount',
-    'originalCurrency',
-    'product',
-    'quantity',
-    'productCategory',
-  ],
-  additionalProperties: false,
-} as const;
-
-const INVOICE_LIKE_PAYLOAD_SCHEMA = {
-  type: 'object',
-  properties: {
-    counterparty: { type: 'string' },
-    issueDate: { type: 'string', description: 'YYYY-MM-DD' },
-    dueDate: { type: ['string', 'null'] },
-    originalAmount: { type: 'number' },
-    originalCurrency: { type: 'string', enum: ['GTQ', 'USD'] },
-  },
-  required: ['counterparty', 'issueDate', 'dueDate', 'originalAmount', 'originalCurrency'],
-  additionalProperties: false,
-} as const;
-
-const CLASSIFY_ROWS_SCHEMA = {
-  type: 'object',
-  properties: {
     rows: {
       type: 'array',
       items: {
         type: 'object',
         properties: {
-          targetEntity: { type: 'string', enum: ['transaction', 'invoice', 'bill'] },
-          confidence: { type: 'number' },
-          payload: { anyOf: [TRANSACTION_PAYLOAD_SCHEMA, INVOICE_LIKE_PAYLOAD_SCHEMA] },
+          i: { type: 'integer', description: 'Índice base 0 de la fila dentro del lote.' },
+          e: { type: 'string', enum: ['transaction', 'invoice', 'bill'] },
+          /*
+           * `anyOf` y no `{type:['string','null'], enum:[...,null]}`. La segunda forma es
+           * JSON Schema válido y la API la RECHAZA con 400 antes de generar nada:
+           * "Enum value 'revenue' does not match declared type '['string','null']'".
+           * Lo atrapó la primera llamada real contra el archivo del cliente; costó cero
+           * tokens, pero en producción habría sido el 100 % de los documentos fallando.
+           */
+          t: {
+            anyOf: [
+              { type: 'string', enum: ['revenue', 'cogs', 'opex', 'other'] },
+              { type: 'null' },
+            ],
+            description: 'Solo para transaction; null en invoice/bill.',
+          },
+          c: { type: ['string', 'null'], description: 'Categoría, texto libre en snake_case.' },
+          cf: { type: 'number', description: 'Confianza 0 a 1.' },
         },
-        required: ['targetEntity', 'confidence', 'payload'],
+        required: ['i', 'e', 't', 'c', 'cf'],
         additionalProperties: false,
       },
     },
@@ -239,13 +291,7 @@ const CLASSIFY_ROWS_SCHEMA = {
      * La válvula de escape. Sin ella, un archivo que no es un libro contable —notas
      * sueltas, una hoja de gráficas, un formato tan inconsistente que no se pueden
      * delimitar filas— no tenía forma de reportarse: el modelo devolvía `rows: []` y
-     * el documento terminaba en `review` con cero filas que revisar. El cliente veía
-     * "En revisión" para siempre y Macha una revisión interna vacía.
-     *
-     * Es un campo aparte y no un `rows` vacío porque hacen falta las dos cosas
-     * distinguidas: "no había nada que clasificar en esta hoja" (una pestaña de
-     * portada, normal en cualquier libro) vs. "esto no es procesable y hay que
-     * decírselo al cliente".
+     * el documento terminaba en `review` con cero filas que revisar.
      */
     sheetUsable: { type: 'boolean' },
     unusableReason: {
@@ -253,7 +299,7 @@ const CLASSIFY_ROWS_SCHEMA = {
       description: 'Solo si sheetUsable es false: qué tiene el archivo, en una frase.',
     },
   },
-  required: ['rows', 'sheetUsable', 'unusableReason'],
+  required: ['columns', 'rows', 'sheetUsable', 'unusableReason'],
   additionalProperties: false,
 } as const;
 
@@ -302,6 +348,16 @@ export async function classifySheetRows(params: {
   templateVersion: Pick<typeof industryTemplateVersions.$inferSelect, 'synonyms' | 'fewShot'>;
   sheetName: string;
   rows: unknown[][];
+  /** Moneda de la empresa: se usa cuando la hoja no trae columna de moneda. */
+  baseCurrency: string;
+  /**
+   * Fila de encabezados de la hoja, si la tiene. Va SIEMPRE en el prompt aunque el lote no
+   * la contenga: los lotes 2 en adelante no la traen, y sin ella el modelo tendría que
+   * adivinar el mapa de columnas a partir de puros valores en cada lote — el mismo mapa
+   * saldría distinto en el lote 1 y en el 5, y los datos del cliente quedarían desplazados
+   * en la mitad de la hoja. No se agrega a `rows` para no correr los índices.
+   */
+  headerRow?: unknown[];
 }): Promise<ClassifySheetResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
@@ -319,7 +375,12 @@ export async function classifySheetRows(params: {
           buildIndustryTemplateBlock(params.templateVersion),
           {
             type: 'text',
-            text: `Hoja: "${params.sheetName}"\nFilas crudas (una por línea, array JSON de celdas):\n${rowsText}`,
+            text:
+              `Hoja: "${params.sheetName}"\n` +
+              (params.headerRow
+                ? `Encabezados de la hoja (los índices de "columns" son sobre este array): ${JSON.stringify(params.headerRow)}\n`
+                : '') +
+              `Filas crudas (una por línea, array JSON de celdas; "i" es su posición en esta lista, empezando en 0):\n${rowsText}`,
           },
         ],
       },
@@ -337,15 +398,53 @@ export async function classifySheetRows(params: {
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
   if (!textBlock) throw new Error('Claude response had no text block');
 
-  let parsed: { rows: ClassifiedRow[]; sheetUsable: boolean; unusableReason: string | null };
+  let parsed: {
+    columns: ColumnMap;
+    rows: {
+      i: number;
+      e: ClassifiedRow['targetEntity'];
+      t: RowVerdict['type'];
+      c: string | null;
+      cf: number;
+    }[];
+    sheetUsable: boolean;
+    unusableReason: string | null;
+  };
   try {
     parsed = JSON.parse(textBlock.text);
   } catch (err) {
     throw new Error('Claude response was not valid JSON despite structured output', { cause: err });
   }
 
+  /*
+   * ACÁ SE ARMA EL PAYLOAD, con la fila cruda que ya teníamos y el mapa que el modelo
+   * devolvió una sola vez. Antes esto venía reconstruido en la respuesta: nueve campos por
+   * fila, y el 95,7 % del costo —y del tiempo— era eso.
+   *
+   * Un `i` fuera de rango se DESCARTA en vez de tumbar el lote: el modelo puede devolver un
+   * índice que no existe, y perder una fila de trescientas es mejor que perder las
+   * trescientas. La fila descartada simplemente no llega a staging, igual que una que el
+   * modelo hubiera decidido ignorar por no ser un dato.
+   */
+  const rows: ClassifiedRow[] = parsed.rows.flatMap((v) => {
+    const row = params.rows[v.i];
+    if (!row) return [];
+    return [
+      {
+        targetEntity: v.e,
+        confidence: typeof v.cf === 'number' ? v.cf : 0,
+        payload: assemblePayload({
+          verdict: { i: v.i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf },
+          row,
+          columns: parsed.columns,
+          baseCurrency: params.baseCurrency,
+        }),
+      },
+    ];
+  });
+
   return {
-    rows: parsed.rows,
+    rows,
     // `?? true` deliberado: ante la duda, procesable. El campo es `required` en el
     // esquema, pero si alguna vez faltara, el sesgo correcto es seguir clasificando —
     // el costo de tratar un archivo bueno como ilegible (se lo rebotamos al cliente)
@@ -354,6 +453,11 @@ export async function classifySheetRows(params: {
     unusableReason: parsed.unusableReason ?? null,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }
@@ -387,6 +491,9 @@ export type NarrativeResult = {
   narrative: string;
   inputTokens: number;
   outputTokens: number;
+  /** Ver `estimateCostUsd`: NO están incluidos en `inputTokens`. */
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   model: string;
 };
 
@@ -510,6 +617,11 @@ export async function generateInsightNarrative(
     narrative,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }
@@ -584,6 +696,11 @@ export async function generateReportNarrative(
     narrative: textBlock.text,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    // `?? 0`: los campos solo vienen cuando la petición lleva un bloque `cache_control`.
+    // Ausente significa "no se usó caché", que numéricamente es cero — no es un dato
+    // faltante que haya que distinguir.
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: message.usage.cache_creation_input_tokens ?? 0,
     model: message.model,
   };
 }

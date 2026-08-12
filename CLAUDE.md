@@ -40,7 +40,33 @@ Conventions & gotchas:
 - **Dos GUC por request, no uno** (CU-868kj3utc, migración `0012`): `app.user_id` se setea con `SET LOCAL` en cuanto se verifica el JWT, y `app.company_id` solo después de resolver la membresía — ambos sobre **la misma conexión reservada**. La política de `company_users` permite leer por empresa **o por usuario**, porque es la tabla donde se descubre la empresa y no se puede filtrar por algo que aún no se conoce. Un `SECURITY DEFINER` no sirve aquí: `FORCE ROW LEVEL SECURITY` (0010) también sujeta al dueño. Y toda política usa `nullif(current_setting(...), '')`: un GUC revertido al cerrar la transacción vale cadena vacía, no NULL, y `''::uuid` lanza error en la siguiente request de esa conexión.
 - **Two DB roles, not one**: `DATABASE_URL` (owner, runs migrations/seed/provision CLI) vs `APP_DATABASE_URL` (restricted `macha_app`, what the running app actually connects as — `src/db/client.ts`). Falls back to `DATABASE_URL` if `APP_DATABASE_URL` is unset, but the RLS/append-only guarantees are then no-ops for the app's own queries (owner bypasses both). `macha_app`'s password isn't in any migration/env file — an operator sets it once directly against Railway's Postgres, then sets `APP_DATABASE_URL`.
 - **Schema migrations auto-apply on deploy** (gated by manual promote to prod). Data/seed migrations run as separate manual scripts — never mix them.
-- **Excel ingestion is async via pg-boss.** One Claude call per sheet; rows land in a single staging table.
+- **Excel ingestion is async via pg-boss.** Rows land in a single staging table.
+  **Tres filtros ANTES del modelo (2026-08-12), en este orden** — cada uno existe porque el
+  anterior no cubre su caso, y saltárselos es volver a pagar lo que ya se pagó:
+  1. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
+     (clientes, proveedores, inventario, productos, tiendas) no llegan al modelo. Los archivos
+     reales de PYME son volcados operativos completos, no exportes contables: ~31% de las filas.
+     El sesgo es deliberado hacia PAGAR DE MÁS — `unknown` siempre va al modelo, porque
+     descartar de más pierde contabilidad del cliente en silencio.
+  2. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
+     el cliente resube su contabilidad completa cada semana. La huella lleva un **ordinal**
+     contado por CONTENIDO, no por posición, para que dos ventas idénticas el mismo día no se
+     colapsen y reordenar el archivo no lo haga parecer nuevo. Se registran en la MISMA
+     transacción que el lote: registrarlas antes perdería las filas para siempre si la llamada
+     falla.
+  3. **Planificador de lotes** (`lib/sheet-batching.ts`): el tamaño sale del presupuesto de
+     tokens de SALIDA, no del conteo de filas.
+- **El modelo NO devuelve los valores de la fila** (2026-08-12). Devuelve el mapa de columnas
+  UNA VEZ por hoja y por fila solo `{i, e, t, c, cf}`; los valores los arma el código indexando
+  la celda (`lib/row-assembly.ts`). El motivo: el 95,7% del recibo eran tokens de salida, y
+  siete de los nueve campos que devolvía ya se los había mandado el backend en la fila cruda.
+  Medido: 290 → 41 tokens de salida por fila, ~50 min → ~1 min por archivo.
+  **Dos reglas tácitas que el modelo aplicaba y ahora viven en código**: el monto entra en
+  **positivo** (la dirección la lleva `type`, y `staging-rules` exige positivo) y las fechas
+  son **seriales de Excel** con época 1899-12-30, acotados a un rango de plausibilidad de
+  negocio para que un MONTO en la columna equivocada no se convierta en una fecha creíble.
+  **`INTAKE_OUTPUT_TOKEN_BUDGET` es el reloj, no solo el tope de corte**: subirlo agranda los
+  lotes y vuelve a alargar la espera, aunque el costo total no cambie.
   **Promotion is PARTIAL (Keneth's call, 2026-08-07 — migration `0020`)**: clean rows promote on their own, only
   flagged rows are held back for internal review, and each one promotes incrementally as staff resolves it. A
   `promoted` document with `flagged_count > 0` is the normal state, not a contradiction. The SQL atomicity still
@@ -50,7 +76,7 @@ Conventions & gotchas:
   Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
   lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
-- **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does.
+- **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
 - Chat: `company_id` injected server-side; tool-use (no RAG, no vector DB).
 

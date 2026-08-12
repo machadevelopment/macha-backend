@@ -137,6 +137,8 @@ export async function maybeCloseSegment(
     model: response.model,
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
+    cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
   });
 
   await db.update(chatSegments).set({ handoffDoc }).where(eq(chatSegments.id, segmentId));
