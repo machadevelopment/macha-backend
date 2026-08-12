@@ -124,6 +124,31 @@ describe('planBatchSize (CU-868kmwdqu)', () => {
     expect(planBatchSize(conFilaRara)).toBeGreaterThanOrEqual(planBatchSize(normal));
   });
 
+  test('la concurrencia no puede pasarse del límite de tasa de la cuenta', () => {
+    /*
+     * Los límites REALES, leídos de las cabeceras `anthropic-ratelimit-*` el 2026-08-12:
+     * 400.000 tokens de salida por minuto. Cada llamada produce ~4.000 tokens en ~28 s, o sea
+     * ~8.600 por minuto sostenidos: por encima de 46 en paralelo se toca el techo.
+     *
+     * El tope está en el config para que subir `INTAKE_BATCH_CONCURRENCY` sin pensar no
+     * convierta la ingesta en una fábrica de 429 — que no rompe, porque el SDK reintenta, pero
+     * gasta en reintentos justo el tiempo que la concurrencia venía a ganar.
+     */
+    expect(intakeConfig.batchConcurrency).toBeLessThanOrEqual(46);
+    expect(intakeConfig.batchConcurrency).toBeGreaterThanOrEqual(1);
+  });
+
+  test('el libro real entra en UNA tanda', () => {
+    // Con concurrencia 10 y ~10 lotes, el archivo del cliente sale en una sola tanda: el
+    // tiempo de pared pasa a ser el de la llamada más lenta, no el doble.
+    const hojas = { Ventas: 521, LineasOC: 221, OrdenesCompra: 61 };
+    const lotes = Object.values(hojas).reduce(
+      (t, filas) => t + Math.ceil(filas / planBatchSize(sheet(filas, 12))),
+      0,
+    );
+    expect(Math.ceil(lotes / intakeConfig.batchConcurrency)).toBe(1);
+  });
+
   test('hoja vacía no produce lotes', () => {
     expect(planBatchSize([])).toBe(0);
   });
