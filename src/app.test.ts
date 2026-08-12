@@ -139,6 +139,17 @@ describe('rutas guardadas — 401 sin token', () => {
     expect((await call('/register/', { method: 'POST', body: '{}' })).status).toBe(401);
   });
 
+  /**
+   * CU-B4-QA-20260811. El catálogo del alta cuelga de `identityDerive` igual que el POST:
+   * sesión verificada, sin exigir empresa. Se comprueba explícitamente porque un 401 es lo
+   * que distingue "montada y protegida" de "no montada" (que daría 404) — y esta ruta es
+   * fácil de dejar sin montar, porque vive en el mismo módulo que el POST y no en uno
+   * propio.
+   */
+  test('GET /register/plans exige token', async () => {
+    expect((await call('/register/plans')).status).toBe(401);
+  });
+
   const adminScoped = [
     '/admin/companies/',
     '/admin/staging-rows/',
