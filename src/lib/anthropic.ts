@@ -358,11 +358,100 @@ export async function classifySheetRows(params: {
   };
 }
 
-export type InsightResult = {
+/**
+ * Categorías del consejo (ronda de QA 2026-08-11, prompt de rediseño §3.4).
+ *
+ * Son CÓDIGOS, no etiquetas: el frontend los traduce a ES/EN, igual que hace con
+ * `ruleKey` de las alertas. Devolver "Cobranza" desde acá obligaría al backend a saber el
+ * idioma del usuario para algo que es una clasificación, no un texto.
+ *
+ * Son exactamente las tres del ticket. `financial` hace de cajón general a propósito: un
+ * insight de costos o de margen entra ahí. Abrir más categorías es una decisión de producto,
+ * no una que se toma escribiendo el enum.
+ */
+export const INSIGHT_CATEGORIES = ['collections', 'sales', 'financial'] as const;
+export type InsightCategory = (typeof INSIGHT_CATEGORIES)[number];
+
+export type InsightItem = { category: InsightCategory; text: string };
+
+/**
+ * Resultado de una narrativa de IA a secas: texto y contabilidad de tokens. Lo devuelve la
+ * narrativa de REPORTE, que no clasifica nada — son 3-4 párrafos ejecutivos, no una lista
+ * de consejos.
+ *
+ * Existe separado de `InsightResult` para no obligar al reporte a devolver un `insights: []`
+ * que no significa "no hubo" sino "acá no aplica". Un array vacío con dos lecturas posibles
+ * es justo el tipo de ambigüedad que después se lee mal en el consumidor.
+ */
+export type NarrativeResult = {
   narrative: string;
   inputTokens: number;
   outputTokens: number;
   model: string;
+};
+
+export type InsightResult = NarrativeResult & {
+  /**
+   * Los insights ya separados y clasificados por el modelo. Es el dato bueno.
+   *
+   * Puede venir VACÍO si el modelo respondió en texto en vez de llamar a la herramienta
+   * (ver `generateInsightNarrative`): en ese caso `narrative` sigue trayendo el texto y el
+   * frontend degrada a mostrarlo sin categorías, que es lo que hacía antes.
+   */
+  insights: InsightItem[];
+  /**
+   * El texto completo. Se CONSERVA aunque ahora haya estructura, por dos razones: es lo
+   * que `insight_requests.result` guarda desde CU-868kfvabk —y ese ledger es append-only,
+   * así que su forma no se cambia a la ligera— y es el respaldo cuando el modelo no usa la
+   * herramienta.
+   */
+  narrative: string;
+};
+
+/**
+ * La estructura se pide por HERRAMIENTA, no metiéndola en el texto del prompt, y esa
+ * decisión es el centro de este cambio.
+ *
+ * El prompt de insight es configurable: vive en `platform_settings.insight_prompt_template`
+ * y un operador puede haberlo reescrito desde Business parameters. Si la instrucción de
+ * "devolvé categorías" viviera en el TEXTO, `DEFAULT_INSIGHT_PROMPT` solo aplicaría a
+ * entornos nuevos —los que ya tienen la fila conservan su prompt— y la clasificación
+ * llegaría vacía en producción sin que nada fallara. Pidiéndola por el esquema de la
+ * herramienta, funciona con cualquier prompt, incluido uno personalizado que no mencione
+ * categorías.
+ */
+const EMIT_INSIGHTS_TOOL: Anthropic.Tool = {
+  name: 'emit_insights',
+  description:
+    'Entrega los insights ya separados y clasificados. Un elemento por insight; no ' +
+    'agrupes dos ideas en uno ni repitas el mismo insight en dos categorías.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      insights: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 5,
+        items: {
+          type: 'object',
+          properties: {
+            category: {
+              type: 'string',
+              enum: [...INSIGHT_CATEGORIES],
+              description:
+                'collections = cobranza y cuentas por cobrar; sales = ventas e ingresos; ' +
+                'financial = margen, costos y salud financiera general.',
+            },
+            text: { type: 'string', description: 'El insight, en una o dos frases.' },
+          },
+          required: ['category', 'text'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['insights'],
+    additionalProperties: false,
+  },
 };
 
 // CU-868kfvafy: default prompt, used only as a fallback when the admin hasn't set
@@ -389,18 +478,63 @@ export async function generateInsightNarrative(
     max_tokens: 1024,
     system: systemPrompt,
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+    tools: [EMIT_INSIGHTS_TOOL],
+    // Se FUERZA la herramienta: sin esto el modelo puede contestar en prosa y la
+    // clasificación no llega. No hay round-trip de tool-use que atender — la respuesta de
+    // la herramienta ES el resultado, no una consulta que haya que responder.
+    tool_choice: { type: 'tool', name: EMIT_INSIGHTS_TOOL.name },
   });
   const message = await runAi('insight_narrative', () => stream.finalMessage());
 
+  const toolBlock = message.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === EMIT_INSIGHTS_TOOL.name,
+  );
+  const insights = parseInsights(toolBlock?.input);
+
+  /*
+   * El texto plano se RECONSTRUYE desde los insights. `insight_requests.result` guarda esta
+   * cadena desde CU-868kfvabk y ese ledger es append-only: cambiarle la forma dejaría las
+   * filas viejas y las nuevas sin comparación posible. Con `\n\n` entre insights, además,
+   * el frontend que ya partía por párrafo sigue funcionando sin saber de categorías.
+   */
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
-  if (!textBlock) throw new Error('Claude response had no text block');
+  const narrative = insights.length
+    ? insights.map((i) => i.text).join('\n\n')
+    : (textBlock?.text ?? '');
+
+  // Sin insights Y sin texto no hay nada que mostrar: es un fallo, no un insight vacío.
+  if (!narrative) throw new Error('Claude response had neither insights nor text');
 
   return {
-    narrative: textBlock.text,
+    insights,
+    narrative,
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
     model: message.model,
   };
+}
+
+/**
+ * Valida la salida de la herramienta antes de creerle.
+ *
+ * `tool_use.input` es `unknown` por contrato del SDK, y un modelo puede devolver una
+ * categoría fuera del enum aunque el esquema la restrinja. Un elemento inválido se DESCARTA
+ * en vez de tumbar la respuesta entera: perder un insight de tres es mejor que perder los
+ * tres, y el llamador ya sabe manejar la lista vacía.
+ */
+function parseInsights(input: unknown): InsightItem[] {
+  if (!input || typeof input !== 'object' || !('insights' in input)) return [];
+  const raw = (input as { insights: unknown }).insights;
+  if (!Array.isArray(raw)) return [];
+
+  const valid = new Set<string>(INSIGHT_CATEGORIES);
+  return raw.flatMap((item): InsightItem[] => {
+    if (!item || typeof item !== 'object') return [];
+    const { category, text } = item as { category?: unknown; text?: unknown };
+    if (typeof category !== 'string' || !valid.has(category)) return [];
+    if (typeof text !== 'string' || text.trim() === '') return [];
+    return [{ category: category as InsightCategory, text: text.trim() }];
+  });
 }
 
 const REPORT_SYSTEM_PROMPT = (locale: 'es' | 'en') =>
@@ -431,7 +565,7 @@ export async function generateReportNarrative(
   metricsSnapshot: unknown,
   locale: 'es' | 'en',
   systemPrompt?: string,
-): Promise<InsightResult> {
+): Promise<NarrativeResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
 
