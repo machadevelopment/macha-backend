@@ -8,6 +8,17 @@
 // chat/insight son interactivos y NUNCA pasan por el gate — se controlan solo con
 // el token-bucket.
 //
+// El gate contiene lo que DISPARA EL USUARIO, no lo que dispara el sistema
+// (CU-868kjby4z). Los dos kinds de `appliesTo` tienen consumidor real —`excel` en
+// POST /documents y POST /documents/:id/retry, `report_generation` en
+// POST /reports/generate— y ambos son acciones de un usuario que puede repetirlas a
+// voluntad. El fan-out de `report-tick` (un reporte por empresa y período, encolado
+// por el propio sistema) queda DELIBERADAMENTE fuera: gatearlo no protege de nada
+// —nadie puede acelerar el tick— y sí introduce el peor resultado posible, que una
+// empresa se quede sin su reporte del período porque justo tenía la cola ocupada con
+// reportes a demanda. Un job de más en la cola solo espera su turno; un reporte
+// saltado no vuelve.
+//
 // Token-bucket en Redis (llave company_id): dos familias, no una.
 // - `read`: API general de lectura (dashboard, status polling). Generoso porque no
 //   cuesta — el default anterior de 60/min era GLOBAL y se agotaba solo con 5
@@ -88,6 +99,13 @@ export const rateLimitConfig = {
 //   mecanismo funcionando, y ensuciar el feed de errores haría que se ignore.
 //   `company_id` va como tag (no en el mensaje) para que Sentry agrupe por mecanismo
 //   y permita desglosar qué empresas topan y con qué frecuencia.
+//
+// Consumo real del gate de cola (CU-868kjby4z):
+// - `excel`: POST /documents (intake) y POST /documents/:id/retry.
+// - `report_generation`: POST /reports/generate (generación a demanda).
+// - El worker `report-tick` NO pasa por el gate, a propósito (motivo arriba).
+// El test de `src/lib/rate-limit.test.ts` verifica que cada kind de `appliesTo` tenga
+// al menos un llamador real, para que esta lista no vuelva a quedar sin consumidor.
 //
 // Consumo real de los buckets (CU-868kh8qhp):
 // - `ai`: chat (POST /chats/:id/messages) e insight (POST /insights).
