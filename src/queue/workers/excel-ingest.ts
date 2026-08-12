@@ -6,7 +6,8 @@ import { downloadObject } from '@/lib/s3';
 import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
-import { classifySheetRows } from '@/lib/anthropic';
+import { classifySheetRows, assertMismoMapa } from '@/lib/anthropic';
+import type { ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
@@ -169,6 +170,16 @@ export function startExcelIngestWorker(): Promise<string> {
           // runtime es identico; lo que cambia es que el fuente vuelve a ser texto.
           return new Map(rows.map((r) => [`${r.sheetName}\u0000${r.batchIndex}`, r.rowCount]));
         });
+
+        /**
+         * El mapa de columnas que fijó el PRIMER lote de cada hoja. Los demás lotes de esa
+         * hoja tienen que coincidir; ver `assertMismoMapa`.
+         *
+         * `Map` y no una variable por hoja porque los lotes de varias hojas corren mezclados
+         * en la misma tanda concurrente. Escribirlo desde varias tareas es seguro: el bucle de
+         * eventos de Bun no interrumpe entre el `get` y el `set`.
+         */
+        const mapasPorHoja = new Map<string, ColumnMap>();
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -334,6 +345,23 @@ export function startExcelIngestWorker(): Promise<string> {
           // terminal es si el documento COMPLETO no produjo ninguna fila (abajo).
           if (!result.sheetUsable && result.unusableReason) {
             unusableReasons.add(result.unusableReason);
+          }
+
+          /*
+           * ANTES de la transacción, a propósito: si dos lotes de la misma hoja leyeron
+           * columnas distintas, aplicarlos dejaría media hoja con los valores de otra columna
+           * —montos plausibles, ningún error— y comprobarlo después ya sería tarde, porque las
+           * filas estarían insertadas.
+           *
+           * El primer lote de la hoja fija el mapa canónico. Que gane el primero y no la
+           * mayoría es deliberado: la mayoría exigiría esperar a que terminen todos los lotes,
+           * que es exactamente el momento en que ya no se puede evitar el daño.
+           */
+          const canonico = mapasPorHoja.get(sheetName);
+          if (canonico) {
+            assertMismoMapa(sheetName, canonico, result.columns);
+          } else {
+            mapasPorHoja.set(sheetName, result.columns);
           }
 
           await withCompanyScope(companyId, async (db) => {
