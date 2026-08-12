@@ -27,7 +27,10 @@ export async function insertAiUsageEvent(
     model: params.model,
     inputTokens: params.inputTokens,
     outputTokens: params.outputTokens,
-    costUsd: estimateCostUsd(params.inputTokens, params.outputTokens).toFixed(6),
+    // CU-868kjc9d6: el costo se calcula con la tarifa del MODELO de esta llamada y
+    // vigente HOY, no con una constante global. `params.model` es el que de verdad
+    // atendió la llamada, que es el único que puede cotizarse bien.
+    costUsd: estimateCostUsd(params.inputTokens, params.outputTokens, params.model).toFixed(6),
     billableUnits: params.billableUnits,
   });
 }
