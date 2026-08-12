@@ -104,6 +104,12 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/credits/topup/', { method: 'POST', body: '{}' }],
     ['/chats/', undefined],
     ['/reports/', undefined],
+    // CU-B2-QA-20260811. Las tres rutas nuevas de reportes a demanda entran en esta lista
+    // por la misma razón que `/metrics/period`: una ruta que existe en el módulo pero no
+    // llegó a montarse responde 404, no 401, y este es el único test que lo distingue.
+    ['/reports/catalog', undefined],
+    ['/reports/generate', { method: 'POST', body: '{}' }],
+    ['/reports/00000000-0000-4000-8000-000000000000/export/pdf', undefined],
     ['/alerts/', undefined],
     ['/alert-rules/', undefined],
     ['/alert-rules/ar_overdue', { method: 'PATCH', body: '{}' }],
