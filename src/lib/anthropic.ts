@@ -207,6 +207,15 @@ function construirFilas(
 export type ClassifySheetResult = {
   rows: ClassifiedRow[];
   /**
+   * El mapa de columnas que este lote usó para armar los valores.
+   *
+   * Se expone para que el llamador pueda COMPARARLO entre los lotes de una misma hoja. Cada
+   * lote lo pide por su cuenta, así que nada garantiza que coincidan — y si el lote 3 dice
+   * que el monto es la columna 13 y el lote 7 dice que es la 8, media hoja entra con el monto
+   * equivocado, plausible y sin un solo error. Ver `assertMismoMapa`.
+   */
+  columns: ColumnMap;
+  /**
    * Índices (sobre las filas enviadas) que el modelo NO cubrió ni en el primer intento ni en
    * el reintento. El worker los manda a staging con confianza 0 para que caigan en revisión:
    * que un humano los vea es lento, perderlos es peor.
@@ -458,6 +467,55 @@ export class SheetIndexShiftError extends Error {
 }
 
 /**
+ * ═══ EL MAPA DE COLUMNAS TIENE QUE SER EL MISMO EN TODA LA HOJA ═══
+ *
+ * Cada lote le pide el mapa al modelo por su cuenta, y hasta acá nada obligaba a que las
+ * respuestas coincidieran. Si el lote 3 decide que el monto es la columna 13 y el lote 7 que
+ * es la 8, la primera mitad de la hoja entra con `TotalLinea` y la segunda con
+ * `PrecioUnitario`: montos plausibles, ningún error, y la contabilidad del cliente mal a la
+ * mitad.
+ *
+ * Es el último modo de corrupción silenciosa que quedaba en la ingesta. Medido el 2026-08-12
+ * sobre tres lotes bien separados de la misma hoja real, los tres mapas coincidieron — o sea
+ * que hoy no está pasando. Pero "no está pasando" no es una garantía, y el costo de
+ * comprobarlo es una comparación de nueve enteros.
+ *
+ * Se compara contra el PRIMER mapa de la hoja y no por mayoría: la mayoría exigiría esperar a
+ * que terminen todos los lotes, y para entonces las filas ya estarían insertadas. Esto corre
+ * ANTES de la transacción del lote, así que un mapa discrepante no llega a escribir nada.
+ */
+export function assertMismoMapa(sheetName: string, canonico: ColumnMap, delLote: ColumnMap): void {
+  const difieren = (Object.keys(canonico) as (keyof ColumnMap)[]).filter(
+    (k) => canonico[k] !== delLote[k],
+  );
+  if (difieren.length === 0) return;
+
+  throw new SheetColumnMapMismatchError(
+    sheetName,
+    difieren.map((k) => `${k}: ${canonico[k]} vs ${delLote[k]}`),
+  );
+}
+
+/**
+ * Dos lotes de la misma hoja leyeron columnas distintas. Tipo propio porque la acción no es
+ * obvia: NO es reintentar el prompt ni revisar el proveedor. Es que la hoja es ambigua para
+ * el modelo —columnas parecidas, encabezados repetidos— y hay que mirarla.
+ */
+export class SheetColumnMapMismatchError extends Error {
+  constructor(
+    readonly sheetName: string,
+    readonly diferencias: string[],
+  ) {
+    super(
+      `Dos lotes de la hoja "${sheetName}" leyeron columnas distintas (${diferencias.join('; ')}). ` +
+        `Aplicarlos dejaría media hoja con los valores de otra columna, sin error visible. ` +
+        `Lote abortado antes de escribir nada.`,
+    );
+    this.name = 'SheetColumnMapMismatchError';
+  }
+}
+
+/**
  * One Claude call per sheet/batch (CU-868kfva8v): classifies target_entity + maps
  * fields, using structured outputs (output_config.format) for a guaranteed-parseable
  * response instead of prompting for JSON and hoping. Streaming + a generous max_tokens
@@ -583,6 +641,7 @@ export async function classifySheetRows(params: {
       // Lo que sí vino del primer intento, más lo que rescató el reintento. Los payloads del
       // reintento ya se armaron contra las MISMAS filas crudas, así que se concatenan tal cual.
       rows: [...construirFilas(porIndice, params, parsed.columns), ...reintento.rows],
+      columns: parsed.columns,
       // `unclassifiedRows` del reintento indexa SU lote; se remapea a los índices originales.
       unclassifiedRows: reintento.unclassifiedRows.map((k) => faltantes[k]!),
       sheetUsable: parsed.sheetUsable ?? true,
@@ -643,6 +702,7 @@ export async function classifySheetRows(params: {
 
   return {
     rows,
+    columns: parsed.columns,
     /*
      * Las filas que ni el primer intento ni el reintento cubrieron. NO se pierden: el worker
      * las manda a staging con confianza 0 para que caigan en revisión interna. Es la válvula
