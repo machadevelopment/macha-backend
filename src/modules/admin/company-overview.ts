@@ -28,7 +28,7 @@ import { getCreditBalances } from '@/lib/credits';
  * `/admin/companies/:id/credits` es POR EMPRESA. Pintar una página de 50 empresas
  * cruzando saldo y costo desde el navegador son 50 peticiones de saldo más la del
  * listado más la de costos — y cada una de esas 50, del lado del backend, reserva su
- * propia conexión con `app.cross_tenant` puesto (`admin.guard`). Aquí son CUATRO
+ * propia conexión con el escape cross-tenant puesto (`admin.guard`). Aquí son CUATRO
  * consultas para toda la página, sin importar cuántas empresas traiga: el listado, los
  * saldos, los totales de IA y las suscripciones. El costo no crece con las filas.
  *
@@ -96,7 +96,7 @@ export const adminCompanyOverview = new Elysia({ prefix: '/admin/companies' })
       const ids = filas.map((c) => c.id);
 
       // Las tres agregaciones van EN SERIE a propósito. `db` aquí es la conexión
-      // reservada del request (una sola, con `app.cross_tenant` puesto): postgres.js
+      // reservada del request (una sola, con el escape cross-tenant puesto): postgres.js
       // encola las consultas de una misma conexión, así que un `Promise.all` no las
       // paralelizaría — solo escondería que no lo hace.
       const saldos = await getCreditBalances(db, ids);
