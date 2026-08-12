@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { platformSettings } from '@/db/schema';
+import { platformSettings, staff, users } from '@/db/schema';
 
 // CU-868kfvafy criterio 1 (no negociable): créditos↔tokens y el catálogo de prompts
 // de insight configurables desde el panel, nunca en código. Estas son las claves +
@@ -29,16 +29,45 @@ export async function getPlatformSetting<T>(db: DB, key: string, fallback: T): P
   return row ? (row.value as T) : fallback;
 }
 
-export async function getAllPlatformSettings(
-  db: DB,
-): Promise<{ key: string; value: unknown; updatedAt: Date }[]> {
+/**
+ * Devuelve además QUIÉN tocó cada parámetro (ronda de QA 2026-08-11, ticket B7).
+ *
+ * `platform_settings.updated_by` guarda un `staff.id` desde siempre y NUNCA salía de acá,
+ * así que el panel solo podía mostrar la fecha. En una pantalla donde se edita el precio
+ * del crédito y la equivalencia crédito↔token, "cambió el 9 de agosto" sin decir quién es
+ * la mitad del dato: si un número está mal, lo primero que se pregunta es a quién
+ * preguntarle.
+ *
+ * SE DEVUELVE EL CORREO, no el `staff.id`. Un UUID no le dice nada a un operador — es el
+ * mismo hallazgo que CU-868khvzqn arregló en `/admin/documents` sumando el nombre de la
+ * empresa al join. El camino es `platform_settings.updated_by → staff.id → staff.user_id →
+ * users.email`, dos saltos porque `staff` es la identidad interna y `users` la de la
+ * persona.
+ *
+ * `leftJoin` y no `innerJoin`, dos veces: una fila sembrada por `scripts/seed.ts` tiene
+ * `updated_by` en NULL, y un staff dado de baja podría quedar sin fila. Con `innerJoin`
+ * esas filas DESAPARECERÍAN de la lista — el panel dejaría de mostrar parámetros que
+ * existen y se editan, que es mucho peor que no saber quién los tocó.
+ */
+export async function getAllPlatformSettings(db: DB): Promise<
+  {
+    key: string;
+    value: unknown;
+    updatedAt: Date;
+    /** `null` cuando la fila viene del seed o el staff ya no existe. */
+    updatedByEmail: string | null;
+  }[]
+> {
   return db
     .select({
       key: platformSettings.key,
       value: platformSettings.value,
       updatedAt: platformSettings.updatedAt,
+      updatedByEmail: users.email,
     })
-    .from(platformSettings);
+    .from(platformSettings)
+    .leftJoin(staff, eq(staff.id, platformSettings.updatedBy))
+    .leftJoin(users, eq(users.id, staff.userId));
 }
 
 export async function setPlatformSetting(

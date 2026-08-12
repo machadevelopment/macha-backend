@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/bun';
 import { env } from '@/lib/env';
 import { AiProviderError, aiFailureMessage, aiFailureStatus } from '@/lib/ai-errors';
 import { adminCompanies } from '@/modules/admin/companies';
+import { adminCompanyOverview } from '@/modules/admin/company-overview';
 import { adminStagingRows } from '@/modules/admin/staging-rows';
 import { adminIndustryTemplates } from '@/modules/admin/industry-templates';
 import { adminConfig } from '@/modules/admin/config';
@@ -11,6 +12,8 @@ import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminCredits } from '@/modules/admin/credits';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
+import { adminPlans } from '@/modules/admin/plans';
+import { clientPlans } from '@/modules/billing/plans';
 import { alerts } from '@/modules/alerts';
 import { clientAlertRules } from '@/modules/alert-rules';
 import { register } from '@/modules/billing/register';
@@ -49,32 +52,58 @@ import { reports_ } from '@/modules/reports';
  * tuviera que recrear la lista de `.use()` a mano dejaría de representar lo que se
  * despliega en cuanto alguien agregue un módulo aquí y no allá. Ver `src/app.test.ts`.
  */
+/**
+ * ⚠️ LOS MÓDULOS VAN AGRUPADOS EN DOS PLUGINS, Y NO ES ORGANIZACIÓN COSMÉTICA.
+ *
+ * `createApp` era una sola cadena de ~30 `.use()`. Cada eslabón acumula tipos en el
+ * genérico de Elysia, y al agregar los dos módulos de planes (ticket B3) `tsc` cortó con
+ * `TS2589: Type instantiation is excessively deep and possibly infinite` sobre
+ * `export type App = ReturnType<typeof createApp>`. No es un error del código: es el
+ * compilador llegando a su tope de profundidad.
+ *
+ * Partirlo en dos plugins baja la profundidad de la cadena a la mitad y deja margen para
+ * los módulos que vengan. La app compuesta es EXACTAMENTE la misma —`.use()` de un plugin
+ * que a su vez hizo `.use()` es lo mismo que hacerlos en línea— y `app.test.ts` sigue
+ * ejercitando la app entera, que era el punto de que este archivo exista.
+ *
+ * Si vuelve a aparecer TS2589 al sumar módulos, la salida es la misma: otro grupo, no
+ * ensanchar el tipo de `App`.
+ */
+const clientApi = new Elysia()
+  .use(health)
+  .use(ingestion)
+  .use(industryTemplateDownload)
+  .use(metrics)
+  .use(arAp)
+  .use(metricsPeriod)
+  .use(metricsProducts)
+  .use(metricsCategories)
+  .use(inventory)
+  .use(insights)
+  .use(creditsBalance)
+  .use(chats_)
+  .use(reports_)
+  .use(alerts)
+  .use(clientAlertRules)
+  .use(clientPlans);
+
+const adminApi = new Elysia()
+  .use(adminCompanies)
+  .use(adminCompanyOverview)
+  .use(adminStagingRows)
+  .use(adminIndustryTemplates)
+  .use(adminConfig)
+  .use(adminFxRates)
+  .use(adminCreditRules)
+  .use(adminCredits)
+  .use(adminAlertRules)
+  .use(adminMonitoring)
+  .use(adminPlans);
+
 export function createApp() {
   return new Elysia()
-    .use(health)
-    .use(ingestion)
-    .use(industryTemplateDownload)
-    .use(metrics)
-    .use(arAp)
-    .use(metricsPeriod)
-    .use(metricsProducts)
-    .use(metricsCategories)
-    .use(inventory)
-    .use(insights)
-    .use(creditsBalance)
-    .use(chats_)
-    .use(reports_)
-    .use(alerts)
-    .use(clientAlertRules)
-    .use(adminCompanies)
-    .use(adminStagingRows)
-    .use(adminIndustryTemplates)
-    .use(adminConfig)
-    .use(adminFxRates)
-    .use(adminCreditRules)
-    .use(adminCredits)
-    .use(adminAlertRules)
-    .use(adminMonitoring)
+    .use(clientApi)
+    .use(adminApi)
     .use(register)
     .use(creditsTopup)
     .use(billingWebhooks)

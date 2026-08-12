@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { Glob } from 'bun';
+import { join } from 'node:path';
 
 process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
 
@@ -81,6 +83,59 @@ describe('checkTokenBucket (CU-868kh8qhp — rate limiting de la API de lectura)
     expect(rateLimitConfig.tokenBucket.ai.burst).toBeLessThan(
       rateLimitConfig.tokenBucket.read.burst,
     );
+  });
+});
+
+/**
+ * CU-868kjby4z. El bug que cierra este ticket no era de lógica sino de CONTRATO: la
+ * config declaraba dos kinds gateados y solo uno tenía llamador, así que quien leía
+ * `appliesTo` creía que los reportes estaban gateados y no lo estaban. Mismo patrón
+ * que CU-868kh8qhp (el bucket `read` configurado y sin usar).
+ *
+ * Un test de comportamiento no lo habría atrapado —ambas mitades funcionan bien por
+ * separado, lo que faltaba era la llamada—, así que se verifica sobre el código: cada
+ * kind declarado tiene que aparecer en un `checkQueueGate(..., '<kind>')` real. Si
+ * mañana alguien agrega un kind a `appliesTo` sin cablearlo, o borra el único llamador
+ * de uno existente, esto falla en vez de quedarse como config que miente.
+ *
+ * Se excluye `lib/rate-limit.ts` del barrido porque es donde vive la FIRMA de
+ * `checkQueueGate` (los kinds aparecen ahí como tipos, no como llamadas) y se contaría
+ * a sí misma como consumidor.
+ */
+describe('queueGate.appliesTo (CU-868kjby4z — ningún kind declarado sin consumidor)', () => {
+  const SRC_DIR = join(import.meta.dir, '..');
+  const SELF = 'lib/rate-limit.ts';
+
+  async function callersOf(kind: string): Promise<string[]> {
+    // `[^)]*` cruza saltos de línea, que es justo lo que se necesita: varias llamadas
+    // están partidas en dos líneas por el formateo de prettier.
+    const call = new RegExp(String.raw`checkQueueGate\(\s*[^)]*['"]${kind}['"]`);
+    const found: string[] = [];
+    for await (const rel of new Glob('**/*.ts').scan({ cwd: SRC_DIR })) {
+      const path = rel.replaceAll('\\', '/');
+      if (path.endsWith('.test.ts') || path === SELF) continue;
+      if (call.test(await Bun.file(join(SRC_DIR, rel)).text())) found.push(path);
+    }
+    return found;
+  }
+
+  for (const kind of rateLimitConfig.queueGate.appliesTo) {
+    test(`\`${kind}\` tiene al menos un llamador real de checkQueueGate`, async () => {
+      // Si esto falla: el kind está declarado en `appliesTo` y ningún archivo de src/
+      // lo invoca — o se cablea el llamador, o se saca de la config.
+      expect((await callersOf(kind)).length).toBeGreaterThan(0);
+    });
+  }
+
+  test('el barrido detecta de verdad la ausencia de llamadores (control negativo)', async () => {
+    // Sin esto, un regex roto haría pasar los casos de arriba por la razón equivocada.
+    expect(await callersOf('kind_que_no_existe')).toEqual([]);
+  });
+
+  test('chat e insight NO están declarados en el gate: son interactivos', () => {
+    const declared: readonly string[] = rateLimitConfig.queueGate.appliesTo;
+    expect(declared).not.toContain('chat');
+    expect(declared).not.toContain('insight');
   });
 });
 

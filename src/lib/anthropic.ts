@@ -23,16 +23,98 @@ export function getClient(): Anthropic {
   return client;
 }
 
-// Pricing snapshot for cost_usd on ai_usage_events (claude-api skill reference, cached
-// 2026-06-24): claude-sonnet-5 introductory rate, valid through 2026-08-31. Re-verify
-// against current pricing when the intro window lapses or the model changes.
-const PRICE_PER_MTOK_USD = { input: 2.0, output: 10.0 };
+/**
+ * Precios de Claude para `cost_usd` de `ai_usage_events` — CU-868kjc9d6.
+ *
+ * EL PROBLEMA QUE RESUELVE. Antes había UNA constante con la tarifa introductoria de
+ * `claude-sonnet-5` ($2/$10 por millón de tokens) y un comentario pidiendo revisarla a
+ * mano cuando venciera. Esa tarifa vence el **2026-08-31**; a partir del 2026-09-01 la
+ * de lista es $3/$15. Con una constante fija, el 1 de septiembre `cost_usd` habría
+ * seguido registrando el precio viejo sin fallar nada: cada fila del ledger —que es
+ * append-only, así que no se corrige— habría subestimado el costo real un 33%, y el
+ * tablero de costos de IA del admin habría mentido a la baja justo en la dirección
+ * peligrosa (creer que la IA sale más barata de lo que sale).
+ *
+ * LA FORMA DE LA SOLUCIÓN. En vez de un valor con recordatorio humano, cada modelo
+ * declara sus tarifas CON VIGENCIA. `estimateCostUsd` resuelve la que aplica a la fecha
+ * del evento, así que el cruce del 2026-08-31 ocurre solo, sin deploy y sin que nadie
+ * se acuerde. Un tramo vencido no se borra: las tarifas viejas siguen siendo la
+ * respuesta correcta para recalcular un evento pasado.
+ *
+ * Fuente: referencia de la skill `claude-api`, verificada el 2026-08-12. Las tarifas
+ * son de la API de primera parte de Anthropic (no de Bedrock/Vertex, que facturan
+ * aparte). Al cambiar de modelo hay que agregar su entrada aquí — y re-verificar ZDR,
+ * ver `assertZdrModel`.
+ */
+type RateWindow = {
+  /** Primer día (UTC, inclusive) en que rige la tarifa. */
+  readonly from: string;
+  /** Último día (UTC, inclusive), o null si es la vigente sin fecha de término. */
+  readonly through: string | null;
+  readonly input: number;
+  readonly output: number;
+};
 
-export function estimateCostUsd(inputTokens: number, outputTokens: number): number {
-  return (
-    (inputTokens / 1_000_000) * PRICE_PER_MTOK_USD.input +
-    (outputTokens / 1_000_000) * PRICE_PER_MTOK_USD.output
-  );
+const PRICES_PER_MTOK_USD: Record<string, readonly RateWindow[]> = {
+  'claude-sonnet-5': [
+    // Tarifa introductoria. La fecha de fin es la publicada por Anthropic, no una
+    // estimación nuestra.
+    { from: '2026-01-01', through: '2026-08-31', input: 2.0, output: 10.0 },
+    // Tarifa de lista, ya conocida: entra sola el 2026-09-01.
+    { from: '2026-09-01', through: null, input: 3.0, output: 15.0 },
+  ],
+};
+
+/**
+ * Tarifa más cara de todo el catálogo. Es el respaldo cuando no hay tarifa aplicable:
+ * ante la duda se SOBRE-estima, nunca se sub-estima. Un costo inflado se nota al
+ * revisarlo; uno deflactado se confunde con una buena noticia — y el ledger es
+ * append-only, así que la fila mal calculada se queda.
+ */
+function tarifaMasCara(): { input: number; output: number } {
+  const todas = Object.values(PRICES_PER_MTOK_USD).flat();
+  return {
+    input: Math.max(...todas.map((r) => r.input)),
+    output: Math.max(...todas.map((r) => r.output)),
+  };
+}
+
+/** Se avisa UNA vez por (modelo, fecha) para no inundar el log en un lote de ingesta. */
+const avisosEmitidos = new Set<string>();
+
+export function resolveRatePerMtok(
+  model: string,
+  at: Date,
+): { input: number; output: number; exact: boolean } {
+  const dia = at.toISOString().slice(0, 10);
+  const ventanas = PRICES_PER_MTOK_USD[model];
+  const vigente = ventanas?.find((r) => dia >= r.from && (r.through === null || dia <= r.through));
+
+  if (vigente) return { input: vigente.input, output: vigente.output, exact: true };
+
+  // No hay tarifa: modelo sin entrada en el catálogo, o fecha fuera de todo tramo (una
+  // tarifa que venció sin que nadie agregara la siguiente). Los dos casos son un error
+  // de mantenimiento y los dos tienen que GRITAR, que es el punto del ticket.
+  const clave = `${model}@${dia}`;
+  if (!avisosEmitidos.has(clave)) {
+    avisosEmitidos.add(clave);
+    console.warn(
+      `[precios] SIN TARIFA VIGENTE para ${model} en ${dia}: cost_usd se está ` +
+        `calculando con la tarifa más alta del catálogo (sobre-estima). Agregar la ` +
+        `ventana correspondiente en src/lib/anthropic.ts — ver CU-868kjc9d6.`,
+    );
+  }
+  return { ...tarifaMasCara(), exact: false };
+}
+
+export function estimateCostUsd(
+  inputTokens: number,
+  outputTokens: number,
+  model: string = anthropicModel,
+  at: Date = new Date(),
+): number {
+  const tarifa = resolveRatePerMtok(model, at);
+  return (inputTokens / 1_000_000) * tarifa.input + (outputTokens / 1_000_000) * tarifa.output;
 }
 
 export type ClassifiedRow = {
@@ -334,10 +416,21 @@ paragraph executive narrative: what happened, why it matters, and 1-2 recommenda
 NEVER invent or recompute figures — use only the snapshot's. Respond in English, plain
 text, no markdown.`;
 
-/** Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as insights. */
+/**
+ * Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as
+ * insights.
+ *
+ * CU-B2-QA-20260811: `systemPrompt` es opcional y lo arma el llamador
+ * (`lib/report-prompt.ts`) a partir de las SECCIONES pedidas. Se agrega como tercer
+ * parámetro opcional en vez de reemplazar `REPORT_SYSTEM_PROMPT` para que este módulo
+ * siga siendo un cliente puro de Claude —no sabe qué es una sección de reporte— y para
+ * que el fallback por defecto siga siendo exactamente el prompt del tick diario, que no
+ * cambia de comportamiento con este ticket.
+ */
 export async function generateReportNarrative(
   metricsSnapshot: unknown,
   locale: 'es' | 'en',
+  systemPrompt?: string,
 ): Promise<InsightResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
@@ -345,7 +438,7 @@ export async function generateReportNarrative(
   const stream = anthropic.messages.stream({
     model: anthropicModel,
     max_tokens: 2048,
-    system: REPORT_SYSTEM_PROMPT(locale),
+    system: systemPrompt ?? REPORT_SYSTEM_PROMPT(locale),
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
   const message = await runAi('report_narrative', () => stream.finalMessage());

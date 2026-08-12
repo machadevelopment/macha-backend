@@ -23,7 +23,10 @@ export const reports = pgTable(
       .references(() => companies.id),
     periodStart: date('period_start').notNull(),
     periodEnd: date('period_end').notNull(),
-    frequency: text('frequency').$type<'daily' | 'weekly'>().notNull(),
+    // 'on_demand' desde la migración 0022: un reporte pedido por el usuario no tiene
+    // periodicidad, y entra en la clave de búsqueda de `generateReport` para no colgarse
+    // como una versión más del reporte automático del mismo período.
+    frequency: text('frequency').$type<'daily' | 'weekly' | 'on_demand'>().notNull(),
     currentVersionId: uuid('current_version_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

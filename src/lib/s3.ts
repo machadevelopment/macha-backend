@@ -42,6 +42,29 @@ export const uploadKey = (companyId: string, documentId: string, ext: string) =>
 export const reportRenderKey = (companyId: string, reportVersionId: string) =>
   `companies/${companyId}/reports/${reportVersionId}.html`;
 
+/**
+ * Claves de las exportaciones binarias de una versión de reporte (PDF / Excel).
+ *
+ * NO SE GUARDAN EN LA BASE, y eso es una consecuencia directa del ledger, no un descuido:
+ * `report_versions` es append-only (REVOKE UPDATE,DELETE en la migración 0010) y solo
+ * tiene una columna de clave, `s3_render_key`, que ya sostiene el HTML. Una clave
+ * descubierta DESPUÉS del insert no tiene dónde escribirse — el mismo callejón que
+ * documenta CU-868kjc5pj en lib/reports.ts.
+ *
+ * La salida es derivarla en vez de almacenarla: la clave es función pura del
+ * (company_id, version_id), igual que `reportRenderKey`, así que quien tenga la fila
+ * puede reconstruirla siempre. Alternativa descartada: agregar dos columnas y renderizar
+ * los tres formatos al generar, lo que obligaría a pagar dos subidas a S3 por cada
+ * reporte automático diario de cada empresa para formatos que casi nadie abre.
+ *
+ * Prefijadas por company_id como todo lo demás (CLAUDE.md, no negociable).
+ */
+export const reportPdfKey = (companyId: string, reportVersionId: string) =>
+  `companies/${companyId}/reports/${reportVersionId}.pdf`;
+
+export const reportXlsxKey = (companyId: string, reportVersionId: string) =>
+  `companies/${companyId}/reports/${reportVersionId}.xlsx`;
+
 /** Direct server-side upload (the backend receives the multipart file itself and
  * relays it to S3) — as opposed to presignPut, which is for client-direct uploads. */
 export async function uploadObject(

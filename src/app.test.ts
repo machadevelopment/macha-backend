@@ -104,6 +104,12 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/credits/topup/', { method: 'POST', body: '{}' }],
     ['/chats/', undefined],
     ['/reports/', undefined],
+    // CU-B2-QA-20260811. Las tres rutas nuevas de reportes a demanda entran en esta lista
+    // por la misma razón que `/metrics/period`: una ruta que existe en el módulo pero no
+    // llegó a montarse responde 404, no 401, y este es el único test que lo distingue.
+    ['/reports/catalog', undefined],
+    ['/reports/generate', { method: 'POST', body: '{}' }],
+    ['/reports/00000000-0000-4000-8000-000000000000/export/pdf', undefined],
     ['/alerts/', undefined],
     ['/alert-rules/', undefined],
     ['/alert-rules/ar_overdue', { method: 'PATCH', body: '{}' }],
@@ -133,6 +139,17 @@ describe('rutas guardadas — 401 sin token', () => {
     expect((await call('/register/', { method: 'POST', body: '{}' })).status).toBe(401);
   });
 
+  /**
+   * CU-B4-QA-20260811. El catálogo del alta cuelga de `identityDerive` igual que el POST:
+   * sesión verificada, sin exigir empresa. Se comprueba explícitamente porque un 401 es lo
+   * que distingue "montada y protegida" de "no montada" (que daría 404) — y esta ruta es
+   * fácil de dejar sin montar, porque vive en el mismo módulo que el POST y no en uno
+   * propio.
+   */
+  test('GET /register/plans exige token', async () => {
+    expect((await call('/register/plans')).status).toBe(401);
+  });
+
   const adminScoped = [
     '/admin/companies/',
     '/admin/staging-rows/',
@@ -142,10 +159,40 @@ describe('rutas guardadas — 401 sin token', () => {
     '/admin/companies/00000000-0000-0000-0000-000000000000/fx-rates/',
     // CU-868kjc7g5: el ledger de créditos de una empresa, misma razón.
     '/admin/companies/00000000-0000-0000-0000-000000000000/credits/',
+    /**
+     * Ticket B5 — la vista consolidada. Exige token como todo `/admin/*`, y con más
+     * motivo: la respuesta lleva el costo real en USD y los tokens consumidos, cifras de
+     * plataforma que el cliente NUNCA debe ver.
+     */
+    '/admin/companies/overview',
   ];
   for (const path of adminScoped) {
     test(`GET ${path} exige token`, async () => {
       expect((await call(path)).status).toBe(401);
     });
   }
+});
+
+/**
+ * Ticket B5 — la vista consolidada vive en `modules/admin/company-overview.ts`, un
+ * módulo aparte que reusa el prefijo `/admin/companies` de `modules/admin/companies.ts`.
+ * Eso pone `/overview` a competir con el `/:id` del detalle de empresa.
+ *
+ * La lista de arriba NO alcanza para cubrir esto: las dos rutas están detrás del mismo
+ * guard, así que si `/overview` cayera en el handler de `/:id` el 401 saldría igual y
+ * nadie se enteraría hasta ver un 404 de "Company not found" con id `overview` en
+ * producción. Por eso se comprueba el REGISTRO de la ruta, que es lo que decide a qué
+ * handler entra (el router de Elysia resuelve el segmento estático antes que el
+ * dinámico).
+ */
+describe('composición de /admin/companies (ticket B5)', () => {
+  const paths = createApp().routes.map((r) => r.path);
+
+  test('/admin/companies/overview está montada como ruta estática propia', () => {
+    expect(paths).toContain('/admin/companies/overview');
+  });
+
+  test('el detalle por id sigue montado — la consolidada no lo reemplaza', () => {
+    expect(paths).toContain('/admin/companies/:id');
+  });
 });

@@ -163,6 +163,17 @@ describe('visibilidad cross-tenant del admin (CU-868kjc4af)', () => {
     // La garantía real del diseño no es una política de base: es que nada más pueda
     // encender el GUC. Un barrido del fuente lo fija — si alguien lo setea desde otro
     // sitio (un módulo, un worker, un helper), este test lo señala por nombre.
+    //
+    // SI ESTE TEST TE FALLA Y NO ESTÁS SETEANDO EL GUC: el barrido es un regex sobre el
+    // texto crudo, así que una simple MENCIÓN en un comentario también lo dispara. Pasó
+    // el 2026-08-11 con `modules/admin/company-overview.ts`, que solo lo documentaba.
+    //
+    // La salida es REFORMULAR EL COMENTARIO ("el escape cross-tenant", "el GUC del
+    // guard"), NO afinar el chequeo para que ignore comentarios. Este test vale
+    // precisamente por ser tonto: es el único guardia de que nada fuera de `admin.guard`
+    // encienda el escape que deja ver datos de todas las empresas, y volverlo "listo" es
+    // exactamente lo que abriría la puerta a que algo se cuele. Que no se pueda escribir
+    // el nombre del GUC en un comentario es un costo barato al lado de eso.
     const files = sourceFiles(join(import.meta.dir, '..', '..', 'src'));
     const setters = files.filter((f) => /app\.cross_tenant/.test(readFileSync(f, 'utf8')));
 
