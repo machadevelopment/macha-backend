@@ -13,9 +13,40 @@ import type { industryTemplateVersions } from '@/db/schema';
  */
 export const anthropicModel = env.anthropicModel;
 
+/**
+ * Modelo de la clasificación de Excel. Cae al general si no se configura, así que hoy son el
+ * mismo — la separación existe para que cambiarlo sea una variable de entorno y no un deploy.
+ * Pasa por el MISMO `assertZdrModel`: separarlo no relaja la regla, solo la hace granular.
+ */
+export const anthropicIntakeModel = env.anthropicIntakeModel;
+
+/**
+ * ═══ LA LISTA BLANCA ES CONTRACTUAL, NO TÉCNICA ═══
+ *
+ * Estar acá NO significa "este modelo funciona". Significa que alguien verificó que el
+ * contrato ZDR firmado con Anthropic lo cubre — que sus prompts y los datos financieros del
+ * cliente no se retienen. Eso no se puede comprobar desde el código, solo desde la cuenta.
+ *
+ * Por eso agregar un modelo acá es una decisión de negocio con un paso manual, y no un
+ * `push`: `CLAUDE.md` lo pone como no-negociable ("Re-verify ZDR eligibility on any model
+ * change").
+ *
+ * SOBRE HAIKU 4.5 (medido el 2026-08-12): clasifica IGUAL que Sonnet 5 en esta tarea —
+ * 100 % de coincidencia en entidad, tipo contable y categoría sobre 88 filas reales— a la
+ * mitad de la latencia y ~2,4x menos costo. Todo lo demás ya está listo: sus tarifas están
+ * en el catálogo y `INTAKE_MODEL` permite usarlo solo en ingesta. Falta UNA cosa, y es
+ * justamente la que no puede hacer un agente: confirmar que el contrato ZDR lo cubre.
+ * Cuando eso esté confirmado, esto es una línea.
+ */
 export function assertZdrModel(model: string): void {
   const zdrEligible = new Set(['claude-sonnet-5']);
-  if (!zdrEligible.has(model)) throw new Error(`Model ${model} not verified for ZDR`);
+  if (!zdrEligible.has(model)) {
+    throw new Error(
+      `El modelo ${model} no está verificado para ZDR. No es un error de configuración: ` +
+        `agregarlo a la lista blanca de assertZdrModel exige confirmar antes que el contrato ` +
+        `ZDR con Anthropic lo cubra (CLAUDE.md, regla no-negociable).`,
+    );
+  }
 }
 
 let client: Anthropic | undefined;
@@ -57,6 +88,17 @@ type RateWindow = {
 };
 
 const PRICES_PER_MTOK_USD: Record<string, readonly RateWindow[]> = {
+  /*
+   * Haiku 4.5, verificado contra la referencia de la API el 2026-08-12. Sin ventana de
+   * vigencia: su tarifa es de lista, no introductoria, así que no vence.
+   *
+   * DOS CLAVES PARA EL MISMO MODELO, y no es redundancia: `cost_usd` se calcula con
+   * `message.model` —lo que la API dice que atendió la llamada— y ese campo puede devolver
+   * el alias o el id con fecha según cómo se haya pedido. Con una sola clave, la otra forma
+   * caería en `tarifaMasCara()` y el panel de costos mentiría al alza sin fallar nada.
+   */
+  'claude-haiku-4-5': [{ from: '2025-10-01', through: null, input: 1.0, output: 5.0 }],
+  'claude-haiku-4-5-20251001': [{ from: '2025-10-01', through: null, input: 1.0, output: 5.0 }],
   'claude-sonnet-5': [
     // Tarifa introductoria. La fecha de fin es la publicada por Anthropic, no una
     // estimación nuestra.
@@ -543,12 +585,12 @@ export async function classifySheetRows(params: {
    */
   headerRow?: unknown[];
 }): Promise<ClassifySheetResult> {
-  assertZdrModel(anthropicModel);
+  assertZdrModel(anthropicIntakeModel);
   const anthropic = getClient();
   const rowsText = params.rows.map((row) => JSON.stringify(row)).join('\n');
 
   const stream = anthropic.messages.stream({
-    model: anthropicModel,
+    model: anthropicIntakeModel,
     max_tokens: 64_000,
     system: SYSTEM_PROMPT,
     output_config: { format: { type: 'json_schema', schema: CLASSIFY_ROWS_SCHEMA } },
