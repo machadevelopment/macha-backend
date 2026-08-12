@@ -10,6 +10,7 @@ import { classifySheetRows } from '@/lib/anthropic';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
+import { canSkipSheet } from '@/lib/sheet-classifier';
 import { insertStagingRows } from '@/lib/staging';
 import { runWithConcurrency } from '@/lib/concurrency';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
@@ -190,6 +191,25 @@ export function startExcelIngestWorker(): Promise<string> {
             blankrows: false,
           });
           if (rows.length === 0) continue;
+
+          /*
+           * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
+           * no son exportes contables: son volcados operativos completos. Los tres de
+           * prueba traen ocho hojas y CINCO son catálogos —clientes, proveedores, tiendas,
+           * inventario, productos— que hoy se le mandan a Claude para que conteste que no
+           * son transacciones. Son ~370 de 1.170 filas pagadas para nada.
+           *
+           * `canSkipSheet` solo descarta con evidencia positiva; la duda va al modelo. El
+           * modo de fallo que se evita es silencioso: descartar una hoja financiera haría
+           * que esos datos nunca aparecieran en el dashboard del cliente, sin error.
+           */
+          if (canSkipSheet(rows[0] ?? [])) {
+            totalRowsSkipped += rows.length;
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
+            );
+            continue;
+          }
 
           /*
            * DEDUPLICACIÓN ANTES DE LA IA (migración 0023). Es lo primero que pasa con las
