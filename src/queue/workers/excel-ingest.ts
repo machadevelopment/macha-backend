@@ -62,7 +62,7 @@ export function startExcelIngestWorker(): Promise<string> {
           db.update(documents).set({ status: 'processing' }).where(eq(documents.id, documentId)),
         );
 
-        const { templateVersion, s3Key, creditRule, locale } = await withCompanyScope(
+        const { templateVersion, s3Key, creditRule, locale, baseCurrency } = await withCompanyScope(
           companyId,
           async (db) => {
             const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
@@ -77,6 +77,13 @@ export function startExcelIngestWorker(): Promise<string> {
             // integrado: la plantilla por industria mejora la clasificación cuando
             // existe, pero ya no es una precondición para ingerir.
             const templateVersion = await resolveIndustryTemplate(db, company.industry);
+            /*
+             * La moneda base de la EMPRESA, no del archivo. El modelo ya no devuelve la
+             * moneda de cada fila: cuando la hoja no trae columna de moneda —el caso normal
+             * en los archivos reales— el código la resuelve a esta. Es el mismo default que
+             * el modelo aplicaba antes, ahora explícito y probable.
+             */
+            const baseCurrency = company.baseCurrency;
             if (templateVersion.source === 'default') {
               // No es un error del cliente ni interrumpe nada — es la señal para que
               // el staff sepa qué industria vale la pena curar (panel de plantillas).
@@ -89,7 +96,13 @@ export function startExcelIngestWorker(): Promise<string> {
             // consistent even if the rule version changes mid-processing.
             const creditRule = await getActiveCreditRule(db, 'excel');
 
-            return { templateVersion, s3Key: doc.s3Key, creditRule, locale: company.locale };
+            return {
+              templateVersion,
+              s3Key: doc.s3Key,
+              creditRule,
+              locale: company.locale,
+              baseCurrency,
+            };
           },
         );
 
@@ -173,6 +186,8 @@ export function startExcelIngestWorker(): Promise<string> {
          */
         type Pendiente = {
           sheetName: string;
+          /** Encabezados de la hoja: van en TODOS sus lotes, no solo en el primero. */
+          headerRow: unknown[];
           batchIndex: number;
           batch: unknown[][];
           /** Alineadas con `batch`: se registran en la MISMA transacción que el lote. */
@@ -191,6 +206,13 @@ export function startExcelIngestWorker(): Promise<string> {
             blankrows: false,
           });
           if (rows.length === 0) continue;
+
+          /*
+           * Se captura ANTES de filtrar: en la segunda subida del mismo archivo la fila de
+           * encabezados ya está deduplicada y no llega a ningún lote, pero el modelo la
+           * sigue necesitando para armar el mapa de columnas.
+           */
+          const headerRow = rows[0] ?? [];
 
           /*
            * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
@@ -281,18 +303,31 @@ export function startExcelIngestWorker(): Promise<string> {
               continue;
             }
 
-            pendientes.push({ sheetName, batchIndex, batch, fingerprints: batchFingerprints });
+            pendientes.push({
+              sheetName,
+              headerRow,
+              batchIndex,
+              batch,
+              fingerprints: batchFingerprints,
+            });
           }
         }
 
         /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
         async function procesarLote({
           sheetName,
+          headerRow,
           batchIndex,
           batch,
           fingerprints,
         }: Pendiente): Promise<void> {
-          const result = await classifySheetRows({ templateVersion, sheetName, rows: batch });
+          const result = await classifySheetRows({
+            templateVersion,
+            sheetName,
+            rows: batch,
+            headerRow,
+            baseCurrency,
+          });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
           // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado

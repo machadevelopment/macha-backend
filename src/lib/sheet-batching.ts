@@ -25,57 +25,33 @@ import { intakeConfig } from '@/config/intake';
  */
 
 /**
- * RECALIBRADO con producción (2026-08-05, segunda corrida del mismo libro). La primera
- * versión de estos coeficientes asumía que la salida crece con el ancho de la hoja, y
- * los números reales dicen que **no**:
+ * ═══ RECALIBRADO OTRA VEZ, 2026-08-12: AHORA EL ANCHO NO IMPORTA NADA ═══
  *
- *   | hoja          | cols | filas | tokens salida | por fila |
- *   |---------------|------|-------|---------------|----------|
- *   | Tiendas       |  10  |    6  |         3.695 |    616   |
- *   | Productos     |  17  |   43  |        12.638 |    294   |
- *   | OrdenesCompra |   7  |   61  |        13.028 |    214   |
- *   | Clientes      |  13  |  101  |        20.145 |    200   |
- *   | Inventario    |   9  |  211  |        19.758 |     94   |
- *   | LineasOC      |   6  |  224  |        19.758 |     88   |
- *   | Proveedores   |   9  |    7  |           256 |     37   |
+ * Las dos calibraciones anteriores (300 fijos + 8 por celda) eran correctas para el esquema
+ * de entonces: el modelo devolvía la fila RECONSTRUIDA, así que su salida crecía con el
+ * contenido de la fila. Ese esquema ya no existe — ver lib/row-assembly.ts.
  *
- * Una hoja de 7 columnas costó 214 tokens por fila y una de 9 costó 94: el ancho de
- * ENTRADA no manda. Lo que manda es cuántas filas decide clasificar el modelo y qué tan
- * largo sale cada payload, que es una propiedad del contenido, no de la forma. Con la
- * calibración vieja el planificador mandó 305 filas de `Ventas` en una llamada y la
- * respuesta volvió a cortarse — el mismo documento perdido, ahora con un error honesto.
+ * Hoy el modelo devuelve por fila un objeto de forma FIJA:
  *
- * De ahí el cambio de forma: **domina un costo fijo por fila, calibrado sobre el peor
- * caso creíble** (~294, descartando `Tiendas` porque con 6 filas el overhead fijo de la
- * respuesta se reparte entre muy pocas y no representa a un lote grande). El término por
- * celda se conserva pequeño, como corrección de segundo orden, no como el factor
- * principal que era.
+ *     {"i":123,"e":"transaction","t":"revenue","c":"ventas_mostrador","cf":0.95}
  *
- * Se asume el costo: hojas angostas se parten más de lo estrictamente necesario y eso
- * son llamadas de más a Anthropic. Es el lado barato del error — el otro lado es perder
- * el documento entero.
+ * Eso son ~30 tokens midiendo el peor caso creíble (categoría larga en snake_case), y son
+ * los mismos 30 para una hoja de 3 columnas que para una de 30: el único campo de largo
+ * variable es la categoría, que no depende del ancho de la hoja. Por eso el término por
+ * celda se va a CERO en vez de encogerse — dejarlo pequeño sería seguir modelando una
+ * relación que ya no existe, y partiría de más las hojas anchas sin ninguna razón.
+ *
+ * 45 y no 30: el margen cubre la categoría inusualmente larga y el `columns` que viene una
+ * vez por respuesta (~60 tokens, que repartidos entre las filas del lote son ruido). El
+ * error sigue siendo asimétrico y se sigue prefiriendo el lado caro.
  */
-const OUTPUT_TOKENS_PER_ROW_BASE = 300;
+const OUTPUT_TOKENS_PER_ROW = 45;
 
-/** Corrección de segundo orden por ancho. Pequeña a propósito: ver la tabla de arriba. */
-const OUTPUT_TOKENS_PER_CELL = 8;
-
-/**
- * Cuántas columnas mira para estimar el ancho. Una hoja puede traer una fila
- * anómalamente ancha (un título desparramado, una fila de totales); se toma un
- * percentil alto en vez del máximo para que una sola fila rara no encoja todos los
- * lotes de la hoja, y en vez del promedio para que una hoja con muchas filas cortas al
- * inicio no subestime el ancho real.
- */
-function representativeCellCount(rows: unknown[][]): number {
-  if (rows.length === 0) return 0;
-  const widths = rows.map((r) => r.length).sort((a, b) => a - b);
-  const idx = Math.min(widths.length - 1, Math.floor(widths.length * 0.9));
-  return widths[idx] ?? 0;
-}
-
-export function estimatedOutputTokensPerRow(rows: unknown[][]): number {
-  return OUTPUT_TOKENS_PER_ROW_BASE + representativeCellCount(rows) * OUTPUT_TOKENS_PER_CELL;
+export function estimatedOutputTokensPerRow(_rows: unknown[][]): number {
+  // Recibe las filas y no las usa: la firma se conserva porque el costo de salida SÍ podría
+  // volver a depender del contenido si el esquema cambiara, y el día que eso pase el ajuste
+  // es acá adentro y no en los llamadores.
+  return OUTPUT_TOKENS_PER_ROW;
 }
 
 /**

@@ -24,16 +24,33 @@ export const intakeConfig = {
   /** Tamaño de lote para hojas grandes. */
   batchSize: Number(process.env.INTAKE_BATCH_SIZE || 2_000),
   /**
-   * CU-868kmwdqu — presupuesto de tokens de SALIDA por llamada a Claude, la cota que de
-   * verdad limita cuántas filas caben en un lote (ver lib/sheet-batching.ts).
+   * Presupuesto de tokens de SALIDA por llamada a Claude — la cota que decide cuántas filas
+   * caben en un lote (ver lib/sheet-batching.ts).
    *
-   * 40.000 contra un `max_tokens` de 64.000: el margen del 37% no es timidez, es que la
-   * estimación es una heurística sobre el ancho de la hoja y equivocarse por abajo tiene
-   * un costo asimétrico — el modelo corta la respuesta, el JSON llega partido y se
-   * pierde el documento entero, no solo el lote. Equivocarse por arriba solo cuesta una
-   * llamada de más.
+   * ═══ 40.000 → 4.000, el 2026-08-12, Y NO ES UN AJUSTE COSMÉTICO ═══
+   *
+   * Al achicar el esquema de salida (lib/row-assembly.ts) el costo por fila cayó de ~290
+   * tokens a ~30. Dejar el presupuesto en 40.000 habría convertido TODO ese ahorro en lotes
+   * diez veces más grandes: el mismo archivo en menos llamadas, cada una generando los
+   * mismos 40.000 tokens y tardando los mismos ~165 segundos. Más barato, sí; igual de
+   * lento. Y el cliente lo que ve es el reloj.
+   *
+   * Porque este número tiene dos trabajos, no uno:
+   *
+   *   1. EVITAR EL CORTE — que la respuesta quepa en `max_tokens` (64.000). Ese era su
+   *      trabajo original y con 4.000 sobra margen.
+   *   2. ACOTAR LA LATENCIA DE CADA LLAMADA — el modelo genera token por token (~115 tok/s
+   *      medido en producción), así que el presupuesto de salida ES el reloj: 40.000
+   *      tokens son ~165 s de espera; 4.000 son ~35 s.
+   *
+   * Con 4.000 caben ~88 filas por llamada. La hoja `Ventas` de los archivos reales (521
+   * filas) sale en 6 lotes y el libro entero en ~10, que a `batchConcurrency` 5 son dos
+   * tandas: bajo los 3 minutos que pidió Keneth, contra los ~50 de antes.
+   *
+   * Subirlo vuelve a alargar la espera; bajarlo multiplica las llamadas (y el prompt de
+   * sistema se re-envía en cada una, aunque el caché de prefijo absorbe casi todo eso).
    */
-  outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 40_000),
+  outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 4_000),
   /**
    * Cuántos lotes se mandan a Claude EN PARALELO.
    *
@@ -53,6 +70,11 @@ export const intakeConfig = {
    * backoff (`maxRetries` por defecto), así que pasarse no rompe — solo desperdicia
    * latencia en reintentos. 5 baja el archivo de 69 a ~14 minutos y deja margen; se sube
    * por env cuando se mida el límite real de la cuenta, sin tocar código.
+   *
+   * SE QUEDA EN 5 tras el recorte de `outputTokenBudget` del 2026-08-12, aunque el archivo
+   * ahora se parta en más lotes. Con ~10 lotes de ~35 s son dos tandas, ~70 s: la meta de
+   * 3 minutos ya se cumple sin tocar la concurrencia, y subirla sería apostarle a un
+   * límite de tasa que no hemos medido para ganar tiempo que no hace falta.
    */
   batchConcurrency: Math.max(1, Number(process.env.INTAKE_BATCH_CONCURRENCY || 5)),
 };

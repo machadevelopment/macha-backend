@@ -98,11 +98,46 @@ export async function resolveIndustryTemplate(
 export function buildIndustryTemplateBlock(
   version: TemplateVersionPayload,
 ): Anthropic.TextBlockParam {
+  /*
+   * Los ejemplos se PROYECTAN a lo que el modelo devuelve hoy, no se muestran crudos.
+   *
+   * Los `fewShot` guardados (los sembrados y los que cura el staff) traen la `output` del
+   * esquema viejo: la fila entera reconstruida, con fecha, monto y descripción. Desde el
+   * recorte del 2026-08-12 (lib/row-assembly.ts) el modelo ya no devuelve nada de eso —
+   * devuelve entidad, tipo, categoría y confianza, y los valores los arma el código.
+   *
+   * Mostrarlos crudos sería enseñarle un formato que tiene prohibido producir: structured
+   * output le impediría copiarlo, pero el ejemplo seguiría empujando en la dirección
+   * equivocada, y encima cada uno cuesta tokens de entrada en cada llamada. Se proyecta acá
+   * y no se migran los datos: la tabla es append-only y los ejemplos siguen siendo válidos
+   * como criterio de clasificación, que es para lo único que se usan.
+   */
   const fewShotText = version.fewShot
-    .map(
-      (example, i) =>
-        `Ejemplo ${i + 1}:\nEntrada: ${example.input}\nSalida esperada: ${JSON.stringify(example.output)}`,
-    )
+    .map((example, i) => {
+      /*
+       * Se aceptan las DOS formas que existen en la base: la anidada
+       * (`{targetEntity, confidence, payload:{type, category}}`, la de los ejemplos
+       * sembrados) y la plana (`{type, category}`, que es como los escribe parte del
+       * staff en el panel). `fewShot.output` está tipado como `Record<string, unknown>`,
+       * o sea que la tabla nunca garantizó una sola forma — leer solo la anidada dejaría
+       * los ejemplos curados a mano proyectados a puros `null`, que es peor que no
+       * mandarlos: enseñaría a no clasificar.
+       */
+      const salida = example.output as {
+        targetEntity?: unknown;
+        confidence?: unknown;
+        type?: unknown;
+        category?: unknown;
+        payload?: { type?: unknown; category?: unknown };
+      };
+      const clasificacion = {
+        e: salida.targetEntity ?? null,
+        t: salida.payload?.type ?? salida.type ?? null,
+        c: salida.payload?.category ?? salida.category ?? null,
+        cf: salida.confidence ?? null,
+      };
+      return `Ejemplo ${i + 1}:\nFila: ${example.input}\nClasificación: ${JSON.stringify(clasificacion)}`;
+    })
     .join('\n\n');
 
   return {
@@ -113,7 +148,7 @@ export function buildIndustryTemplateBlock(
       '(type: revenue/cogs/opex/other). Si un encabezado o descripción no aparece aquí, ' +
       'clasifícalo igual con tu propio criterio contable — este bloque no limita lo que ' +
       `puedes mapear:\n${JSON.stringify(version.synonyms, null, 2)}` +
-      `\n\nEjemplos de clasificación (target_entity + mapeo de campos):\n${fewShotText}`,
+      `\n\nEjemplos de clasificación (solo el criterio: entidad, tipo, categoría y confianza — los valores de la fila no se devuelven):\n${fewShotText}`,
     cache_control: { type: 'ephemeral' },
   };
 }

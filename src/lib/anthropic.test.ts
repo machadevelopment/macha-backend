@@ -10,6 +10,7 @@ const {
   resolveRatePerMtok,
   assertNotTruncated,
   SheetOutputTruncatedError,
+  CLASSIFY_ROWS_SCHEMA,
 } = await import('./anthropic');
 
 describe('assertZdrModel', () => {
@@ -144,5 +145,51 @@ describe('assertNotTruncated (CU-868kmwdqu)', () => {
     expect(() => assertNotTruncated('end_turn', 'Ventas', 10)).not.toThrow();
     expect(() => assertNotTruncated(null, 'Ventas', 10)).not.toThrow();
     expect(() => assertNotTruncated(undefined, 'Ventas', 10)).not.toThrow();
+  });
+});
+
+describe('CLASSIFY_ROWS_SCHEMA — el 400 que la API devuelve antes de generar', () => {
+  /**
+   * La primera llamada real con el esquema compacto (2026-08-12) volvió con:
+   *
+   *   400 "Enum value 'revenue' does not match declared type '['string','null']'"
+   *
+   * `{type: ['string','null'], enum: [...valores, null]}` es JSON Schema perfectamente
+   * válido y la API de structured outputs lo RECHAZA. Un campo anulable con enum se
+   * declara con `anyOf`.
+   *
+   * Por qué merece un test y no solo el comentario: es el peor modo de fallo de todo el
+   * módulo. No degrada nada — rechaza la petición completa, así que serían el 100 % de
+   * los documentos fallando, y ninguna prueba unitaria lo tocaba porque el esquema solo
+   * se valida del lado de Anthropic. Se descubrió gastando dinero; no se vuelve a
+   * descubrir así.
+   */
+  type Nodo = { type?: unknown; enum?: unknown; anyOf?: { type?: unknown; enum?: string[] }[] };
+
+  const recorrer = (nodo: unknown, ruta: string, visitar: (n: Nodo, r: string) => void): void => {
+    if (!nodo || typeof nodo !== 'object') return;
+    visitar(nodo as Nodo, ruta);
+    for (const [k, v] of Object.entries(nodo)) recorrer(v, `${ruta}.${k}`, visitar);
+  };
+
+  test('ningún enum convive con un `type` de varias opciones', () => {
+    const infractores: string[] = [];
+    recorrer(CLASSIFY_ROWS_SCHEMA, '$', (n, ruta) => {
+      if (Array.isArray(n.enum) && Array.isArray(n.type)) infractores.push(ruta);
+    });
+    expect(infractores).toEqual([]);
+  });
+
+  test('el enum de tipo contable sigue siendo anulable, vía anyOf', () => {
+    // No basta con que no reviente: `t` TIENE que aceptar null, porque invoice y bill no
+    // llevan tipo contable. Quitarle el null para esquivar el 400 rompería la mitad de
+    // las filas de otra forma.
+    let t: Nodo | undefined;
+    recorrer(CLASSIFY_ROWS_SCHEMA, '$', (n, ruta) => {
+      if (ruta.endsWith('properties.rows.items.properties.t')) t = n;
+    });
+    expect(t?.anyOf).toBeDefined();
+    expect(t?.anyOf?.some((o) => o.type === 'null')).toBe(true);
+    expect(t?.anyOf?.some((o) => o.enum?.includes('revenue'))).toBe(true);
   });
 });
