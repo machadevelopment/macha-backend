@@ -23,6 +23,9 @@ export function startReportTickWorker(): Promise<string> {
     const period = yesterday.toISOString().slice(0, 10);
 
     for (const company of activeCompanies) {
+      // Sin `checkQueueGate`, a propósito (CU-868kjby4z): el gate existe para que un
+      // usuario no sature su propia cola, y aquí el que encola es el sistema. Rechazar
+      // dejaría a la empresa sin el reporte de su período sin que nadie lo pidiera.
       await enqueue(QUEUES.reportGenerate, {
         companyId: company.id,
         periodStart: period,

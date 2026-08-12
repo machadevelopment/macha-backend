@@ -9,7 +9,11 @@ import { QUEUES } from '@/queue';
 // reales, ver src/config/rate-limit.ts).
 //
 // Estado real de consumo (actualizado en CU-868kh8qhp):
-// - `checkQueueGate`: EN USO por el intake de Excel (CU-868kfva89).
+// - `checkQueueGate`: EN USO por el intake de Excel (CU-868kfva89) y, desde la
+//   generación a demanda de reportes, también con `report_generation`
+//   (POST /reports/generate). CU-868kjby4z: los dos kinds declarados en
+//   `queueGate.appliesTo` tienen consumidor; el fan-out del sistema (`report-tick`)
+//   queda fuera a propósito — ver el porqué en config/rate-limit.ts.
 // - `checkTokenBucket('ai')`: EN USO por chat (modules/chats) e insight
 //   (modules/insights).
 // - `checkTokenBucket('read')`: EN USO por las rutas de lectura tenant-scoped
@@ -102,6 +106,10 @@ const GATE_QUEUE_NAME: Record<GateKind, string> = {
  * (chat/insight quedan explícitamente fuera, ver rate-limit.ts). Lee las tablas
  * propias de pg-boss (schema `pgboss`, default de esta instancia) — sin tabla propia
  * de rate limiting, tal como pide data model.md §18.
+ *
+ * Acepta también `chat`/`insight` y devuelve `allowed` sin consultar nada: así una
+ * ruta interactiva puede llamarlo sin ramificar, y el criterio de qué se gatea vive
+ * en un solo lugar (`queueGate.appliesTo`) en vez de repartido por los llamadores.
  */
 export async function checkQueueGate(
   companyId: string,
