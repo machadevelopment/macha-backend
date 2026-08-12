@@ -53,11 +53,36 @@ const filaLimpia = (fecha: string, monto: number) => ({
   confidence: 0.95,
 });
 
+/** El mapa que "devuelve" el modelo. Igual para las dos hojas: el caso normal. */
+const MAPA_DE_COLUMNAS = {
+  date: 0,
+  amount: 1,
+  currency: null,
+  description: null,
+  counterparty: null,
+  product: null,
+  quantity: null,
+  productCategory: null,
+  dueDate: null,
+};
+
 /** Llamadas a Claude, por hoja. Es la prueba de que un lote hecho no se repite. */
 const llamadas: string[] = [];
 let fallarEnHojaB = true;
 
+/*
+ * Se parte del módulo REAL y solo se pisa lo que este test necesita fingir (la llamada a
+ * Claude y el costo). Listar los exports a mano era frágil de una forma concreta y ya
+ * comprobada: al agregar `assertMismoMapa` al worker, este test se cayó con
+ * "Export named 'assertMismoMapa' not found" — el mock había quedado desactualizado sin que
+ * nadie lo tocara, y el fallo no tenía nada que ver con lo que el test prueba.
+ *
+ * Importar el real es seguro: `getClient()` es perezoso y la API key es opcional en `env`.
+ */
+const anthropicReal = await import('@/lib/anthropic');
+
 mock.module('@/lib/anthropic', () => ({
+  ...anthropicReal,
   classifySheetRows: async ({ sheetName }: { sheetName: string }) => {
     llamadas.push(sheetName);
     if (sheetName === HOJA_B && fallarEnHojaB) {
@@ -68,6 +93,14 @@ mock.module('@/lib/anthropic', () => ({
       model: 'claude-sonnet-5',
       inputTokens: 100,
       outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      // Las dos hojas devuelven el MISMO mapa: `assertMismoMapa` (el real, no un stub) corre
+      // sobre esto, así que si alguna vez se rompiera el guardia, este test lo notaría.
+      columns: MAPA_DE_COLUMNAS,
+      unclassifiedRows: [],
+      sheetUsable: true,
+      unusableReason: null,
       rows: [sheetName === HOJA_A ? filaLimpia('2019-05-01', 100) : filaLimpia('2019-05-02', 200)],
     };
   },

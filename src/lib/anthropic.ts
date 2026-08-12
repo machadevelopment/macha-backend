@@ -166,8 +166,61 @@ export type ClassifiedRow = {
   payload: Record<string, unknown>;
 };
 
+/** Lo que el modelo dice de UNA fila. `skip` = "no es un dato", dicho explícitamente. */
+type VeredictoCrudo = {
+  i: number;
+  e: ClassifiedRow['targetEntity'] | 'skip';
+  t: RowVerdict['type'];
+  c: string | null;
+  cf: number;
+};
+
+/**
+ * Arma las filas clasificadas a partir de los veredictos ya validados por índice.
+ *
+ * Los `skip` se caen acá y en ningún otro lado: son filas que el modelo declaró que no son
+ * datos, y esa declaración es justamente lo que las distingue de una fila perdida. No
+ * generan fila de staging, pero SÍ cuentan como cubiertas.
+ */
+function construirFilas(
+  porIndice: Map<number, VeredictoCrudo>,
+  params: { rows: unknown[][]; baseCurrency: string },
+  columns: ColumnMap,
+): ClassifiedRow[] {
+  const out: ClassifiedRow[] = [];
+  for (const [i, v] of porIndice) {
+    if (v.e === 'skip') continue;
+    out.push({
+      targetEntity: v.e,
+      confidence: typeof v.cf === 'number' ? v.cf : 0,
+      payload: assemblePayload({
+        verdict: { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf },
+        row: params.rows[i]!,
+        columns,
+        baseCurrency: params.baseCurrency,
+      }),
+    });
+  }
+  return out;
+}
+
 export type ClassifySheetResult = {
   rows: ClassifiedRow[];
+  /**
+   * El mapa de columnas que este lote usó para armar los valores.
+   *
+   * Se expone para que el llamador pueda COMPARARLO entre los lotes de una misma hoja. Cada
+   * lote lo pide por su cuenta, así que nada garantiza que coincidan — y si el lote 3 dice
+   * que el monto es la columna 13 y el lote 7 dice que es la 8, media hoja entra con el monto
+   * equivocado, plausible y sin un solo error. Ver `assertMismoMapa`.
+   */
+  columns: ColumnMap;
+  /**
+   * Índices (sobre las filas enviadas) que el modelo NO cubrió ni en el primer intento ni en
+   * el reintento. El worker los manda a staging con confianza 0 para que caigan en revisión:
+   * que un humano los vea es lento, perderlos es peor.
+   */
+  unclassifiedRows: number[];
   /**
    * `false` = esta hoja no es procesable y hay que decírselo al cliente. Distinto de
    * `rows: []` con `sheetUsable: true`, que es una hoja sin movimientos (una portada,
@@ -193,14 +246,14 @@ export type ClassifySheetResult = {
  * exige que no sea vacío)— y la duda se expresa en `confidence`, que es el canal que sí
  * tiene salida: una fila de confianza baja va a revisión interna, no a la basura.
  */
-const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
+export const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
 2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto y fecha de vencimiento. Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
-3. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
+3. Devolver EXACTAMENTE UNA entrada por cada fila del lote, sin excepción: si el lote trae 88 filas, "rows" trae 88 entradas con los índices 0 a 87, cada uno una sola vez. Ninguna fila se omite y ningún índice se inventa. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
 4. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
 5. Asignar "cf" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
-6. Ignora filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías): no las devuelvas.
+6. Las filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías) SÍ se devuelven, con "e" = "skip" y el resto en null. No las omitas: omitir una fila es indistinguible de un error, y el sistema no puede saber si la ignoraste a propósito.
 7. "sheetUsable" es tu válvula de escape y debe ser TRUE casi siempre. Ponlo en false SOLO si esta hoja no contiene movimientos financieros identificables de ninguna forma: es texto libre o notas, es una hoja de gráficas o imágenes, está vacía, o su estructura es tan inconsistente que no se pueden delimitar filas ni distinguir montos de fechas. Que los encabezados sean raros, estén en otro idioma, mezclen mayúsculas, traigan categorías que no reconoces o vengan desordenados NO es razón para false: eso se resuelve clasificando con tu criterio. Si puedes extraer aunque sea algunas filas, "sheetUsable" es true.
 8. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
 9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
@@ -265,7 +318,21 @@ export const CLASSIFY_ROWS_SCHEMA = {
         type: 'object',
         properties: {
           i: { type: 'integer', description: 'Índice base 0 de la fila dentro del lote.' },
-          e: { type: 'string', enum: ['transaction', 'invoice', 'bill'] },
+          /*
+           * `skip` NO es una entidad destino: es "esta fila no es un dato" dicho en voz alta
+           * (un título de sección, un total, un encabezado repetido).
+           *
+           * Antes el modelo expresaba eso OMITIENDO la fila, y ahí estaba el problema: una
+           * fila omitida a propósito y una fila que el modelo simplemente no devolvió se ven
+           * exactamente igual desde el código. Medido el 2026-08-12: una corrida devolvió
+           * 772 de 800 filas y la siguiente, sobre el mismo archivo, las 800 — o sea que la
+           * pérdida existe, es intermitente y era invisible.
+           *
+           * Con `skip` obligatorio, el silencio deja de ser ambiguo: toda fila tiene que
+           * volver con un veredicto, y una que no vuelve es una ANOMALÍA detectable, no una
+           * decisión. Cuesta ~10 tokens por fila ignorada, que son pocas por hoja.
+           */
+          e: { type: 'string', enum: ['transaction', 'invoice', 'bill', 'skip'] },
           /*
            * `anyOf` y no `{type:['string','null'], enum:[...,null]}`. La segunda forma es
            * JSON Schema válido y la API la RECHAZA con 400 antes de generar nada:
@@ -338,6 +405,117 @@ export function assertNotTruncated(
 }
 
 /**
+ * Indexa los veredictos por fila y separa los que apuntan a filas que no existen.
+ *
+ * `porIndice` se queda con el PRIMERO de cada índice repetido: quedarse con el primero es
+ * estable entre corridas, y elegir "el último" no tendría mejor argumento.
+ */
+export function indexarVeredictos(
+  veredictos: VeredictoCrudo[],
+  totalFilas: number,
+): { porIndice: Map<number, VeredictoCrudo>; fueraDeRango: number } {
+  const porIndice = new Map<number, VeredictoCrudo>();
+  let fueraDeRango = 0;
+  for (const v of veredictos) {
+    if (!Number.isInteger(v.i) || v.i < 0 || v.i >= totalFilas) {
+      fueraDeRango++;
+      continue;
+    }
+    if (!porIndice.has(v.i)) porIndice.set(v.i, v);
+  }
+  return { porIndice, fueraDeRango };
+}
+
+/**
+ * ═══ EL FALLO MÁS CARO POSIBLE, Y POR ESO TIENE SU PROPIA FUNCIÓN ═══
+ *
+ * Si el modelo numerara las filas desde 1 en vez de desde 0, devolvería los índices 1..N para
+ * un lote de N filas. Sin este chequeo el sistema haría dos cosas, las dos en silencio:
+ * descartar el índice N por fuera de rango (una fila perdida) y aplicar el veredicto de CADA
+ * fila a la fila ANTERIOR. La contabilidad entera del lote quedaría corrida una posición, con
+ * montos y fechas perfectamente plausibles y sin un solo error en ningún log.
+ *
+ * La firma es inconfundible y por eso se puede detectar sin falsos positivos: falta el 0,
+ * está el N, y todo lo del medio está cubierto. Un modelo que simplemente se saltó la primera
+ * fila NO dispara esto, porque no habría devuelto también el índice N.
+ */
+export function hayDesplazamiento(veredictos: VeredictoCrudo[], totalFilas: number): boolean {
+  if (totalFilas < 2) return false;
+  const idx = new Set(veredictos.map((v) => v.i));
+  if (idx.has(0) || !idx.has(totalFilas)) return false;
+  for (let i = 1; i <= totalFilas; i++) if (!idx.has(i)) return false;
+  return true;
+}
+
+/**
+ * El lote llegó con los índices corridos una posición. Tipo propio, no un `Error` genérico:
+ * quien lo lea en Sentry tiene que entender que NO es un problema de formato ni del
+ * proveedor, y que abortar fue lo correcto — reintentar es seguro, promover no lo sería.
+ */
+export class SheetIndexShiftError extends Error {
+  constructor(
+    readonly sheetName: string,
+    readonly rowsInBatch: number,
+  ) {
+    super(
+      `El modelo numeró las filas desde 1 en la hoja "${sheetName}" (${rowsInBatch} filas): ` +
+        `los veredictos están corridos una posición y aplicarlos desplazaría todos los datos ` +
+        `del lote. Abortado a propósito.`,
+    );
+    this.name = 'SheetIndexShiftError';
+  }
+}
+
+/**
+ * ═══ EL MAPA DE COLUMNAS TIENE QUE SER EL MISMO EN TODA LA HOJA ═══
+ *
+ * Cada lote le pide el mapa al modelo por su cuenta, y hasta acá nada obligaba a que las
+ * respuestas coincidieran. Si el lote 3 decide que el monto es la columna 13 y el lote 7 que
+ * es la 8, la primera mitad de la hoja entra con `TotalLinea` y la segunda con
+ * `PrecioUnitario`: montos plausibles, ningún error, y la contabilidad del cliente mal a la
+ * mitad.
+ *
+ * Es el último modo de corrupción silenciosa que quedaba en la ingesta. Medido el 2026-08-12
+ * sobre tres lotes bien separados de la misma hoja real, los tres mapas coincidieron — o sea
+ * que hoy no está pasando. Pero "no está pasando" no es una garantía, y el costo de
+ * comprobarlo es una comparación de nueve enteros.
+ *
+ * Se compara contra el PRIMER mapa de la hoja y no por mayoría: la mayoría exigiría esperar a
+ * que terminen todos los lotes, y para entonces las filas ya estarían insertadas. Esto corre
+ * ANTES de la transacción del lote, así que un mapa discrepante no llega a escribir nada.
+ */
+export function assertMismoMapa(sheetName: string, canonico: ColumnMap, delLote: ColumnMap): void {
+  const difieren = (Object.keys(canonico) as (keyof ColumnMap)[]).filter(
+    (k) => canonico[k] !== delLote[k],
+  );
+  if (difieren.length === 0) return;
+
+  throw new SheetColumnMapMismatchError(
+    sheetName,
+    difieren.map((k) => `${k}: ${canonico[k]} vs ${delLote[k]}`),
+  );
+}
+
+/**
+ * Dos lotes de la misma hoja leyeron columnas distintas. Tipo propio porque la acción no es
+ * obvia: NO es reintentar el prompt ni revisar el proveedor. Es que la hoja es ambigua para
+ * el modelo —columnas parecidas, encabezados repetidos— y hay que mirarla.
+ */
+export class SheetColumnMapMismatchError extends Error {
+  constructor(
+    readonly sheetName: string,
+    readonly diferencias: string[],
+  ) {
+    super(
+      `Dos lotes de la hoja "${sheetName}" leyeron columnas distintas (${diferencias.join('; ')}). ` +
+        `Aplicarlos dejaría media hoja con los valores de otra columna, sin error visible. ` +
+        `Lote abortado antes de escribir nada.`,
+    );
+    this.name = 'SheetColumnMapMismatchError';
+  }
+}
+
+/**
  * One Claude call per sheet/batch (CU-868kfva8v): classifies target_entity + maps
  * fields, using structured outputs (output_config.format) for a guaranteed-parseable
  * response instead of prompting for JSON and hoping. Streaming + a generous max_tokens
@@ -350,6 +528,12 @@ export async function classifySheetRows(params: {
   rows: unknown[][];
   /** Moneda de la empresa: se usa cuando la hoja no trae columna de moneda. */
   baseCurrency: string;
+  /**
+   * Marca la segunda pasada sobre las filas que el modelo no cubrió. Corta la recursión en
+   * uno: si el reintento tampoco las cubre, el problema no es suerte y seguir intentando solo
+   * quema dinero — se marcan para revisión y sigue.
+   */
+  esReintento?: boolean;
   /**
    * Fila de encabezados de la hoja, si la tiene. Va SIEMPRE en el prompt aunque el lote no
    * la contenga: los lotes 2 en adelante no la traen, y sin ella el modelo tendría que
@@ -400,13 +584,7 @@ export async function classifySheetRows(params: {
 
   let parsed: {
     columns: ColumnMap;
-    rows: {
-      i: number;
-      e: ClassifiedRow['targetEntity'];
-      t: RowVerdict['type'];
-      c: string | null;
-      cf: number;
-    }[];
+    rows: VeredictoCrudo[];
     sheetUsable: boolean;
     unusableReason: string | null;
   };
@@ -417,34 +595,121 @@ export async function classifySheetRows(params: {
   }
 
   /*
-   * ACÁ SE ARMA EL PAYLOAD, con la fila cruda que ya teníamos y el mapa que el modelo
-   * devolvió una sola vez. Antes esto venía reconstruido en la respuesta: nueve campos por
-   * fila, y el 95,7 % del costo —y del tiempo— era eso.
+   * ═══ COBERTURA: NINGUNA FILA DESAPARECE EN SILENCIO ═══
    *
-   * Un `i` fuera de rango se DESCARTA en vez de tumbar el lote: el modelo puede devolver un
-   * índice que no existe, y perder una fila de trescientas es mejor que perder las
-   * trescientas. La fila descartada simplemente no llega a staging, igual que una que el
-   * modelo hubiera decidido ignorar por no ser un dato.
+   * Antes acá se armaba lo que llegara y punto. Si el modelo devolvía 60 veredictos para un
+   * lote de 88 filas, las otras 28 simplemente no existían — no fallaba nada, no se
+   * registraba nada, y esas filas nunca aparecían en la contabilidad del cliente.
+   *
+   * Que eso pasa está medido (2026-08-12): una corrida sobre el archivo real devolvió 772 de
+   * 800 filas; la siguiente, sobre el MISMO archivo, devolvió las 800. Intermitente, o sea
+   * irreproducible, o sea imposible de encontrar por reporte de usuario.
+   *
+   * Ahora se compara lo devuelto contra lo enviado. Es una resta que el código siempre pudo
+   * hacer y no hacía.
    */
-  const rows: ClassifiedRow[] = parsed.rows.flatMap((v) => {
-    const row = params.rows[v.i];
-    if (!row) return [];
-    return [
-      {
-        targetEntity: v.e,
-        confidence: typeof v.cf === 'number' ? v.cf : 0,
-        payload: assemblePayload({
-          verdict: { i: v.i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf },
-          row,
-          columns: parsed.columns,
-          baseCurrency: params.baseCurrency,
-        }),
-      },
-    ];
-  });
+  const { porIndice, fueraDeRango } = indexarVeredictos(parsed.rows, params.rows.length);
+
+  if (hayDesplazamiento(parsed.rows, params.rows.length)) {
+    throw new SheetIndexShiftError(params.sheetName, params.rows.length);
+  }
+
+  const faltantes: number[] = [];
+  for (let i = 0; i < params.rows.length; i++) if (!porIndice.has(i)) faltantes.push(i);
+
+  /*
+   * UN reintento, solo con las filas que faltaron. Es barato —son pocas— y resuelve el caso
+   * intermitente sin mandar a un humano a revisar algo que el modelo sí sabe clasificar.
+   *
+   * Uno solo y no un bucle: si el segundo intento tampoco las cubre, el problema no es
+   * suerte y reintentar más solo quema dinero. Lo que sigue es marcarlas para revisión, que
+   * es lento pero no pierde nada.
+   */
+  if (faltantes.length > 0 && !params.esReintento) {
+    console.warn(
+      `[ingesta] "${params.sheetName}": el modelo no cubrió ${faltantes.length} de ` +
+        `${params.rows.length} filas. Reintentando solo esas.`,
+    );
+
+    const reintento = await classifySheetRows({
+      ...params,
+      rows: faltantes.map((i) => params.rows[i]!),
+      esReintento: true,
+    });
+
+    return {
+      // Lo que sí vino del primer intento, más lo que rescató el reintento. Los payloads del
+      // reintento ya se armaron contra las MISMAS filas crudas, así que se concatenan tal cual.
+      rows: [...construirFilas(porIndice, params, parsed.columns), ...reintento.rows],
+      columns: parsed.columns,
+      // `unclassifiedRows` del reintento indexa SU lote; se remapea a los índices originales.
+      unclassifiedRows: reintento.unclassifiedRows.map((k) => faltantes[k]!),
+      sheetUsable: parsed.sheetUsable ?? true,
+      unusableReason: parsed.unusableReason ?? null,
+      inputTokens: message.usage.input_tokens + reintento.inputTokens,
+      outputTokens: message.usage.output_tokens + reintento.outputTokens,
+      cacheReadTokens: (message.usage.cache_read_input_tokens ?? 0) + reintento.cacheReadTokens,
+      cacheCreationTokens:
+        (message.usage.cache_creation_input_tokens ?? 0) + reintento.cacheCreationTokens,
+      model: message.model,
+    };
+  }
+
+  if (fueraDeRango > 0) {
+    console.warn(
+      `[ingesta] "${params.sheetName}": ${fueraDeRango} índice(s) fuera de rango descartado(s).`,
+    );
+  }
+
+  const rows = construirFilas(porIndice, params, parsed.columns);
+
+  /*
+   * ═══ LA FILA QUE NI ASÍ SE CLASIFICÓ NO SE TIRA: SE MANDA A REVISIÓN ═══
+   *
+   * Llegar acá con `faltantes` significa que ni el primer intento ni el reintento le dieron
+   * un veredicto a esa fila. La tentación es descartarla —es lo que hacía el código hasta
+   * hoy— y es la decisión equivocada: una fila descartada no falla nada, simplemente nunca
+   * aparece en la contabilidad del cliente, y nadie se entera jamás.
+   *
+   * Así que se arma igual, con los valores que el mapa de columnas sí permite leer, y con
+   * `confidence: 0`. Eso la deja por debajo de `CONFIDENCE_THRESHOLD` y sin categoría, o sea
+   * que `staging-rules` la marca y cae en revisión interna. Es la válvula que el producto ya
+   * tiene, usada para lo que hace falta.
+   *
+   * Un humano mirando una fila de más es un costo acotado y visible. Una fila perdida es un
+   * error silencioso en los números de un cliente, que es de lo que este producto no puede
+   * permitirse ni uno.
+   */
+  for (const i of faltantes) {
+    rows.push({
+      targetEntity: 'transaction',
+      confidence: 0,
+      payload: assemblePayload({
+        verdict: { i, targetEntity: 'transaction', type: null, category: null, confidence: 0 },
+        row: params.rows[i]!,
+        columns: parsed.columns,
+        baseCurrency: params.baseCurrency,
+      }),
+    });
+  }
+
+  if (faltantes.length > 0) {
+    console.warn(
+      `[ingesta] "${params.sheetName}": ${faltantes.length} fila(s) sin clasificar tras el ` +
+        `reintento. Van a revisión interna, no se descartan.`,
+    );
+  }
 
   return {
     rows,
+    columns: parsed.columns,
+    /*
+     * Las filas que ni el primer intento ni el reintento cubrieron. NO se pierden: el worker
+     * las manda a staging con confianza 0 para que caigan en revisión interna. Es la válvula
+     * que el producto ya tiene, usada para lo que hace falta — que un humano las vea es
+     * lento, pero perderlas es peor.
+     */
+    unclassifiedRows: faltantes,
     // `?? true` deliberado: ante la duda, procesable. El campo es `required` en el
     // esquema, pero si alguna vez faltara, el sesgo correcto es seguir clasificando —
     // el costo de tratar un archivo bueno como ilegible (se lo rebotamos al cliente)
