@@ -236,3 +236,65 @@ describe('estimateCostUsd con caché — el subconteo que arrastraba el ledger',
     expect(despues / antes).toBeCloseTo(1.5, 6);
   });
 });
+
+describe('Haiku 4.5 — listo salvo por la verificación de ZDR', () => {
+  const dia = (iso: string) => new Date(`${iso}T12:00:00Z`);
+  const UN_MILLON = 1_000_000;
+
+  test('sus tarifas están en el catálogo, bajo las DOS formas del id', () => {
+    /*
+     * `cost_usd` se calcula con `message.model` — lo que la API dice que atendió la llamada —
+     * y ese campo devuelve el alias o el id con fecha según cómo se haya pedido. Con una sola
+     * clave, la otra forma caería en `tarifaMasCara()` y el panel de costos mentiría al alza
+     * sin fallar nada. Es el mismo modo de fallo silencioso que motivó CU-868kjc9d6, solo que
+     * en la otra dirección.
+     */
+    for (const id of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001']) {
+      const t = resolveRatePerMtok(id, dia('2026-08-12'));
+      expect(t.exact).toBe(true);
+      expect(t.input).toBe(1);
+      expect(t.output).toBe(5);
+    }
+  });
+
+  test('cuesta la mitad que Sonnet en entrada y en salida', () => {
+    // La razón por la que vale la pena la conversación sobre ZDR: mismo trabajo, 2x menos.
+    // (Sonnet está en tarifa introductoria hasta el 2026-08-31; desde septiembre la brecha
+    // se abre a 3x, y eso lo resuelven solas las ventanas de vigencia.)
+    const dic = dia('2026-08-12');
+    const sonnet = estimateCostUsd(UN_MILLON, UN_MILLON, 'claude-sonnet-5', dic);
+    const haiku = estimateCostUsd(UN_MILLON, UN_MILLON, 'claude-haiku-4-5', dic);
+    expect(haiku).toBeCloseTo(sonnet / 2, 6);
+
+    const sep = dia('2026-09-01');
+    const brechaSep =
+      estimateCostUsd(UN_MILLON, UN_MILLON, 'claude-sonnet-5', sep) /
+      estimateCostUsd(UN_MILLON, UN_MILLON, 'claude-haiku-4-5', sep);
+    expect(brechaSep).toBeCloseTo(3, 6);
+  });
+
+  test('pero el gate de ZDR lo sigue bloqueando, y eso es a propósito', () => {
+    /*
+     * Todo lo demás está listo: tarifas cargadas, `ANTHROPIC_INTAKE_MODEL` permite usarlo solo
+     * en ingesta, y está MEDIDO que clasifica igual que Sonnet (100 % de coincidencia en
+     * entidad, tipo y categoría sobre 88 filas reales, 2026-08-12).
+     *
+     * Lo único que falta es lo que ningún agente puede hacer: confirmar que el contrato ZDR
+     * firmado con Anthropic cubre ese modelo. `CLAUDE.md` lo pone como no-negociable, y este
+     * test es el que impide que alguien lo salte "porque ya funcionaba".
+     */
+    expect(() => assertZdrModel('claude-haiku-4-5')).toThrow(/ZDR/);
+  });
+
+  test('el error explica que NO es un problema de configuración', () => {
+    // Quien lo vea en Sentry tras cambiar una variable de entorno tiene que entender que el
+    // arreglo no es tocar el código, sino verificar un contrato.
+    try {
+      assertZdrModel('claude-haiku-4-5');
+      throw new Error('debió lanzar');
+    } catch (e) {
+      expect((e as Error).message).toContain('contrato');
+      expect((e as Error).message).toContain('assertZdrModel');
+    }
+  });
+});
