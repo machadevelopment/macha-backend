@@ -65,7 +65,8 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Yes | ZDR contract only; model kept in config, never hardcoded. |
 | `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Yes | Binaries only; DB stores keys, not files. |
 | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. |
-| `SENTRY_DSN` | Prod/staging | No-op without it (local/dev/CI never set it). |
+| `SENTRY_DSN` | Prod/staging | No-op without it (local/dev/CI never set it). En un despliegue, faltar = servir sin monitoreo; el arranque lo avisa (§Observabilidad). |
+| `SENTRY_ENVIRONMENT` | No (se deduce) | Etiqueta del entorno en cada evento. Por omisión `RAILWAY_ENVIRONMENT_NAME` y luego `NODE_ENV`. |
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |
 | `BACKUP_RETENTION_DAYS` | No (has default) | Nightly `pg_dump` → S3 retention (30d). |
 | `RECURRENTE_SECRET_KEY`, `RECURRENTE_WEBHOOK_SECRET` | Prod/staging | Billing provider; test/live variants gate sandbox vs real charges. |
@@ -83,6 +84,45 @@ Apunta el healthcheck de la plataforma a **`/health/db`**, no a `/health`. `/hea
 solo liveness: responde 200 sin tocar Postgres, así que un deploy con la base mal
 configurada se marca sano igual. `/health/db` ejecuta un `SELECT 1` y falla con 5xx si la
 conexión no sirve, que es justo lo que debe frenar el deploy.
+
+## Observabilidad (Sentry) — runbook de despliegue (CU-868kmr1tb)
+
+El código está completo y es **no-op sin DSN** a propósito: `src/lib/sentry.ts` arranca el
+SDK en `src/index.ts` y `src/app.ts` reporta en `onError` todo lo que no sea 4xx. Lo que
+falta es **configuración de plataforma**, y no puede hacerla el repo.
+
+> **Estado verificado el 2026-08-12** contra las variables reales del servicio
+> `macha-backend` del proyecto `macha-production`: `SENTRY_DSN` **no está**. Producción
+> corre sin captura de errores. `NODE_ENV=production` sí está (CU-868kmqqdr), así que en
+> cuanto haya DSN los eventos saldrán etiquetados bien.
+
+Pasos, en orden. **Los ejecuta el dueño** — requieren una cuenta de Sentry y credenciales
+que no viven en ningún archivo del repo:
+
+1. **Crear DOS proyectos en Sentry**, uno por entorno. No es cosmético: es la regla no
+   negociable de credenciales de no-prod separadas. Un DSN compartido mezcla los errores
+   de staging con los de un cliente real en el mismo tablero.
+   - Plataforma: **Bun** (o Node.js si la org no la ofrece) — `@sentry/bun`.
+   - Nombres sugeridos: `macha-backend-prod` y `macha-backend-staging`.
+2. **Copiar el DSN de cada proyecto**: Sentry → *Settings → Projects → `<proyecto>` →
+   Client Keys (DSN)*.
+3. **Setear `SENTRY_DSN` en Railway**, proyecto `macha-production`, servicio
+   `macha-backend` → *Variables* → `SENTRY_DSN=<DSN de macha-backend-prod>`. Guardar
+   dispara redeploy; si no, redesplegar a mano (el DSN se lee en el arranque).
+   - `SENTRY_ENVIRONMENT` **no hace falta aquí**: Railway inyecta
+     `RAILWAY_ENVIRONMENT_NAME=production` y el SDK la usa sola. Setearla solo si se
+     quiere un nombre distinto del de la plataforma.
+4. **Verificar en el log del deploy.** Con DSN sale
+   `[sentry] captura de errores activa — environment='production'.`; sin él, sale a
+   gritos `[sentry] SIN MONITOREO DE ERRORES: ...`. Ese aviso es la red que faltaba: la
+   auditoría del 2026-08-05 no tuvo ninguna señal de que Sentry estuviera apagado.
+5. **Prueba de humo**: provocar un 5xx real y confirmar que el evento llega al proyecto
+   correcto, con `environment: production` y stack trace legible.
+
+> **El backend de staging todavía no existe como servicio.** El proyecto
+> `macha-backend-staging` de Railway solo tiene Postgres y Redis (verificado 2026-08-12).
+> El proyecto de Sentry de staging se crea igual —para no dejar a medias la separación—
+> pero su DSN no tiene dónde setearse hasta que ese servicio se despliegue.
 
 ## Activación del rol `macha_app` (CU-868kjbw5h) — runbook de despliegue
 

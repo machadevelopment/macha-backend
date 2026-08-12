@@ -65,6 +65,14 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY ?? '',
   resendFromEmail: process.env.RESEND_FROM_EMAIL || 'notificaciones@macha.finance',
   sentryDsn: process.env.SENTRY_DSN ?? '',
+  // CU-868kmr1tb: el nombre de entorno que Sentry pone en cada evento. Va aparte de
+  // NODE_ENV a propósito — Railway corre staging Y producción con NODE_ENV=production,
+  // así que etiquetar por NODE_ENV los vuelve indistinguibles. Ver src/lib/sentry.ts.
+  sentryEnvironment: process.env.SENTRY_ENVIRONMENT ?? '',
+  // La inyecta Railway sola en todos sus servicios ('production'/'staging'). Sirve para
+  // dos cosas: etiquetar el entorno sin que nadie tenga que configurar nada, y saber que
+  // esto ES un deploy —y no un `bun run dev`— cuando falta el DSN.
+  railwayEnvironment: process.env.RAILWAY_ENVIRONMENT_NAME ?? '',
   // Used to build absolute links in emails (reports/alerts, F6) and Recurrente
   // checkout success/cancel redirects (M8) — was read as a raw process.env in F6
   // (alerts.ts/reports.ts), centralized here now that a second consumer needs it.
