@@ -178,7 +178,24 @@ export function assemblePayload(params: {
   baseCurrency: string;
 }): Record<string, unknown> {
   const { verdict, row, columns, baseCurrency } = params;
-  const amount = asNumber(cell(row, columns.amount));
+
+  /*
+   * EL SIGNO SE DESCARTA, Y ES OBLIGATORIO — no una comodidad.
+   *
+   * Muchos exportes traen los gastos en negativo ("Planilla enero, -18.000"). La dirección
+   * del movimiento no la lleva el signo: la lleva `type` (revenue vs. cogs/opex). Y aguas
+   * abajo `staging-rules.ts` exige `isPositiveFiniteNumber` en las dos formas de payload,
+   * así que un monto negativo NO se guarda con el signo — se marca `invalid_amount` y la
+   * fila se va a revisión interna.
+   *
+   * Esto lo hacía el modelo sin que estuviera escrito en ningún lado (se ve en los ejemplos
+   * few-shot: entra -18000, sale 18000). Al dejar de pedirle los valores había que traerlo
+   * al código, o una hoja de gastos exportada en negativo se habría marcado ENTERA. No lo
+   * atrapó ningún test: lo atrapó leer qué valida `staging-rules` antes de dar por bueno el
+   * cambio.
+   */
+  const bruto = asNumber(cell(row, columns.amount));
+  const amount = bruto === null ? null : Math.abs(bruto);
   const currency = asCurrency(cell(row, columns.currency), baseCurrency);
 
   if (verdict.targetEntity === 'transaction') {

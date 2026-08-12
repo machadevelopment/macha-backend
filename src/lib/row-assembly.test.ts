@@ -112,11 +112,19 @@ describe('montos', () => {
     expect(conMonto('1234,50')).toBe(1234.5);
   });
 
-  test('negativos se conservan', () => {
-    // Un exporte puede traer los gastos en negativo. Perder el signo invertiría el
-    // resultado del cliente.
-    expect(conMonto(-500)).toBe(-500);
-    expect(conMonto('-1,500.00')).toBe(-1500);
+  test('el signo se descarta: un gasto en negativo entra como positivo', () => {
+    /*
+     * Parece que perdiera información y es al revés. La dirección del movimiento la lleva
+     * `type` (revenue vs. cogs/opex), no el signo del número — y `staging-rules.ts` exige
+     * `isPositiveFiniteNumber` en las dos formas de payload.
+     *
+     * Sin esto, una hoja de gastos exportada en negativo —que es como la exporta medio
+     * mundo— se marcaría ENTERA como `invalid_amount` y terminaría en revisión interna.
+     * El modelo ya lo hacía calladamente (se ve en los ejemplos few-shot: entra -18000,
+     * sale 18000); al dejar de pedirle los valores, la regla tenía que quedar escrita.
+     */
+    expect(conMonto(-500)).toBe(500);
+    expect(conMonto('-1,500.00')).toBe(1500);
   });
 
   test('lo que no es número da null, no un cero inventado', () => {
