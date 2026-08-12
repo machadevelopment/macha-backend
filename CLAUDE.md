@@ -75,6 +75,25 @@ Conventions & gotchas:
   the mandatory path for every upload: 0 rows in production against 3,195 in staging, measured 2026-08-06.
   Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
   lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
+- **Ninguna fila desaparece en silencio** (auditoría 2026-08-12). Tres garantías que el código
+  hace cumplir, cada una por un fallo que ya se observó o que no dejaría rastro:
+  1. **Cobertura**: se compara lo devuelto contra lo enviado. `skip` es un veredicto EXPLÍCITO
+     del esquema — antes el modelo ignoraba una fila omitiéndola, y eso era indistinguible de
+     un fallo. Medido: una corrida devolvió 772 de 800 filas y la siguiente, mismo archivo,
+     las 800. Lo que falta se reintenta UNA vez; lo que ni así se cubre va a staging con
+     `confidence: 0` (→ revisión interna), nunca a la basura.
+  2. **Desplazamiento de índices** (`hayDesplazamiento`): si el modelo numerara desde 1, cada
+     veredicto se aplicaría a la fila ANTERIOR y la contabilidad del lote quedaría corrida con
+     datos plausibles. Se aborta con tipo propio. Saltarse la primera fila NO lo dispara.
+  3. **Mapa de columnas único por hoja** (`assertMismoMapa`): cada lote lo pide por su cuenta,
+     y si dos difieren media hoja entra leyendo otra columna de dinero. El primer lote fija el
+     canónico y el chequeo corre ANTES de la transacción, así que un mapa discrepante no
+     escribe nada.
+- **`batchConcurrency` sale de un límite MEDIDO, no supuesto** (2026-08-12). Las cabeceras
+  `anthropic-ratelimit-*` de cualquier respuesta dan los límites de la cuenta: 400k tokens de
+  salida/min, 2M de entrada/min, 1.000 requests/min. Un archivo completo usa ~33k de salida
+  por minuto — el 8 %. Por eso 10 y no 5; el tope duro de 46 está en el config porque el
+  límite es de CUENTA y varias empresas subiendo a la vez lo comparten.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
