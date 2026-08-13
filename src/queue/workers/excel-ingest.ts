@@ -206,7 +206,17 @@ export function startExcelIngestWorker(): Promise<string> {
         };
         const pendientes: Pendiente[] = [];
         /** Filas que ya se habían ingerido antes y no vuelven a costar un token. */
-        let totalRowsSkipped = 0;
+        /*
+         * DOS contadores, no uno. Se mezclaban en `totalRowsSkipped` y el log lo reportaba
+         * todo como "dedup", así que una PRIMERA subida —donde por definición no hay nada
+         * deduplicado— informaba "368 filas ya se habían ingerido". Ese es justamente el
+         * número con el que se mide si la deduplicación sirve, y mentía.
+         *
+         * Y separarlos no es solo cosmético: distinguen dos desenlaces opuestos cuando el
+         * documento no produce filas. Ver el estado terminal más abajo.
+         */
+        let totalRowsSkippedPreFiltro = 0;
+        let totalRowsSkippedDedup = 0;
 
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
@@ -237,7 +247,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * que esos datos nunca aparecieran en el dashboard del cliente, sin error.
            */
           if (canSkipSheet(rows[0] ?? [])) {
-            totalRowsSkipped += rows.length;
+            totalRowsSkippedPreFiltro += rows.length;
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
             );
@@ -267,7 +277,7 @@ export function startExcelIngestWorker(): Promise<string> {
           const huellasFiltradas: string[] = [];
           for (let i = 0; i < rows.length; i++) {
             if (yaVistas.has(huellas[i]!)) {
-              totalRowsSkipped++;
+              totalRowsSkippedDedup++;
               continue;
             }
             filtradas.push(rows[i]!);
@@ -463,11 +473,14 @@ export function startExcelIngestWorker(): Promise<string> {
          * `console.info` y no una métrica: es diagnóstico de bajo volumen (una línea por
          * documento) y el proyecto todavía no tiene un sink de métricas.
          */
-        if (totalRowsSkipped > 0) {
-          const total = totalRowsProcessed + totalRowsSkipped;
-          const pct = Math.round((totalRowsSkipped / total) * 100);
+        if (totalRowsSkippedPreFiltro > 0 || totalRowsSkippedDedup > 0) {
+          const total = totalRowsProcessed + totalRowsSkippedPreFiltro + totalRowsSkippedDedup;
+          const pct = (n: number) => Math.round((n / total) * 100);
           console.info(
-            `[excel-ingest] company=${companyId} document=${documentId} dedup: ${totalRowsSkipped}/${total} filas (${pct}%) ya se habían ingerido y NO se mandaron al modelo`,
+            `[excel-ingest] company=${companyId} document=${documentId} de ${total} filas: ` +
+              `${totalRowsSkippedPreFiltro} (${pct(totalRowsSkippedPreFiltro)}%) descartadas por ` +
+              `el pre-filtro de hojas, ${totalRowsSkippedDedup} (${pct(totalRowsSkippedDedup)}%) ` +
+              `ya ingeridas antes. Al modelo fueron ${totalRowsProcessed}.`,
           );
         }
 
@@ -491,6 +504,39 @@ export function startExcelIngestWorker(): Promise<string> {
           // acción que sirve (llenar la plantilla). No es `failed` porque reintentar el
           // mismo archivo daría exactamente lo mismo.
           if (!promotion.promoted && promotion.reason === 'no_rows') {
+            /*
+             * ═══ "CERO FILAS" YA NO SIGNIFICA UNA SOLA COSA ═══
+             *
+             * Esta rama es anterior a la deduplicación. Entonces, que un documento no
+             * produjera filas solo podía querer decir que el archivo era ilegible, y
+             * `unsupported` con "descarga la plantilla" era la respuesta correcta.
+             *
+             * Desde que existe la huella por fila hay un SEGUNDO camino a cero filas, y es el
+             * OPUESTO: el cliente resubió su contabilidad completa y ya la teníamos toda. Eso
+             * es el caso de éxito que la deduplicación viene a producir — cuesta USD 0 — y
+             * hasta acá se le respondía "no pudimos leer movimientos financieros en este
+             * archivo, descarga la plantilla y llénala".
+             *
+             * Encontrado corriendo el flujo completo sobre un archivo real (2026-08-12): la
+             * segunda subida del mismo .xlsx terminó en `unsupported`. Ningún test unitario
+             * podía verlo — hace falta la primera subida para que la segunda deduplique.
+             *
+             * El desempate es exacto: si TODO lo que no llegó al modelo fue por dedup y el
+             * pre-filtro no descartó nada financiero, el archivo se entendió perfectamente.
+             */
+            if (totalRowsSkippedDedup > 0 && totalRowsProcessed === 0) {
+              await db
+                .update(documents)
+                .set({
+                  status: 'promoted',
+                  rowCount: 0,
+                  flaggedCount: 0,
+                  errorReason: INTAKE_MESSAGES[locale].nothingNew(totalRowsSkippedDedup),
+                })
+                .where(eq(documents.id, documentId));
+              return false;
+            }
+
             const reason = summarizeUnusableReasons(unusableReasons);
             await db
               .update(documents)
