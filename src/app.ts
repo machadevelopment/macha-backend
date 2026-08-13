@@ -35,6 +35,9 @@ import { inventory } from '@/modules/inventory';
 import { me } from '@/modules/me';
 import {
   BillingNotConfiguredError,
+  BillingProviderError,
+  BILLING_PROVIDER_MESSAGE,
+  BILLING_PROVIDER_STATUS,
   BILLING_NOT_CONFIGURED_STATUS,
   BILLING_NOT_CONFIGURED_MESSAGE,
 } from '@/lib/billing/billing-errors';
@@ -136,6 +139,11 @@ export function createApp() {
       if (error instanceof BillingNotConfiguredError) {
         set.status = BILLING_NOT_CONFIGURED_STATUS;
         return { error: BILLING_NOT_CONFIGURED_MESSAGE };
+      }
+
+      if (error instanceof BillingProviderError) {
+        set.status = BILLING_PROVIDER_STATUS;
+        return { error: BILLING_PROVIDER_MESSAGE };
       }
 
       if (error instanceof AiProviderError) {

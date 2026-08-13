@@ -110,6 +110,33 @@ export const register = new Elysia({ prefix: '/register' })
       const limited = await enforceTokenBucketForUser('register', userId, set, 'POST /register');
       if (limited) return limited;
 
+      /*
+       * EL PLAN ANTES QUE LA EMPRESA.
+       *
+       * Antes se resolvía DESPUÉS de particiones + INSERT de `companies` + membresía.
+       * `identityDerive` hace commit en cualquier `return` (incluido un 422), así que un
+       * catálogo vacío —migración 0021 sin `scripts/seed.ts`— dejaba empresas huérfanas
+       * sin suscripción (medido: NINGEN TECH S.A, 2026-08-12). Validar primero evita el
+       * DDL caro y el alta a medias.
+       *
+       * `planCode` sigue opcional: sin él se toma el primer plan ACTIVO por `sort_order`.
+       */
+      const [planElegido] = body.planCode
+        ? await db.select().from(plans).where(eq(plans.code, body.planCode))
+        : await db
+            .select()
+            .from(plans)
+            .where(eq(plans.active, true))
+            .orderBy(asc(plans.sortOrder), asc(plans.code))
+            .limit(1);
+
+      if (!planElegido || !planElegido.active) {
+        // 422 y no 500: el cliente mandó un plan que no existe o que ya se retiró, y eso lo
+        // puede corregir eligiendo otro. Aún no hay empresa que revertir.
+        set.status = 422;
+        return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
+      }
+
       // Antes del INSERT: ver la nota de arriba sobre el abrazo mortal.
       const companyId = randomUUID();
       await provisionTenantPartitions(companyId);
@@ -151,40 +178,6 @@ export const register = new Elysia({ prefix: '/register' })
       await db.update(users).set({ locale: body.locale }).where(eq(users.id, userId));
 
       await seedDefaultAlertRules(db, company!.id);
-
-      // CU-868kjc7g5 criterio 3: la empresa nace con saldo. Antes terminaba el registro en
-      // 0 y su primer insight devolvía 402 — el checkout de Recurrente era el ÚNICO camino
-      // para tener créditos, cuando el PRD trata la compra self-serve como algo que se
-      // suma al plan, no como la puerta de entrada. Va dentro de la transacción del
-      // request: una empresa a medio crear no debe quedar con créditos.
-      /*
-       * EL PLAN, resuelto contra el catálogo (ticket B3). Antes esto era el literal `'base'`
-       * escrito más abajo y `BASE_PLAN_AMOUNT_USD_CENTS` (USD 49) como precio: la empresa
-       * nacía en un plan que no existía en ninguna tabla.
-       *
-       * `planCode` es OPCIONAL a propósito, y esto no es indecisión. El selector de plan en
-       * el alta es el ticket B4, que todavía no está; si lo hiciera obligatorio, el registro
-       * se rompería hasta que ese ticket aterrice. Sin él se toma el primer plan ACTIVO por
-       * `sort_order`, que es el de entrada — y hay una razón dura además de la comodidad:
-       * `subscriptions.plan_code` ahora tiene FK contra `plans`, así que caer al literal
-       * `'base'` reventaría en cualquier base recién migrada y sembrada, donde `base` no
-       * existe (la migración 0021 solo lo da de alta si HABÍA suscripciones que lo usaran).
-       */
-      const [planElegido] = body.planCode
-        ? await db.select().from(plans).where(eq(plans.code, body.planCode))
-        : await db
-            .select()
-            .from(plans)
-            .where(eq(plans.active, true))
-            .orderBy(asc(plans.sortOrder), asc(plans.code))
-            .limit(1);
-
-      if (!planElegido || !planElegido.active) {
-        // 422 y no 500: el cliente mandó un plan que no existe o que ya se retiró, y eso lo
-        // puede corregir eligiendo otro.
-        set.status = 422;
-        return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
-      }
 
       // CU-868kjc7g5 criterio 3 + B3: el abono inicial ahora sale de los créditos del PLAN,
       // con el ajuste global de `platform_settings` como respaldo para los planes que no
@@ -229,6 +222,7 @@ export const register = new Elysia({ prefix: '/register' })
         ? await startSubscriptionCheckout({
             amountUsdCents: planElegido.amountUsdCents,
             companyId: company!.id,
+            planName: planElegido.name,
             successUrl: `${appBaseUrl}/?registered=1`,
             cancelUrl: `${appBaseUrl}/register?cancelled=1`,
           })

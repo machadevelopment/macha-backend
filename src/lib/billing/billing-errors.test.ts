@@ -42,6 +42,31 @@ describe('BillingNotConfiguredError (CU-868kmxu41)', () => {
   });
 });
 
+const { BillingProviderError, BILLING_PROVIDER_MESSAGE, BILLING_PROVIDER_STATUS } =
+  await import('./billing-errors');
+
+describe('BillingProviderError', () => {
+  test('mensaje limpio: sin internals del proveedor ni "intenta de nuevo" vacío', () => {
+    expect(BILLING_PROVIDER_MESSAGE.toLowerCase()).not.toContain('recurrente');
+    expect(BILLING_PROVIDER_MESSAGE).not.toMatch(/\b5\d\d\b/);
+  });
+
+  test('ofrece salida: reintentar el pago o entrar con el plan gratuito', () => {
+    expect(BILLING_PROVIDER_MESSAGE.toLowerCase()).toContain('gratuito');
+  });
+
+  test('es 502: el fallo es del upstream de pagos', () => {
+    expect(BILLING_PROVIDER_STATUS).toBe(502);
+  });
+
+  test('conserva la causa técnica para Sentry', () => {
+    const cause = new Error('Recurrente API error 500');
+    const err = new BillingProviderError(cause);
+    expect(err.name).toBe('BillingProviderError');
+    expect((err as Error & { cause?: unknown }).cause).toBe(cause);
+  });
+});
+
 /**
  * CU-868kmxu41 — la matriz de decisión del registro, fijada como tabla.
  *
