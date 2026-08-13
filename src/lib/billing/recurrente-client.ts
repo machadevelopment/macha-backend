@@ -1,5 +1,5 @@
 import { env } from '@/lib/env';
-import { BillingNotConfiguredError } from './billing-errors';
+import { BillingNotConfiguredError, BillingProviderError } from './billing-errors';
 
 // CU-868kfvae6: Recurrente REST API (verified against docs.recurrente.com — base
 // URL, auth header, /api/checkouts request/response shape, and the subscription
@@ -20,19 +20,31 @@ export function isBillingConfigured(): boolean {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   assertConfigured();
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      'X-SECRET-KEY': env.recurrenteSecretKey,
-      'Content-Type': 'application/json',
-      ...init.headers,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        'X-SECRET-KEY': env.recurrenteSecretKey,
+        'Content-Type': 'application/json',
+        ...init.headers,
+      },
+    });
+  } catch (err) {
+    // Red caída / DNS / timeout: mismo trato que un 5xx del proveedor — 502 limpio.
+    throw new BillingProviderError(err);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Recurrente API error ${res.status} on ${path}: ${body}`);
+    throw new BillingProviderError(
+      new Error(`Recurrente API error ${res.status} on ${path}: ${body}`),
+    );
   }
-  return res.json() as Promise<T>;
+  try {
+    return (await res.json()) as T;
+  } catch (err) {
+    throw new BillingProviderError(err);
+  }
 }
 
 export interface CheckoutResponse {
@@ -43,11 +55,13 @@ export interface CheckoutResponse {
   total_in_cents: number;
 }
 
-/** POST /api/checkouts — recurring item (charge_type='recurring') for the base subscription plan. */
+/** POST /api/checkouts — recurring item (charge_type='recurring') for the chosen plan. */
 export function createSubscriptionCheckout(params: {
   amountUsdCents: number;
   successUrl: string;
   cancelUrl: string;
+  /** Nombre visible en el checkout de Recurrente (p. ej. "Medium"). */
+  planName?: string;
   metadata?: Record<string, string>;
 }): Promise<CheckoutResponse> {
   return request<CheckoutResponse>('/checkouts', {
@@ -55,7 +69,7 @@ export function createSubscriptionCheckout(params: {
     body: JSON.stringify({
       items: [
         {
-          name: 'Macha Finance — Plan base',
+          name: `Macha Finance — ${params.planName ?? 'Plan'}`,
           charge_type: 'recurring',
           currency: 'USD',
           amount_in_cents: params.amountUsdCents,

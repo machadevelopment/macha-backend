@@ -40,3 +40,27 @@ export const BILLING_NOT_CONFIGURED_STATUS = 503;
  */
 export const BILLING_NOT_CONFIGURED_MESSAGE =
   'El registro no está disponible en este momento. Escríbenos y te damos de alta.';
+
+/**
+ * El proveedor de pagos SÍ está configurado, pero su API rechazó o falló la llamada
+ * (timeout, 4xx/5xx, cuerpo inválido). Antes esto era un `throw new Error(...)` genérico
+ * → Elysia respondía 500 opaco (a veces sin JSON parseable) y el BFF mostraba
+ * "El servicio respondió 500." sin pista de qué hacer.
+ *
+ * 502: el origen del fallo es el upstream de pagos, no Macha. El detalle técnico
+ * (status + body) queda en `cause` / Sentry; al cliente solo llega el mensaje limpio.
+ */
+export class BillingProviderError extends Error {
+  constructor(cause?: unknown) {
+    super(BILLING_PROVIDER_MESSAGE);
+    this.name = 'BillingProviderError';
+    if (cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = cause;
+    }
+  }
+}
+
+export const BILLING_PROVIDER_STATUS = 502;
+
+export const BILLING_PROVIDER_MESSAGE =
+  'No pudimos abrir el pago en este momento. Espera un momento e inténtalo de nuevo, o elige el plan gratuito para entrar ya.';

@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
 import { enforceTokenBucketForUser } from '@/lib/rate-limit';
 import { companies, companyUsers, plans, subscriptions, users } from '@/db/schema';
@@ -15,6 +15,10 @@ import { isBillingConfigured } from '@/lib/billing/recurrente-client';
 import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
 import { env } from '@/lib/env';
 import { normalizeIndustry } from '@/lib/industry-template';
+
+/** Mensaje de conflicto de nombre — único a nivel DB (`companies_name_lower_uq`, migración 0004). */
+export const COMPANY_NAME_TAKEN_MESSAGE =
+  'Ya existe una empresa con ese nombre. Elige otro o entra a la que ya tienes.';
 
 /**
  * CU-868kfvae1/868kfvaem: registro autoservicio — alta automática de empresa+owner
@@ -110,6 +114,54 @@ export const register = new Elysia({ prefix: '/register' })
       const limited = await enforceTokenBucketForUser('register', userId, set, 'POST /register');
       if (limited) return limited;
 
+      /*
+       * EL PLAN ANTES QUE LA EMPRESA.
+       *
+       * Antes se resolvía DESPUÉS de particiones + INSERT de `companies` + membresía.
+       * `identityDerive` hace commit en cualquier `return` (incluido un 422), así que un
+       * catálogo vacío —migración 0021 sin `scripts/seed.ts`— dejaba empresas huérfanas
+       * sin suscripción (medido: NINGEN TECH S.A, 2026-08-12). Validar primero evita el
+       * DDL caro y el alta a medias.
+       *
+       * `planCode` sigue opcional: sin él se toma el primer plan ACTIVO por `sort_order`.
+       */
+      const [planElegido] = body.planCode
+        ? await db.select().from(plans).where(eq(plans.code, body.planCode))
+        : await db
+            .select()
+            .from(plans)
+            .where(eq(plans.active, true))
+            .orderBy(asc(plans.sortOrder), asc(plans.code))
+            .limit(1);
+
+      if (!planElegido || !planElegido.active) {
+        // 422 y no 500: el cliente mandó un plan que no existe o que ya se retiró, y eso lo
+        // puede corregir eligiendo otro. Aún no hay empresa que revertir.
+        set.status = 422;
+        return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
+      }
+
+      // `companies_name_lower_uq` (migración 0004): el nombre es único sin importar
+      // mayúsculas. Reintentar el alta con el mismo nombre (caso típico: la empresa YA
+      // quedó creada en un intento anterior y la persona vuelve a /register) reventaba
+      // el INSERT con 500 texto plano → el BFF solo decía "El servicio respondió 500."
+      // Medido 2026-08-13 con "NINGEN TECH S.A". Se valida ANTES del DDL de particiones
+      // para no dejar basura si el nombre choca.
+      const nombre = body.name.trim();
+      if (!nombre) {
+        set.status = 422;
+        return { error: 'El nombre de la empresa no puede estar vacío.' };
+      }
+      const [nombreTomado] = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(sql`lower(${companies.name}) = lower(${nombre})`)
+        .limit(1);
+      if (nombreTomado) {
+        set.status = 409;
+        return { error: COMPANY_NAME_TAKEN_MESSAGE };
+      }
+
       // Antes del INSERT: ver la nota de arriba sobre el abrazo mortal.
       const companyId = randomUUID();
       await provisionTenantPartitions(companyId);
@@ -122,7 +174,7 @@ export const register = new Elysia({ prefix: '/register' })
           // vive en el flujo de invite/multi-tenant de WorkOS, fuera de alcance aquí)
           // — placeholder estable y único por empresa.
           workosOrgId: `self_serve_${randomUUID()}`,
-          name: body.name,
+          name: nombre,
           // Normalizada al escribir (lib/industry-template.ts): este es el campo de texto
           // libre que el cliente llena en el wizard de registro, y la llave con la que se
           // busca su plantilla de mapeo. De aquí salió el "TECH" que no encontraba nada.
@@ -151,40 +203,6 @@ export const register = new Elysia({ prefix: '/register' })
       await db.update(users).set({ locale: body.locale }).where(eq(users.id, userId));
 
       await seedDefaultAlertRules(db, company!.id);
-
-      // CU-868kjc7g5 criterio 3: la empresa nace con saldo. Antes terminaba el registro en
-      // 0 y su primer insight devolvía 402 — el checkout de Recurrente era el ÚNICO camino
-      // para tener créditos, cuando el PRD trata la compra self-serve como algo que se
-      // suma al plan, no como la puerta de entrada. Va dentro de la transacción del
-      // request: una empresa a medio crear no debe quedar con créditos.
-      /*
-       * EL PLAN, resuelto contra el catálogo (ticket B3). Antes esto era el literal `'base'`
-       * escrito más abajo y `BASE_PLAN_AMOUNT_USD_CENTS` (USD 49) como precio: la empresa
-       * nacía en un plan que no existía en ninguna tabla.
-       *
-       * `planCode` es OPCIONAL a propósito, y esto no es indecisión. El selector de plan en
-       * el alta es el ticket B4, que todavía no está; si lo hiciera obligatorio, el registro
-       * se rompería hasta que ese ticket aterrice. Sin él se toma el primer plan ACTIVO por
-       * `sort_order`, que es el de entrada — y hay una razón dura además de la comodidad:
-       * `subscriptions.plan_code` ahora tiene FK contra `plans`, así que caer al literal
-       * `'base'` reventaría en cualquier base recién migrada y sembrada, donde `base` no
-       * existe (la migración 0021 solo lo da de alta si HABÍA suscripciones que lo usaran).
-       */
-      const [planElegido] = body.planCode
-        ? await db.select().from(plans).where(eq(plans.code, body.planCode))
-        : await db
-            .select()
-            .from(plans)
-            .where(eq(plans.active, true))
-            .orderBy(asc(plans.sortOrder), asc(plans.code))
-            .limit(1);
-
-      if (!planElegido || !planElegido.active) {
-        // 422 y no 500: el cliente mandó un plan que no existe o que ya se retiró, y eso lo
-        // puede corregir eligiendo otro.
-        set.status = 422;
-        return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
-      }
 
       // CU-868kjc7g5 criterio 3 + B3: el abono inicial ahora sale de los créditos del PLAN,
       // con el ajuste global de `platform_settings` como respaldo para los planes que no
@@ -229,6 +247,7 @@ export const register = new Elysia({ prefix: '/register' })
         ? await startSubscriptionCheckout({
             amountUsdCents: planElegido.amountUsdCents,
             companyId: company!.id,
+            planName: planElegido.name,
             successUrl: `${appBaseUrl}/?registered=1`,
             cancelUrl: `${appBaseUrl}/register?cancelled=1`,
           })

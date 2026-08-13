@@ -34,6 +34,19 @@ export const INTAKE_MESSAGES = {
     unsupportedContent: (reason: string | null) =>
       `No pudimos leer movimientos financieros en este archivo${reason ? `: ${reason}` : '.'}` +
       ` Descarga la plantilla de esta pantalla, llénala con tus movimientos y súbela.`,
+    /*
+     * El caso de ÉXITO que se veía como un fracaso. El cliente resube su contabilidad
+     * completa cada semana; cuando no trae nada nuevo, el sistema hizo exactamente lo que
+     * debía —no gastó un centavo— y hasta el 2026-08-12 le respondía que su archivo era
+     * ilegible y que descargara una plantilla.
+     *
+     * El texto lo dice como una buena noticia y NO pide ninguna acción, porque no hay
+     * ninguna que tomar.
+     */
+    nothingNew: (filas: number) =>
+      `Ya teníamos registradas las ${filas.toLocaleString('es')} filas de este archivo, ` +
+      `así que no se duplicó nada. Cuando subas uno con movimientos nuevos, procesaremos ` +
+      `solo esos.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -54,6 +67,9 @@ export const INTAKE_MESSAGES = {
     unsupportedContent: (reason: string | null) =>
       `We couldn't find any financial movements in this file${reason ? `: ${reason}` : '.'}` +
       ` Download the template on this screen, fill it in with your movements and upload it.`,
+    nothingNew: (filas: number) =>
+      `We already had all ${filas.toLocaleString('en')} rows in this file on record, so ` +
+      `nothing was duplicated. Upload one with new movements and we'll process just those.`,
   },
 } as const;
 
