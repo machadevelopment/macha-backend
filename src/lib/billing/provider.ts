@@ -22,11 +22,13 @@ export async function startSubscriptionCheckout(params: {
   successUrl: string;
   cancelUrl: string;
   companyId: string;
+  planName?: string;
 }): Promise<CheckoutResult> {
   const checkout = await recurrenteCreateSubscriptionCheckout({
     amountUsdCents: params.amountUsdCents,
     successUrl: params.successUrl,
     cancelUrl: params.cancelUrl,
+    planName: params.planName,
     metadata: { companyId: params.companyId, kind: 'subscription' },
   });
   return { checkoutUrl: checkout.checkout_url, providerCheckoutId: checkout.id };
