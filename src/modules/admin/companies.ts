@@ -69,6 +69,21 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
       // inocua y `CREATE TABLE IF NOT EXISTS` hace que el reintento sea idempotente,
       // mientras que colgar la petición deja el alta de empresas inutilizable.
       const companyId = randomUUID();
+      const nombre = body.name.trim();
+      if (!nombre) {
+        set.status = 422;
+        return { error: 'El nombre de la empresa no puede estar vacío.' };
+      }
+      const [nombreTomado] = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(rawSql`lower(${companies.name}) = lower(${nombre})`)
+        .limit(1);
+      if (nombreTomado) {
+        set.status = 409;
+        return { error: 'Ya existe una empresa con ese nombre.' };
+      }
+
       const partitions = await provisionTenantPartitions(companyId);
 
       const [company] = await db
@@ -76,7 +91,7 @@ export const adminCompanies = new Elysia({ prefix: '/admin/companies' })
         .values({
           id: companyId,
           workosOrgId: body.workosOrgId,
-          name: body.name,
+          name: nombre,
           // Normalizada al escribir: la industria es texto libre y es la llave con la
           // que se busca la plantilla de mapeo. "TECH" y "tech" tienen que ser la misma
           // industria (lib/industry-template.ts).

@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { identityDerive } from '@/guards/identity.derive';
 import { enforceTokenBucketForUser } from '@/lib/rate-limit';
 import { companies, companyUsers, plans, subscriptions, users } from '@/db/schema';
@@ -15,6 +15,10 @@ import { isBillingConfigured } from '@/lib/billing/recurrente-client';
 import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
 import { env } from '@/lib/env';
 import { normalizeIndustry } from '@/lib/industry-template';
+
+/** Mensaje de conflicto de nombre — único a nivel DB (`companies_name_lower_uq`, migración 0004). */
+export const COMPANY_NAME_TAKEN_MESSAGE =
+  'Ya existe una empresa con ese nombre. Elige otro o entra a la que ya tienes.';
 
 /**
  * CU-868kfvae1/868kfvaem: registro autoservicio — alta automática de empresa+owner
@@ -137,6 +141,27 @@ export const register = new Elysia({ prefix: '/register' })
         return { error: `El plan '${body.planCode ?? '(ninguno)'}' no está disponible.` };
       }
 
+      // `companies_name_lower_uq` (migración 0004): el nombre es único sin importar
+      // mayúsculas. Reintentar el alta con el mismo nombre (caso típico: la empresa YA
+      // quedó creada en un intento anterior y la persona vuelve a /register) reventaba
+      // el INSERT con 500 texto plano → el BFF solo decía "El servicio respondió 500."
+      // Medido 2026-08-13 con "NINGEN TECH S.A". Se valida ANTES del DDL de particiones
+      // para no dejar basura si el nombre choca.
+      const nombre = body.name.trim();
+      if (!nombre) {
+        set.status = 422;
+        return { error: 'El nombre de la empresa no puede estar vacío.' };
+      }
+      const [nombreTomado] = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(sql`lower(${companies.name}) = lower(${nombre})`)
+        .limit(1);
+      if (nombreTomado) {
+        set.status = 409;
+        return { error: COMPANY_NAME_TAKEN_MESSAGE };
+      }
+
       // Antes del INSERT: ver la nota de arriba sobre el abrazo mortal.
       const companyId = randomUUID();
       await provisionTenantPartitions(companyId);
@@ -149,7 +174,7 @@ export const register = new Elysia({ prefix: '/register' })
           // vive en el flujo de invite/multi-tenant de WorkOS, fuera de alcance aquí)
           // — placeholder estable y único por empresa.
           workosOrgId: `self_serve_${randomUUID()}`,
-          name: body.name,
+          name: nombre,
           // Normalizada al escribir (lib/industry-template.ts): este es el campo de texto
           // libre que el cliente llena en el wizard de registro, y la llave con la que se
           // busca su plantilla de mapeo. De aquí salió el "TECH" que no encontraba nada.
