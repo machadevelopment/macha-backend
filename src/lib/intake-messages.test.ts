@@ -38,3 +38,35 @@ describe('unsupportedContent', () => {
     });
   }
 });
+
+describe('resubir un archivo sin nada nuevo NO es un archivo ilegible', () => {
+  /*
+   * Encontrado corriendo el flujo completo sobre un archivo real (2026-08-12): la segunda
+   * subida del mismo .xlsx terminaba en `unsupported` con "no pudimos leer movimientos
+   * financieros en este archivo, descarga la plantilla".
+   *
+   * Era el caso de ÉXITO de la deduplicación —cero filas al modelo, costo USD 0— presentado
+   * al cliente como un fracaso suyo. La rama de "cero filas" es anterior a la huella por
+   * fila, cuando cero filas solo podía significar archivo ilegible.
+   *
+   * Ningún test unitario podía verlo: hace falta una primera subida para que la segunda
+   * deduplique.
+   */
+  test('el mensaje da una buena noticia y no pide ninguna acción', () => {
+    for (const locale of ['es', 'en'] as const) {
+      const m = INTAKE_MESSAGES[locale].nothingNew(1167);
+      // No culpa al cliente ni lo manda a descargar nada: no hay nada que corregir.
+      expect(m.toLowerCase()).not.toContain('plantilla');
+      expect(m.toLowerCase()).not.toContain('template');
+      // El separador de miles depende del idioma, y en español los números de CUATRO
+      // cifras no lo llevan ("1167" en es, "1,167" en en). Se afirma que el conteo
+      // aparece, no una forma concreta — que es lo que de verdad importa.
+      expect(m.replace(/[.,]/g, '')).toContain('1167');
+    }
+  });
+
+  test('el texto de archivo ilegible sigue siendo distinto', () => {
+    // Los dos desenlaces llegan a "cero filas" y tienen que leerse como cosas opuestas.
+    expect(INTAKE_MESSAGES.es.nothingNew(10)).not.toBe(INTAKE_MESSAGES.es.unsupportedContent(null));
+  });
+});
