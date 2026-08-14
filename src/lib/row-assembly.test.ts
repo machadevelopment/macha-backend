@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { asDate, assemblePayload, type ColumnMap, type RowVerdict } from './row-assembly';
+import {
+  asDate,
+  assemblePayload,
+  costoDeLaFila,
+  type ColumnMap,
+  type RowVerdict,
+} from './row-assembly';
 
 /**
  * Estos tests son la red que hace SEGURO dejar de pedirle los valores al modelo.
@@ -23,6 +29,8 @@ const VENTAS_MAP: ColumnMap = {
   quantity: 7,
   productCategory: 12,
   dueDate: null,
+  costTotal: null,
+  costUnit: null,
 };
 
 const FILA_VENTA = [
@@ -257,6 +265,8 @@ describe('payload de factura', () => {
       columns: {
         date: 2,
         dueDate: 3,
+        costTotal: null,
+        costUnit: null,
         amount: 4,
         counterparty: 1,
         currency: null,
@@ -278,5 +288,63 @@ describe('payload de factura', () => {
     expect(p.issueDate).toBe('2025-08-09');
     expect(p.dueDate).toBe('2025-12-09');
     expect(p.originalAmount).toBe(3200);
+  });
+});
+
+describe('el costo que venía en la misma fila y se perdía', () => {
+  /*
+   * Observado en producción el 2026-08-14: la pantalla de Ventas por producto mostraba
+   * `GTQ 0.00` de costo y 100 % de margen en TODOS los productos — con el dato ahí, en la
+   * celda de al lado de cada venta.
+   *
+   * La causa era de arquitectura: cada fila producía UNA transacción. El modelo mapeaba el
+   * monto al ingreso y la columna de costo no la leía nadie. El costo por producto sale de
+   * transacciones `type = 'cogs'`, y nunca se creaba ninguna.
+   *
+   * Las filas de abajo son las REALES de los archivos de los clientes.
+   */
+
+  // Cafeteria_Excel_Datos.xlsx, hoja "Ventas_Diarias" — el costo viene TOTAL por línea:
+  // Fecha ID_Producto Producto Categoría Unidades PrecioUnit IngresoTotal CostoTotal Utilidad
+  const CAFETERIA: ColumnMap = {
+    date: 0, product: 2, productCategory: 3, quantity: 4,
+    amount: 6, costTotal: 7, costUnit: null,
+    currency: null, description: null, counterparty: null, dueDate: null,
+  }; // prettier-ignore
+  const FILA_CAFE = [46174, 'P01', 'Café Americano', 'Bebidas Calientes', 6, 18, 108, 27, 81]; // prettier-ignore
+
+  test('costo TOTAL de línea: se toma tal cual', () => {
+    expect(costoDeLaFila(FILA_CAFE, CAFETERIA)).toBe(27);
+  });
+
+  test('costo UNITARIO: se multiplica por las unidades', () => {
+    /*
+     * Joyería Lunaria trae `CostoUnitario` 135,52 con `Cantidad` 2. Tomarlo tal cual diría
+     * que la línea costó 135,52 cuando costó 271,04 — un margen inflado al doble. Confundir
+     * las dos formas es exactamente lo que multiplica o divide el costo por las unidades.
+     */
+    const joyeria: ColumnMap = { ...CAFETERIA, costTotal: null, costUnit: 5, quantity: 4 };
+    expect(costoDeLaFila([0, 0, 0, 0, 2, 135.52], joyeria)).toBeCloseTo(271.04, 4);
+  });
+
+  test('costo unitario SIN unidades no se inventa', () => {
+    // Sin saber cuántas, el costo de la línea no se puede calcular. `null` manda la fila a
+    // revisión; un número inventado se vería igual de creíble y falsearía el margen.
+    const sinUnidades: ColumnMap = { ...CAFETERIA, costTotal: null, costUnit: 5, quantity: null };
+    expect(costoDeLaFila([0, 0, 0, 0, 2, 135.52], sinUnidades)).toBe(null);
+  });
+
+  test('una hoja sin costo devuelve null, no cero', () => {
+    // `Racum 2025` del reporte de Kapel no trae columna de costo. Un 0 diría "costó cero" y
+    // pintaría 100 % de margen como un hecho; `null` dice "este archivo no lo trae".
+    const sinCosto: ColumnMap = { ...CAFETERIA, costTotal: null, costUnit: null };
+    expect(costoDeLaFila(FILA_CAFE, sinCosto)).toBe(null);
+  });
+
+  test('el costo entra en positivo aunque la hoja lo traiga negativo', () => {
+    // Misma regla que el monto: la dirección la lleva `type`, y `staging-rules` exige
+    // positivo. Un costo negativo se marcaría `invalid_amount` y se iría a revisión.
+    const neg: ColumnMap = { ...CAFETERIA, costTotal: 7 };
+    expect(costoDeLaFila([46174, 'P01', 'x', 'y', 6, 18, 108, -27], neg)).toBe(27);
   });
 });

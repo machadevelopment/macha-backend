@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
 import { runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
-import { assemblePayload, type ColumnMap, type RowVerdict } from './row-assembly';
+import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -224,7 +224,7 @@ type VeredictoCrudo = {
  * datos, y esa declaración es justamente lo que las distingue de una fila perdida. No
  * generan fila de staging, pero SÍ cuentan como cubiertas.
  */
-function construirFilas(
+export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
   params: { rows: unknown[][]; baseCurrency: string },
   columns: ColumnMap,
@@ -232,15 +232,49 @@ function construirFilas(
   const out: ClassifiedRow[] = [];
   for (const [i, v] of porIndice) {
     if (v.e === 'skip') continue;
+    const row = params.rows[i]!;
+    const verdict = { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf };
+
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({
-        verdict: { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf },
-        row: params.rows[i]!,
-        columns,
-        baseCurrency: params.baseCurrency,
-      }),
+      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
+    });
+
+    /*
+     * ═══ UNA FILA DE VENTA CON COSTO PRODUCE DOS TRANSACCIONES ═══
+     *
+     * Los libros de PYME traen el ingreso y el costo en la MISMA línea. Como cada fila
+     * producía UNA transacción, el costo se perdía entero: `cogs = 0` para todos los
+     * productos y margen 100 % en la pantalla de Ventas por producto — con el dato ahí, en
+     * la celda de al lado. Observado en producción el 2026-08-14.
+     *
+     * Solo se desdobla una fila de INGRESO: el costo acompaña a una venta. Si el modelo ya
+     * clasificó la fila como `cogs`, su monto YA es el costo y agregarle otro lo duplicaría.
+     * Y solo para `transaction` — una factura o una cuenta por pagar no llevan costo de
+     * ventas propio.
+     *
+     * La fila de costo hereda fecha, producto y categoría de la venta: es el mismo hecho
+     * económico visto por su otra cara, y sin la fecha no entraría al mismo período ni sin
+     * el producto al mismo margen.
+     */
+    if (v.e !== 'transaction' || v.t !== 'revenue') continue;
+    const costo = costoDeLaFila(row, columns);
+    if (costo === null || costo === 0) continue;
+
+    const venta = assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency });
+    out.push({
+      targetEntity: 'transaction',
+      confidence: typeof v.cf === 'number' ? v.cf : 0,
+      payload: {
+        ...venta,
+        type: 'cogs',
+        category: 'costo_de_ventas',
+        originalAmount: costo,
+        // Las unidades ya las contó la fila de ingreso. Repetirlas acá las duplicaría en
+        // cualquier conteo de "unidades vendidas".
+        quantity: null,
+      },
     });
   }
   return out;
@@ -291,7 +325,7 @@ export type ClassifySheetResult = {
 export const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
-2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto y fecha de vencimiento. Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
+2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto, fecha de vencimiento y COSTO de la fila (ver punto 11 — si la hoja trae el costo junto al ingreso, señalarlo es obligatorio: sin él el sistema calcula 100% de margen en todo). Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
 3. Devolver EXACTAMENTE UNA entrada por cada fila del lote, sin excepción: si el lote trae 88 filas, "rows" trae 88 entradas con los índices 0 a 87, cada uno una sola vez. Ninguna fila se omite y ningún índice se inventa. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
 4. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
 5. Asignar "cf" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
@@ -300,7 +334,8 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 8. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
 9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
 10. La columna "quantity" del mapa se señala solo si la hoja trae unidades explícitas. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
-11. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
+11. "costTotal" y "costUnit" son las columnas de COSTO de la propia fila, y solo una de las dos (o ninguna). Muchos libros de PYME traen el ingreso y el costo en la misma línea ("Ingreso Total" junto a "Costo Total", o "PrecioUnitario" junto a "CostoUnitario"). Señala "costTotal" cuando la columna ya es el costo de la línea completa, y "costUnit" cuando es el costo de UNA unidad. NUNCA señales como costo una columna de precio de venta, de utilidad, de margen ni de descuento: el costo es lo que le costó al negocio, no lo que cobró ni lo que ganó. Si la hoja no trae costo, las dos van en null — inventarlo produciría un margen falso.
+12. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
 /**
  * ESQUEMA COMPACTO — el cambio que baja el costo y el tiempo a la vez (2026-08-12).
@@ -340,6 +375,23 @@ export const CLASSIFY_ROWS_SCHEMA = {
         quantity: { type: ['integer', 'null'] },
         productCategory: { type: ['integer', 'null'] },
         dueDate: { type: ['integer', 'null'] },
+        /*
+         * El COSTO de la propia fila de venta. Sin esto, una hoja que trae "Ingreso Total"
+         * y "Costo Total" en la misma línea perdía el costo entero: `cogs = 0` para todos
+         * los productos y 100 % de margen en toda la pantalla. Observado en producción el
+         * 2026-08-14 con el archivo de una cafetería.
+         *
+         * Dos índices porque las hojas reales traen las dos formas y confundirlas multiplica
+         * o divide el costo por las unidades.
+         */
+        costTotal: {
+          type: ['integer', 'null'],
+          description: 'Columna con el COSTO TOTAL de la línea. No el precio de venta.',
+        },
+        costUnit: {
+          type: ['integer', 'null'],
+          description: 'Columna con el costo de UNA unidad, si la hoja lo da así.',
+        },
       },
       required: [
         'date',
@@ -351,6 +403,8 @@ export const CLASSIFY_ROWS_SCHEMA = {
         'quantity',
         'productCategory',
         'dueDate',
+        'costTotal',
+        'costUnit',
       ],
       additionalProperties: false,
     },

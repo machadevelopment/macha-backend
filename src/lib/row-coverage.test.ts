@@ -6,6 +6,7 @@ const {
   indexarVeredictos,
   hayDesplazamiento,
   fusionarMapaDeColumnas,
+  construirFilas,
   SheetColumnMapMismatchError,
 } = await import('./anthropic');
 type ColumnMap = import('./row-assembly').ColumnMap;
@@ -150,6 +151,8 @@ describe('el mapa de columnas de la hoja', () => {
     quantity: 7,
     productCategory: 12,
     dueDate: null,
+    costTotal: null,
+    costUnit: null,
   };
   const NULOS: ColumnMap = {
     date: null,
@@ -161,6 +164,8 @@ describe('el mapa de columnas de la hoja', () => {
     quantity: null,
     productCategory: null,
     dueDate: null,
+    costTotal: null,
+    costUnit: null,
   };
 
   test('dos lotes con el mismo mapa no cambian nada', () => {
@@ -223,5 +228,69 @@ describe('el mapa de columnas de la hoja', () => {
       expect((e as Error).message).toContain('amount: 13 vs 8');
       expect((e as Error).message).toContain('date: 2 vs 3');
     }
+  });
+});
+
+describe('una venta que trae su costo produce DOS transacciones', () => {
+  const CAFETERIA: ColumnMap = {
+    date: 0, product: 2, productCategory: 3, quantity: 4,
+    amount: 6, costTotal: 7, costUnit: null,
+    currency: null, description: null, counterparty: null, dueDate: null,
+  }; // prettier-ignore
+  const FILA = [46174, 'P01', 'Café Americano', 'Bebidas Calientes', 6, 18, 108, 27, 81]; // prettier-ignore
+
+  const armar = (e: string, t: string | null, columns = CAFETERIA) =>
+    construirFilas(
+      new Map([[0, { i: 0, e, t, c: 'ventas', cf: 0.95 }]]) as never,
+      { rows: [FILA], baseCurrency: 'GTQ' },
+      columns,
+    );
+
+  test('sale la venta y sale el costo, con el mismo producto y la misma fecha', () => {
+    /*
+     * El costo por producto sale de transacciones `type = 'cogs'` ligadas al producto. Sin
+     * la fila de costo, la pantalla de Ventas por producto mostraba GTQ 0.00 y 100 % de
+     * margen en todo — que es exactamente lo que se vio en producción el 2026-08-14.
+     *
+     * Fecha y producto se heredan porque es el mismo hecho económico visto por su otra
+     * cara: sin la fecha no cae en el mismo período, sin el producto no entra al mismo
+     * margen.
+     */
+    const filas = armar('transaction', 'revenue');
+    expect(filas).toHaveLength(2);
+
+    const [venta, costo] = filas.map(
+      (f: { payload: unknown }) => f.payload as Record<string, unknown>,
+    );
+    expect(venta!.type).toBe('revenue');
+    expect(venta!.originalAmount).toBe(108);
+    expect(costo!.type).toBe('cogs');
+    expect(costo!.originalAmount).toBe(27);
+    expect(costo!.product).toBe(venta!.product);
+    expect(costo!.date).toBe(venta!.date);
+  });
+
+  test('las unidades NO se repiten en la fila de costo', () => {
+    // Ya las contó la venta. Repetirlas duplicaría cualquier conteo de unidades vendidas.
+    const [venta, costo] = armar('transaction', 'revenue').map(
+      (f) => f.payload as Record<string, unknown>,
+    );
+    expect(venta!.quantity).toBe(6);
+    expect(costo!.quantity).toBe(null);
+  });
+
+  test('una fila ya clasificada como costo NO se desdobla', () => {
+    // Su monto YA es el costo. Agregarle otro lo duplicaría y hundiría el margen.
+    expect(armar('transaction', 'cogs')).toHaveLength(1);
+  });
+
+  test('una factura no se desdobla', () => {
+    // Una cuenta por cobrar o por pagar no lleva costo de ventas propio.
+    expect(armar('invoice', null)).toHaveLength(1);
+  });
+
+  test('sin columna de costo, sigue saliendo una sola fila', () => {
+    const sinCosto = { ...CAFETERIA, costTotal: null, costUnit: null };
+    expect(armar('transaction', 'revenue', sinCosto)).toHaveLength(1);
   });
 });
