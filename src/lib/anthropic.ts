@@ -580,6 +580,23 @@ export class SheetIndexShiftError extends Error {
  * que terminen todos los lotes, y para entonces las filas ya estarían insertadas. Esto corre
  * ANTES de la transacción del lote, así que un mapa discrepante no llega a escribir nada.
  */
+/**
+ * Las columnas de las que sale un NÚMERO. Solo estas pueden corromper la contabilidad si dos
+ * lotes de la misma hoja las leen distinto — el resto son etiquetas.
+ *
+ * `quantity` está adentro y no es obvio: de ella salen las unidades vendidas Y el costo de la
+ * línea cuando la hoja da el costo por unidad. Leerla mal multiplica o divide el costo.
+ */
+const COLUMNAS_QUE_CORROMPEN_NUMEROS = new Set<keyof ColumnMap>([
+  'amount',
+  'costTotal',
+  'costUnit',
+  'quantity',
+  'date',
+  'dueDate',
+  'currency',
+]);
+
 export function fusionarMapaDeColumnas(
   sheetName: string,
   canonico: ColumnMap,
@@ -625,6 +642,32 @@ export function fusionarMapaDeColumnas(
      *
      * Acá sí se aborta, y antes de la transacción del lote: no se escribe una sola fila.
      */
+    /*
+     * ═══ NO TODA DISCREPANCIA MERECE TUMBAR EL ARCHIVO ═══
+     *
+     * Solo las columnas de las que sale un NÚMERO pueden corromper la contabilidad si dos
+     * lotes las leen distinto: un lote lee `TotalLinea` y otro `PrecioUnitario` y media hoja
+     * entra con el precio de una unidad en vez del total de la línea, plausible y sin un solo
+     * error. Ahí sí hay que abortar antes de escribir nada.
+     *
+     * Las columnas DESCRIPTIVAS son otra cosa. Observado en un archivo real (2026-08-14, hoja
+     * "Racum 2025"): un lote leyó `product: 2` (Calidad = "Kapel Blend") y otro `product: 3`
+     * (Presentación = "Molido"). Los dos son defendibles — la hoja es ambigua, el modelo no
+     * está fallando. Intercambiarlos desordena etiquetas y fragmenta el agrupado por producto;
+     * NO falsea un solo quetzal.
+     *
+     * Tratarlas igual bloqueaba el documento entero y dejaba al cliente sin nada, que es
+     * estrictamente peor que unas etiquetas mezcladas y visibles. Gana el canónico y se avisa.
+     */
+    if (!COLUMNAS_QUE_CORROMPEN_NUMEROS.has(k)) {
+      console.warn(
+        `[ingesta] "${sheetName}": los lotes discrepan en "${k}" (${a} vs ${b}). Se usa ${a} ` +
+          `para toda la hoja. No aborta: esa columna no altera montos ni fechas.`,
+      );
+      fusionado[k] = a;
+      continue;
+    }
+
     conflictos.push(`${k}: ${a} vs ${b}`);
     fusionado[k] = a;
   }

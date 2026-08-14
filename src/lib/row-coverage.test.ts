@@ -204,6 +204,33 @@ describe('el mapa de columnas de la hoja', () => {
     expect(fusionarMapaDeColumnas('V', a, b)).toEqual(fusionarMapaDeColumnas('V', b, a));
   });
 
+  test('discrepar en PRODUCTO no tumba el archivo', () => {
+    /*
+     * Observado en un archivo real (2026-08-14, hoja "Racum 2025"): un lote leyó
+     * `product: 2` (Calidad = "Kapel Blend") y otro `product: 3` (Presentación = "Molido").
+     * Los dos son defendibles — la hoja es ambigua, el modelo no está fallando.
+     *
+     * La primera versión de este guardia abortaba igual que con las columnas de dinero, y el
+     * documento entero se caía. Intercambiar producto y categoría desordena etiquetas; NO
+     * falsea un solo quetzal. Dejar al cliente sin nada es estrictamente peor.
+     */
+    expect(() =>
+      fusionarMapaDeColumnas('Racum 2025', MAPA, { ...MAPA, product: 3, productCategory: 6 }),
+    ).not.toThrow();
+    // Gana el canónico, para que toda la hoja quede etiquetada igual.
+    expect(fusionarMapaDeColumnas('Racum 2025', MAPA, { ...MAPA, product: 3 }).product).toBe(
+      MAPA.product,
+    );
+  });
+
+  test('discrepar en la CANTIDAD sí aborta, aunque no sea un monto', () => {
+    // De `quantity` salen las unidades vendidas Y el costo de la línea cuando la hoja da el
+    // costo por unidad. Leerla mal multiplica o divide el costo — es una columna de números.
+    expect(() => fusionarMapaDeColumnas('Ventas', MAPA, { ...MAPA, quantity: 9 })).toThrow(
+      SheetColumnMapMismatchError,
+    );
+  });
+
   test('dos columnas de dinero DISTINTAS sí abortan', () => {
     /*
      * La corrupción de verdad, y la única. El lote 1 lee `TotalLinea` (13) y el lote 7 lee
