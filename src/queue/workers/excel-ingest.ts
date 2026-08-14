@@ -13,6 +13,7 @@ import { planBatchSize } from '@/lib/sheet-batching';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
+import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
 import { canSkipSheet } from '@/lib/sheet-classifier';
 import { insertStagingRows } from '@/lib/staging';
 import { runWithConcurrency } from '@/lib/concurrency';
@@ -207,6 +208,37 @@ export function startExcelIngestWorker(): Promise<string> {
           fingerprints: string[];
         };
         const pendientes: Pendiente[] = [];
+
+        /*
+         * ═══ ANTES DE NADA: ¿HAY DOS HOJAS QUE SON EL MISMO DINERO? ═══
+         *
+         * Un archivo real trae las compras dos veces —una cabecera de órdenes y su detalle de
+         * líneas, sumando exactamente lo mismo—. Si las dos producen movimientos, las compras
+         * del cliente se cuentan DOS VECES.
+         *
+         * Se corre sobre las hojas que SOBREVIVEN a los otros filtros, no sobre todas, y esa
+         * distinción no es un detalle de eficiencia: comparando todas, un catálogo de productos
+         * con totales acumulados "empata" con la hoja de ventas y —por tener menos filas—
+         * ganaría, descartando 520 ventas reales. Los otros filtros ya sacaron catálogos y
+         * resúmenes; lo que queda son movimientos compitiendo contra movimientos, que es el
+         * único caso donde esta comparación significa algo.
+         */
+        const vivas: { nombre: string; rows: unknown[][] }[] = [];
+        for (const nombre of workbook.SheetNames) {
+          const hoja = workbook.Sheets[nombre];
+          if (!hoja) continue;
+          const crudas: unknown[][] = XLSX.utils.sheet_to_json(hoja, {
+            header: 1,
+            blankrows: false,
+          });
+          if (crudas.length < 2) continue;
+          const desdeEncabezado = crudas.slice(detectarFilaDeEncabezado(crudas));
+          if (analizarFormaDeHoja(desdeEncabezado).esReporte) continue;
+          if (canSkipSheet(desdeEncabezado[0] ?? [])) continue;
+          vivas.push({ nombre, rows: desdeEncabezado });
+        }
+        const detalleDuplicado = detectarDetalleDuplicado(vivas);
+
         /** Filas que ya se habían ingerido antes y no vuelven a costar un token. */
         /*
          * DOS contadores, no uno. Se mezclaban en `totalRowsSkipped` y el log lo reportaba
@@ -278,6 +310,17 @@ export function startExcelIngestWorker(): Promise<string> {
            * Se guarda el motivo en lenguaje del cliente: si el archivo termina sin filas, el
            * mensaje puede decir QUÉ hoja no se entendió en vez de un genérico.
            */
+          const yaContada = detalleDuplicado.get(sheetName);
+          if (yaContada) {
+            totalRowsSkippedPreFiltro += rows.length;
+            unusableReasons.add(`la hoja "${sheetName}" ${yaContada}`);
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por duplicar ` +
+                `montos de otra hoja: ${rows.length} filas no van al modelo`,
+            );
+            continue;
+          }
+
           const forma = analizarFormaDeHoja(rows);
           if (forma.esReporte) {
             totalRowsSkippedPreFiltro += rows.length;
