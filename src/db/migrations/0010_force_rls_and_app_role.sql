@@ -27,8 +27,8 @@
 --   CREATE ROLE macha_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS
 --     PASSWORD '<generated>';
 -- Then set APP_DATABASE_URL in Railway to a connection string using that role, and
--- either redeploy (this migration re-runs every deploy — es el ÚNICO archivo marcado
--- `@reaplicar-siempre`, ver la cabecera de migrate.ts) or re-run
+-- either redeploy (crear el rol cambia la clave del registro de migraciones, así que el
+-- siguiente deploy las reaplica todas una vez — ver la cabecera de migrate.ts) or re-run
 -- `bun run db:migrate` once — the GRANT/REVOKE block below only takes effect once
 -- macha_app actually exists; until then it's a no-op (logged via NOTICE), and
 -- APP_DATABASE_URL falls back to DATABASE_URL (env.ts) so nothing breaks meanwhile —
