@@ -2,8 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
 
-const { indexarVeredictos, hayDesplazamiento, assertMismoMapa, SheetColumnMapMismatchError } =
-  await import('./anthropic');
+const {
+  indexarVeredictos,
+  hayDesplazamiento,
+  fusionarMapaDeColumnas,
+  SheetColumnMapMismatchError,
+} = await import('./anthropic');
 type ColumnMap = import('./row-assembly').ColumnMap;
 
 /**
@@ -135,7 +139,7 @@ describe('cobertura: qué filas quedaron sin veredicto', () => {
   });
 });
 
-describe('el mapa de columnas tiene que ser el mismo en toda la hoja', () => {
+describe('el mapa de columnas de la hoja', () => {
   const MAPA: ColumnMap = {
     date: 2,
     amount: 13,
@@ -147,23 +151,64 @@ describe('el mapa de columnas tiene que ser el mismo en toda la hoja', () => {
     productCategory: 12,
     dueDate: null,
   };
+  const NULOS: ColumnMap = {
+    date: null,
+    amount: null,
+    currency: null,
+    description: null,
+    counterparty: null,
+    product: null,
+    quantity: null,
+    productCategory: null,
+    dueDate: null,
+  };
 
-  test('dos lotes con el mismo mapa pasan', () => {
-    // Es lo que de hecho ocurre hoy: tres lotes bien separados de la hoja real dieron los
-    // nueve índices idénticos (medido 2026-08-12). El guardia no debe estorbar el caso normal.
-    expect(() => assertMismoMapa('Ventas', MAPA, { ...MAPA })).not.toThrow();
+  test('dos lotes con el mismo mapa no cambian nada', () => {
+    expect(fusionarMapaDeColumnas('Ventas', MAPA, { ...MAPA })).toEqual(MAPA);
   });
 
-  test('un lote que lee otra columna de monto se aborta', () => {
+  test('UN VALOR CONTRA NULL NO ES CONFLICTO — el bug que salió a producción', () => {
     /*
-     * El escenario exacto: el lote 1 lee `TotalLinea` (13) y el lote 7 lee `PrecioUnitario`
-     * (8). Las dos son columnas de dinero perfectamente creíbles, así que la mitad de la hoja
+     * Este guardia se escribió comparando con `!==`, así que `amount: 7 vs null` contaba como
+     * contradicción y tumbaba el documento entero. Rompió subidas reales de clientes el
+     * 2026-08-14 (hojas "Racum 2025" y "Ventas_Diarias"): documentos abortados y atascados
+     * en `processing`.
+     *
+     * Un lote devuelve null cuando SU tramo de filas no permite ver la columna —un bloque de
+     * totales, filas vacías—. No afirma que la columna no exista: dice que ahí no la
+     * distingue. El otro lote no lo contradice, lo completa.
+     */
+    expect(() => fusionarMapaDeColumnas('Racum 2025', MAPA, NULOS)).not.toThrow();
+    expect(fusionarMapaDeColumnas('Racum 2025', MAPA, NULOS)).toEqual(MAPA);
+  });
+
+  test('lo que un lote sí vio COMPLETA lo que el otro no', () => {
+    // El motivo de fusionar en vez de solo tolerar: el lote que no distinguió la descripción
+    // arma sus filas con la del lote que sí la vio, en vez de dejarlas sin descripción.
+    const conDescripcion = { ...MAPA, description: 4 };
+    expect(fusionarMapaDeColumnas('Ventas', MAPA, conDescripcion).description).toBe(4);
+    expect(fusionarMapaDeColumnas('Ventas', conDescripcion, MAPA).description).toBe(4);
+  });
+
+  test('la fusión da igual en qué orden lleguen los lotes', () => {
+    // Los lotes de una hoja corren en paralelo: el primero en TERMINAR fija el canónico. Si
+    // el resultado dependiera del orden, el mismo archivo daría datos distintos entre
+    // corridas.
+    const a = { ...MAPA, description: 4 };
+    const b = { ...NULOS, amount: 13, currency: 9 };
+    expect(fusionarMapaDeColumnas('V', a, b)).toEqual(fusionarMapaDeColumnas('V', b, a));
+  });
+
+  test('dos columnas de dinero DISTINTAS sí abortan', () => {
+    /*
+     * La corrupción de verdad, y la única. El lote 1 lee `TotalLinea` (13) y el lote 7 lee
+     * `PrecioUnitario` (8): las dos son columnas de dinero creíbles, así que media hoja
      * entraría con el precio de una unidad en vez del total de la línea.
      *
-     * Ningún validador lo atraparía después: `staging-rules` solo exige que el monto sea un
-     * número positivo, y 272,99 lo es tanto como 491,38.
+     * Ningún validador lo atraparía — `staging-rules` solo exige un número positivo, y
+     * 272,99 lo es tanto como 491,38.
      */
-    expect(() => assertMismoMapa('Ventas', MAPA, { ...MAPA, amount: 8 })).toThrow(
+    expect(() => fusionarMapaDeColumnas('Ventas', MAPA, { ...MAPA, amount: 8 })).toThrow(
       SheetColumnMapMismatchError,
     );
   });
@@ -172,17 +217,11 @@ describe('el mapa de columnas tiene que ser el mismo en toda la hoja', () => {
     // Quien lo lea en `documents.error_reason` tiene que poder abrir el archivo y mirar esas
     // dos columnas. "Los mapas no coinciden" mandaría a leer el prompt, que no es el problema.
     try {
-      assertMismoMapa('Ventas', MAPA, { ...MAPA, amount: 8, date: 3 });
+      fusionarMapaDeColumnas('Ventas', MAPA, { ...MAPA, amount: 8, date: 3 });
       throw new Error('debió lanzar');
     } catch (e) {
       expect((e as Error).message).toContain('amount: 13 vs 8');
       expect((e as Error).message).toContain('date: 2 vs 3');
     }
-  });
-
-  test('pasar de una columna ausente a una presente también cuenta', () => {
-    // `null` → 4 no es "más información": es que un lote leyó descripción y el otro no, así
-    // que media hoja entra sin descripción por una razón que no es del archivo.
-    expect(() => assertMismoMapa('Ventas', MAPA, { ...MAPA, description: 4 })).toThrow();
   });
 });

@@ -526,16 +526,57 @@ export class SheetIndexShiftError extends Error {
  * que terminen todos los lotes, y para entonces las filas ya estarían insertadas. Esto corre
  * ANTES de la transacción del lote, así que un mapa discrepante no llega a escribir nada.
  */
-export function assertMismoMapa(sheetName: string, canonico: ColumnMap, delLote: ColumnMap): void {
-  const difieren = (Object.keys(canonico) as (keyof ColumnMap)[]).filter(
-    (k) => canonico[k] !== delLote[k],
-  );
-  if (difieren.length === 0) return;
+export function fusionarMapaDeColumnas(
+  sheetName: string,
+  canonico: ColumnMap,
+  delLote: ColumnMap,
+): ColumnMap {
+  const conflictos: string[] = [];
+  const fusionado = {} as ColumnMap;
 
-  throw new SheetColumnMapMismatchError(
-    sheetName,
-    difieren.map((k) => `${k}: ${canonico[k]} vs ${delLote[k]}`),
-  );
+  for (const k of Object.keys(canonico) as (keyof ColumnMap)[]) {
+    const a = canonico[k];
+    const b = delLote[k];
+
+    /*
+     * ═══ "UN VALOR CONTRA NULL" NO ES UNA CONTRADICCIÓN ═══
+     *
+     * Es el error que cometí al escribir este guardia, y salió a producción: comparaba con
+     * `!==`, así que `amount: 7 vs null` contaba como conflicto y tumbaba el documento.
+     *
+     * Un lote devuelve null en una columna cuando SU tramo de filas no permite verla — un
+     * bloque de totales, filas vacías, una sección con celdas en blanco. No está afirmando
+     * "esa columna no existe en la hoja"; está diciendo "acá no la distingo". Que otro lote
+     * sí la haya visto no lo contradice: la completa.
+     *
+     * Observado en archivos reales de clientes el 2026-08-14 (hojas "Racum 2025" y
+     * "Ventas_Diarias"): documentos abortados y atascados en `processing` por esto.
+     *
+     * Se toma el valor que exista. Si los dos existen y coinciden, no hay nada que decidir.
+     */
+    if (a === null) {
+      fusionado[k] = b;
+      continue;
+    }
+    if (b === null || a === b) {
+      fusionado[k] = a;
+      continue;
+    }
+
+    /*
+     * LA CORRUPCIÓN DE VERDAD, y la única: dos lotes afirman que la MISMA columna está en
+     * posiciones distintas. Uno lee `TotalLinea` y el otro `PrecioUnitario` — las dos son
+     * columnas de dinero creíbles, así que media hoja entraría con el precio de una unidad
+     * en vez del total de la línea y ningún validador lo notaría.
+     *
+     * Acá sí se aborta, y antes de la transacción del lote: no se escribe una sola fila.
+     */
+    conflictos.push(`${k}: ${a} vs ${b}`);
+    fusionado[k] = a;
+  }
+
+  if (conflictos.length > 0) throw new SheetColumnMapMismatchError(sheetName, conflictos);
+  return fusionado;
 }
 
 /**
@@ -570,6 +611,12 @@ export async function classifySheetRows(params: {
   rows: unknown[][];
   /** Moneda de la empresa: se usa cuando la hoja no trae columna de moneda. */
   baseCurrency: string;
+  /**
+   * Mapa que ya fijaron los lotes ANTERIORES de esta hoja. Se fusiona con el que devuelve
+   * este lote y el resultado es lo que arma los valores: una columna que este lote no pudo
+   * distinguir se lee igual, porque es la misma hoja.
+   */
+  columnsCanonicas?: ColumnMap;
   /**
    * Marca la segunda pasada sobre las filas que el modelo no cubrió. Corta la recursión en
    * uno: si el reintento tampoco las cubre, el problema no es suerte y seguir intentando solo
@@ -650,6 +697,15 @@ export async function classifySheetRows(params: {
    * Ahora se compara lo devuelto contra lo enviado. Es una resta que el código siempre pudo
    * hacer y no hacía.
    */
+  /*
+   * El mapa con el que se arman los valores es el de la HOJA, no el de este lote: si un lote
+   * anterior distinguió la columna de monto y este no, se usa la del anterior. Lanza solo
+   * ante un conflicto real (la misma columna en dos posiciones).
+   */
+  const columnas = params.columnsCanonicas
+    ? fusionarMapaDeColumnas(params.sheetName, params.columnsCanonicas, parsed.columns)
+    : parsed.columns;
+
   const { porIndice, fueraDeRango } = indexarVeredictos(parsed.rows, params.rows.length);
 
   if (hayDesplazamiento(parsed.rows, params.rows.length)) {
@@ -682,8 +738,8 @@ export async function classifySheetRows(params: {
     return {
       // Lo que sí vino del primer intento, más lo que rescató el reintento. Los payloads del
       // reintento ya se armaron contra las MISMAS filas crudas, así que se concatenan tal cual.
-      rows: [...construirFilas(porIndice, params, parsed.columns), ...reintento.rows],
-      columns: parsed.columns,
+      rows: [...construirFilas(porIndice, params, columnas), ...reintento.rows],
+      columns: columnas,
       // `unclassifiedRows` del reintento indexa SU lote; se remapea a los índices originales.
       unclassifiedRows: reintento.unclassifiedRows.map((k) => faltantes[k]!),
       sheetUsable: parsed.sheetUsable ?? true,
@@ -703,7 +759,7 @@ export async function classifySheetRows(params: {
     );
   }
 
-  const rows = construirFilas(porIndice, params, parsed.columns);
+  const rows = construirFilas(porIndice, params, columnas);
 
   /*
    * ═══ LA FILA QUE NI ASÍ SE CLASIFICÓ NO SE TIRA: SE MANDA A REVISIÓN ═══
@@ -729,7 +785,7 @@ export async function classifySheetRows(params: {
       payload: assemblePayload({
         verdict: { i, targetEntity: 'transaction', type: null, category: null, confidence: 0 },
         row: params.rows[i]!,
-        columns: parsed.columns,
+        columns: columnas,
         baseCurrency: params.baseCurrency,
       }),
     });
@@ -744,7 +800,7 @@ export async function classifySheetRows(params: {
 
   return {
     rows,
-    columns: parsed.columns,
+    columns: columnas,
     /*
      * Las filas que ni el primer intento ni el reintento cubrieron. NO se pierden: el worker
      * las manda a staging con confianza 0 para que caigan en revisión interna. Es la válvula

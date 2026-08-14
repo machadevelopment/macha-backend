@@ -6,7 +6,7 @@ import { downloadObject } from '@/lib/s3';
 import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
-import { classifySheetRows, assertMismoMapa } from '@/lib/anthropic';
+import { classifySheetRows, fusionarMapaDeColumnas } from '@/lib/anthropic';
 import type { ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
@@ -348,6 +348,13 @@ export function startExcelIngestWorker(): Promise<string> {
             rows: batch,
             headerRow,
             baseCurrency,
+            /*
+             * Lo que la hoja ya sabe, para que este lote arme sus valores con eso y no con
+             * sus propios nulos. Sin esto, un lote que no distinguió la columna de monto
+             * dejaba TODAS sus filas sin monto — se marcaban `invalid_amount` y se iban a
+             * revisión manual, con el dato ahí al lado en la celda.
+             */
+            columnsCanonicas: mapasPorHoja.get(sheetName),
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -369,7 +376,13 @@ export function startExcelIngestWorker(): Promise<string> {
            */
           const canonico = mapasPorHoja.get(sheetName);
           if (canonico) {
-            assertMismoMapa(sheetName, canonico, result.columns);
+            // Lanza SOLO si dos lotes ponen la misma columna en posiciones distintas. Un
+            // `valor vs null` no es contradicción: es un lote que no pudo verla, y el
+            // fusionado se queda con el que sí. Ver `fusionarMapaDeColumnas`.
+            mapasPorHoja.set(
+              sheetName,
+              fusionarMapaDeColumnas(sheetName, canonico, result.columns),
+            );
           } else {
             mapasPorHoja.set(sheetName, result.columns);
           }
