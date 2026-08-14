@@ -70,7 +70,8 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
   const encabezado = rows[0] ?? [];
   const datos = rows.slice(1);
 
-  const anchoEncabezado = encabezado.filter((c) => !vacia(c)).length;
+  const nombrados = encabezado.filter((c) => !vacia(c));
+  const anchoEncabezado = nombrados.length;
   const anchoDeclarado = Math.max(encabezado.length, ...datos.map((f) => f.length));
 
   /*
@@ -113,7 +114,6 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
    *    tener una columna "Mes" o "Periodo" perfectamente legítima, y con solo la proporción
    *    una hoja angosta con dos columnas así se descartaría sin motivo.
    */
-  const nombrados = encabezado.filter((c) => !vacia(c));
   const periodos = nombrados.filter(pareceNombreDePeriodo).length;
   if (periodos >= 4 && periodos / Math.max(nombrados.length, 1) > 0.25) {
     return {
@@ -121,6 +121,30 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
       motivo:
         `tiene ${periodos} columnas que son meses o períodos: los datos están a lo ancho ` +
         '(una fila por cliente o producto, con un valor por mes) en vez de un movimiento por fila',
+    };
+  }
+
+  /*
+   * 5. NOMBRES DE COLUMNA REPETIDOS. Una tabla de verdad no repite nombres: cada columna es
+   *    un campo distinto. Un layout por BLOQUES sí los repite, uno por bloque.
+   *
+   *    Caso real ("Resumen" de un archivo de cliente): "Costo", "Venta", "Entregado",
+   *    "Ingreso por ventas" aparecen una vez por producto —KAPEL BLEND, HOUSE BLEND,
+   *    OFFICE BLEND…— a lo ancho. Una fila es un mes con setenta valores repartidos en
+   *    bloques, no un movimiento.
+   *
+   *    Lo destapó el corpus: al arreglar la detección de encabezado, esta hoja pasó de
+   *    "reporte" a "tabla" porque su encabezado real SÍ cubre el ancho. La cobertura dejó de
+   *    delatarla y hacía falta otra señal.
+   */
+  const nombres = nombrados.map((c) => String(c).trim().toLowerCase());
+  const repetidos = nombres.length - new Set(nombres).size;
+  if (nombres.length >= 10 && repetidos / nombres.length > 0.25) {
+    return {
+      esReporte: true,
+      motivo:
+        `repite ${repetidos} nombres de columna: está armada por bloques (uno por producto o ` +
+        'categoría) en vez de una columna por campo',
     };
   }
 
