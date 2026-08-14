@@ -47,6 +47,14 @@ export const INTAKE_MESSAGES = {
       `Ya teníamos registradas las ${filas.toLocaleString('es')} filas de este archivo, ` +
       `así que no se duplicó nada. Cuando subas uno con movimientos nuevos, procesaremos ` +
       `solo esos.`,
+    /*
+     * El texto NO dice "cancelado" a secas: dice qué pasó con lo ya procesado y qué costará
+     * volver a intentarlo. Es la pregunta que se hace cualquiera después de cancelar algo a
+     * medias, y la respuesta es buena — por eso conviene darla sin que la pidan.
+     */
+    cancelledByUser: () =>
+      `Cancelaste esta carga. Lo que alcanzamos a procesar quedó guardado, así que si vuelves ` +
+      `a subir el mismo archivo solo cobraremos lo que falte.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -70,6 +78,9 @@ export const INTAKE_MESSAGES = {
     nothingNew: (filas: number) =>
       `We already had all ${filas.toLocaleString('en')} rows in this file on record, so ` +
       `nothing was duplicated. Upload one with new movements and we'll process just those.`,
+    cancelledByUser: () =>
+      `You cancelled this upload. Whatever we had already processed is saved, so if you ` +
+      `upload the same file again we'll only charge for what's left.`,
   },
 } as const;
 
