@@ -43,11 +43,26 @@ export type SheetKind =
   /** No se puede afirmar. Va al modelo, que es el lado seguro. */
   | 'unknown';
 
-/** Normaliza un encabezado: sin acentos, sin separadores, en minúsculas. */
+/**
+ * Normaliza un encabezado: sin paréntesis, sin acentos, sin separadores, en minúsculas.
+ *
+ * LO DE LOS PARÉNTESIS NO ES COSMÉTICO. "Precio Unitario (Q)" se normalizaba a
+ * `preciounitarioq`, con la moneda pegada al final, y eso NO coincide con `preciounitario`
+ * —que sí está en la lista de señales de dinero—. Toda hoja que rotule sus montos con la
+ * moneda entre paréntesis, que es lo normal en Guatemala, se quedaba sin ninguna señal.
+ *
+ * Medido sobre un archivo real (2026-08-14): la hoja de ventas de una cafetería, con `Fecha`,
+ * `Precio Unitario (Q)`, `Ingreso Total (Q)` y `Costo Total (Q)`, salía `unknown` — o sea que
+ * el pre-filtro no reconocía como financiera una hoja que es puramente financiera.
+ *
+ * Lo que va entre paréntesis es una anotación de unidad o moneda, no parte del nombre de la
+ * columna. Se quita ANTES de borrar la puntuación, porque después ya es indistinguible.
+ */
 function normalizeHeader(value: unknown): string {
   return String(value ?? '')
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
+    .replace(/\([^)]*\)/g, ' ')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
 }
@@ -124,6 +139,13 @@ const CATALOG_SIGNATURES: { name: string; needed: string[]; min: number }[] = [
       'alertareorden',
       'stock',
       'existencia',
+      // Los mismos conceptos con los nombres que usa otro sistema (archivo real de una
+      // cafetería): "Stock Actual", "Stock Mínimo", "Unidad de Medida", "ID_Insumo".
+      'stockactual',
+      'stockminimo',
+      'unidaddemedida',
+      'idinsumo',
+      'insumo',
     ],
     min: 2,
   },
