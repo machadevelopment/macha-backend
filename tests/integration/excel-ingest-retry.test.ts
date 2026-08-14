@@ -200,7 +200,18 @@ describe('reintento de excel.ingest tras un fallo a media ejecución', () => {
     // La hoja 1 sí se procesó y quedó confirmada; la 2 no dejó nada.
     expect(await contar('document_ingest_batches')).toBe(1);
     expect(await contar('staging_rows')).toBe(1);
-    expect(llamadas).toEqual([HOJA_A, HOJA_B]);
+    /*
+     * Se compara como CONJUNTO, no como secuencia: los lotes van a Claude en paralelo
+     * (`intakeConfig.batchConcurrency`), así que el orden entre hojas nunca estuvo
+     * garantizado — era estable por accidente.
+     *
+     * Lo confirmó agregar la consulta de cancelación antes de cada lote: ese `await` de más
+     * cambió qué tarea llega primero y el test empezó a fallar por `["Costos","Ventas"]`,
+     * sin que nada de lo que el test dice probar hubiera cambiado.
+     *
+     * Lo que importa acá es CUÁLES hojas se llamaron y cuántas veces, no en qué orden.
+     */
+    expect([...llamadas].sort()).toEqual([HOJA_A, HOJA_B].sort());
   });
 
   test('el reintento NO vuelve a llamar a Claude por la hoja ya procesada', async () => {
