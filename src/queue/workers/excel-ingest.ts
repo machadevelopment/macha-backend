@@ -6,7 +6,7 @@ import { downloadObject } from '@/lib/s3';
 import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
-import { classifySheetRows, assertMismoMapa } from '@/lib/anthropic';
+import { classifySheetRows, fusionarMapaDeColumnas } from '@/lib/anthropic';
 import type { ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
@@ -334,6 +334,28 @@ export function startExcelIngestWorker(): Promise<string> {
           }
         }
 
+        /**
+         * ¿El cliente canceló mientras corríamos?
+         *
+         * Se consulta ANTES de cada llamada a Claude, que es el único momento en que la
+         * cancelación puede evitar un gasto. No se puede interrumpir una llamada ya en vuelo
+         * ni abortar una transacción desde otra request, así que la cancelación es
+         * cooperativa por necesidad: acota el gasto, no lo corta en seco.
+         *
+         * Consulta propia y corta a propósito: el estado lo cambia OTRA request, así que
+         * leerlo dentro de la transacción larga del lote devolvería el valor de cuando ésta
+         * empezó y la cancelación no se vería nunca.
+         */
+        async function cancelado(): Promise<boolean> {
+          const [d] = await withCompanyScope(companyId, (db) =>
+            db
+              .select({ status: documents.status })
+              .from(documents)
+              .where(eq(documents.id, documentId)),
+          );
+          return d?.status === 'cancelled';
+        }
+
         /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
         async function procesarLote({
           sheetName,
@@ -342,12 +364,27 @@ export function startExcelIngestWorker(): Promise<string> {
           batch,
           fingerprints,
         }: Pendiente): Promise<void> {
+          /*
+           * El chequeo va acá y no al principio del job: un archivo grande son minutos, y lo
+           * que hay que evitar es la PRÓXIMA llamada, no la primera. Los lotes ya confirmados
+           * se quedan — se pagaron, y sus huellas hacen que volver a subir el archivo cobre
+           * solo lo que falta.
+           */
+          if (await cancelado()) return;
+
           const result = await classifySheetRows({
             templateVersion,
             sheetName,
             rows: batch,
             headerRow,
             baseCurrency,
+            /*
+             * Lo que la hoja ya sabe, para que este lote arme sus valores con eso y no con
+             * sus propios nulos. Sin esto, un lote que no distinguió la columna de monto
+             * dejaba TODAS sus filas sin monto — se marcaban `invalid_amount` y se iban a
+             * revisión manual, con el dato ahí al lado en la celda.
+             */
+            columnsCanonicas: mapasPorHoja.get(sheetName),
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -369,7 +406,13 @@ export function startExcelIngestWorker(): Promise<string> {
            */
           const canonico = mapasPorHoja.get(sheetName);
           if (canonico) {
-            assertMismoMapa(sheetName, canonico, result.columns);
+            // Lanza SOLO si dos lotes ponen la misma columna en posiciones distintas. Un
+            // `valor vs null` no es contradicción: es un lote que no pudo verla, y el
+            // fusionado se queda con el que sí. Ver `fusionarMapaDeColumnas`.
+            mapasPorHoja.set(
+              sheetName,
+              fusionarMapaDeColumnas(sheetName, canonico, result.columns),
+            );
           } else {
             mapasPorHoja.set(sheetName, result.columns);
           }
@@ -482,6 +525,26 @@ export function startExcelIngestWorker(): Promise<string> {
               `el pre-filtro de hojas, ${totalRowsSkippedDedup} (${pct(totalRowsSkippedDedup)}%) ` +
               `ya ingeridas antes. Al modelo fueron ${totalRowsProcessed}.`,
           );
+        }
+
+        /*
+         * ═══ CANCELADO: NO SE PROMUEVE Y NO SE PISA EL ESTADO ═══
+         *
+         * Sin esta salida, el bloque de abajo terminaría poniendo `promoted` o `review` sobre
+         * un documento que el cliente acababa de cancelar — el botón se vería como si no
+         * hubiera hecho nada, que es peor que no tenerlo.
+         *
+         * Tampoco se promueve lo ya clasificado: si el cliente paró la carga, meter media
+         * contabilidad a sus dashboards es exactamente lo que no pidió. Las filas quedan en
+         * staging y sus huellas registradas, así que volver a subir el archivo cobra solo lo
+         * que falte.
+         */
+        if (await cancelado()) {
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} cancelado por el ` +
+              `cliente: ${totalRowsProcessed} filas alcanzaron a procesarse y NO se promueven`,
+          );
+          return;
         }
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
