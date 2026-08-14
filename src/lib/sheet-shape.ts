@@ -30,6 +30,25 @@
  * cuesta lo que ya cuesta hoy. Es la misma asimetría que gobierna `sheet-classifier.ts`.
  */
 
+/**
+ * ¿Este nombre de columna es un PERÍODO? ("ene-25", "feb-26", "2026-06", "Enero", "Jan 2025")
+ *
+ * Es la firma de una hoja donde los datos están A LO ANCHO: cada columna es un mes y cada
+ * fila una entidad —un cliente, un producto— con doce o veinticuatro valores al lado. Una
+ * fila ahí no es un movimiento: son muchos.
+ */
+const MESES =
+  'ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|jan|apr|aug|dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
+const PERIODO = new RegExp(
+  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4})$`,
+  'i',
+);
+
+export function pareceNombreDePeriodo(nombre: unknown): boolean {
+  if (typeof nombre !== 'string') return false;
+  return PERIODO.test(nombre.trim().replace(/\s+/g, ' '));
+}
+
 const vacia = (c: unknown): boolean => c === null || c === undefined || String(c).trim() === '';
 
 export interface FormaDeHoja {
@@ -82,6 +101,26 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
       esReporte: true,
       motivo:
         'parece un reporte con bloques y títulos sueltos, no un listado de movimientos fila por fila',
+    };
+  }
+
+  /*
+   * 4. COLUMNAS QUE SON PERÍODOS. La firma inconfundible de los datos a lo ancho:
+   *    `["Cliente","ene-25","feb-25",...,"dic-26","Tipo de cliente"]`. Cada fila es un
+   *    cliente con veinticuatro meses al lado — no es un movimiento, son veinticuatro.
+   *
+   *    Se exige un MÍNIMO ABSOLUTO además de la proporción: una tabla de movimientos puede
+   *    tener una columna "Mes" o "Periodo" perfectamente legítima, y con solo la proporción
+   *    una hoja angosta con dos columnas así se descartaría sin motivo.
+   */
+  const nombrados = encabezado.filter((c) => !vacia(c));
+  const periodos = nombrados.filter(pareceNombreDePeriodo).length;
+  if (periodos >= 4 && periodos / Math.max(nombrados.length, 1) > 0.25) {
+    return {
+      esReporte: true,
+      motivo:
+        `tiene ${periodos} columnas que son meses o períodos: los datos están a lo ancho ` +
+        '(una fila por cliente o producto, con un valor por mes) en vez de un movimiento por fila',
     };
   }
 
