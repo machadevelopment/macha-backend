@@ -41,21 +41,47 @@ Conventions & gotchas:
 - **Two DB roles, not one**: `DATABASE_URL` (owner, runs migrations/seed/provision CLI) vs `APP_DATABASE_URL` (restricted `macha_app`, what the running app actually connects as — `src/db/client.ts`). Falls back to `DATABASE_URL` if `APP_DATABASE_URL` is unset, but the RLS/append-only guarantees are then no-ops for the app's own queries (owner bypasses both). `macha_app`'s password isn't in any migration/env file — an operator sets it once directly against Railway's Postgres, then sets `APP_DATABASE_URL`.
 - **Schema migrations auto-apply on deploy** (gated by manual promote to prod). Data/seed migrations run as separate manual scripts — never mix them.
 - **Excel ingestion is async via pg-boss.** Rows land in a single staging table.
-  **Tres filtros ANTES del modelo (2026-08-12), en este orden** — cada uno existe porque el
-  anterior no cubre su caso, y saltárselos es volver a pagar lo que ya se pagó:
-  1. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
+  **Seis pasos ANTES del modelo, y el ORDEN importa** (2026-08-12/14) — cada uno existe porque
+  el anterior no cubre su caso, y saltárselos es volver a pagar lo que ya se pagó:
+  1. **Encontrar el encabezado real** (`lib/sheet-header.ts`). Va PRIMERO porque todo lo demás
+     se indexa contra la fila 0: el pre-filtro la mira, el mapa de columnas se arma contra ella
+     y los índices que devuelve el modelo apuntan a ella. Un Excel hecho por una persona trae
+     dos líneas de título antes de la tabla, y leerlas como nombres de columna **no falla
+     nada visible**: los datos salen de las columnas equivocadas. El sesgo va a NO MOVERSE — un
+     candidato tiene que ganarle a la fila 0 y a las tres de abajo, porque elegir mal descarta
+     una fila real Y desplaza el mapa.
+  2. **Forma de hoja** (`lib/sheet-shape.ts`): distingue una TABLA de un REPORTE. Cinco señales
+     geométricas (encabezado con huecos + celdas vacías, ancho >40, columnas que son meses,
+     nombres de columna repetidos). Los reportes con bloques a lo ancho —una fila = un cliente
+     con doce meses al lado— no son movimientos y solo devuelven filas marcadas.
+  3. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
      (clientes, proveedores, inventario, productos, tiendas) no llegan al modelo. Los archivos
      reales de PYME son volcados operativos completos, no exportes contables: ~31% de las filas.
      El sesgo es deliberado hacia PAGAR DE MÁS — `unknown` siempre va al modelo, porque
      descartar de más pierde contabilidad del cliente en silencio.
-  2. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
+  4. **Cabecera y detalle del mismo dinero** (`lib/sheet-duplication.ts`, 2026-08-14). Un archivo
+     real trae `OrdenesCompra` (60 filas, Q 2.707.318) y `LineasOC` (220 filas, Q 2.707.318):
+     **la misma plata a dos granularidades**. Si las dos producen movimientos, las compras del
+     cliente se cuentan DOS VECES. Se conserva la CABECERA (sus filas traen contraparte y fecha;
+     el detalle no) y se pierde el desglose por producto — el mensaje al cliente lo nombra.
+     **Corre solo sobre las hojas que sobrevivieron a 2 y 3**: contra todas, el catálogo
+     `Productos` empataba con `Ventas` y habría descartado 520 ventas reales. Y las columnas de
+     FECHA se excluyen de la comparación — un serial de Excel vale ~45.000, así que sesenta
+     fechas suman más que la columna de dinero de su propia hoja.
+  5. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
      el cliente resube su contabilidad completa cada semana. La huella lleva un **ordinal**
      contado por CONTENIDO, no por posición, para que dos ventas idénticas el mismo día no se
      colapsen y reordenar el archivo no lo haga parecer nuevo. Se registran en la MISMA
      transacción que el lote: registrarlas antes perdería las filas para siempre si la llamada
      falla.
-  3. **Planificador de lotes** (`lib/sheet-batching.ts`): el tamaño sale del presupuesto de
+  6. **Planificador de lotes** (`lib/sheet-batching.ts`): el tamaño sale del presupuesto de
      tokens de SALIDA, no del conteo de filas.
+  **Corpus de hojas reales** (`lib/corpus-hojas-reales.test.ts`): 19 hojas de archivos de
+  clientes de verdad con su veredicto esperado. Es lo que atrapó dos errores que los tests
+  sintéticos no veían — un fixture recortado a 12 columnas destruye las señales de ancho y de
+  períodos. El generador verifica que cada muestra reproduzca el veredicto de la hoja completa.
+  **La hoja de movimientos se lista explícita**, no se deriva de la clasificación: si el filtro
+  se rompe, un test derivado se rompe con él y pasa igual.
 - **El modelo NO devuelve los valores de la fila** (2026-08-12). Devuelve el mapa de columnas
   UNA VEZ por hoja y por fila solo `{i, e, t, c, cf}`; los valores los arma el código indexando
   la celda (`lib/row-assembly.ts`). El motivo: el 95,7% del recibo eran tokens de salida, y
