@@ -17,7 +17,7 @@ BEGIN
     'ai_usage_events','credit_transactions','insight_requests','reports','report_versions',
     'alert_rules','alert_events','notifications','company_users'
   ] LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
+    PERFORM macha_asegurar_rls(t);
     -- CREATE POLICY has no IF NOT EXISTS — re-running this file (migrate.ts applies
     -- every .sql file on every invocation, see its header comment) would otherwise
     -- fail the second time with "policy already exists".
