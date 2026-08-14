@@ -28,26 +28,29 @@
  * por defecto — un archivo que ya se aplicó y no cambió no se ejecuta, así que no hay
  * statement que pueda pedir un lock.
  *
- * ═══ LA EXCEPCIÓN, Y POR QUÉ EXISTE ═══
+ * ═══ EL HASH LLEVA ALGO MÁS QUE EL CONTENIDO, Y ES LA PARTE QUE ME EQUIVOQUÉ ═══
  *
- * `0010_force_rls_and_app_role.sql` DEBE reaplicarse en cada deploy, y está documentado en
- * su cabecera: su bloque GRANT/REVOKE es un no-op hasta que un operador crea el rol
- * `macha_app` a mano contra Railway (CREATE ROLE exige CREATEROLE, que la migración no
- * asume). El camino documentado para activarlo es redesplegar. Un registro que lo saltara
- * rompería ese procedimiento en silencio — y lo que quedaría roto son las garantías de
- * append-only y RLS, que es exactamente lo que nadie nota hasta que importa.
+ * Se registra el contenido, no solo el nombre: editar una migración la vuelve a aplicar,
+ * que es lo que hace falta cuando se corrige una. Comparar solo por nombre dejaría la
+ * corrección sin aplicar y el registro mintiendo sobre el estado real de la base.
  *
- * Por eso el marcador `@reaplicar-siempre`. Es una excepción explícita y por archivo, no
- * el comportamiento por defecto. Un archivo marcado tiene que ser barato de reaplicar por
- * su cuenta: 0010 lo es porque su RLS pasa por `macha_asegurar_rls()` (que no toca la
- * tabla si ya está) y su GRANT/REVOKE sale temprano si ya se aplicó.
+ * Pero el contenido NO alcanza, porque hay migraciones que hacen COSAS DISTINTAS según el
+ * entorno. Once archivos otorgan privilegios a `macha_app`, un rol que un operador crea a
+ * MANO contra Railway (CREATE ROLE exige CREATEROLE, que las migraciones no asumen). Antes
+ * de que exista, esos bloques son no-ops que solo emiten un NOTICE; el camino documentado
+ * para activarlos es redesplegar.
  *
- * ═══ EL HASH ═══
+ * Mi primera versión marcaba solo `0010` como "reaplicar siempre", asumiendo que era el
+ * único con esa dependencia. Era falso —son once— y el registro dejó a `0016` (grants de
+ * pgboss) y `0019` (append-only de inventory_movements) grabados como aplicados cuando
+ * habían sido no-ops. Lo atrapó CI, no yo: cinco tests de integración en rojo contra una
+ * base limpia, mientras que en mi máquina pasaban porque los privilegios ya estaban puestos
+ * de corridas anteriores.
  *
- * Se registra el contenido, no solo el nombre. Editar una migración la vuelve a aplicar —
- * que es lo que hace falta cuando se corrige una, como se corrigieron las de RLS. Comparar
- * solo por nombre dejaría la corrección sin aplicar y el archivo mintiendo sobre el estado
- * real de la base.
+ * Por eso la clave del registro incluye si el rol EXISTE. No hay que acertar qué archivos
+ * dependen de él: cuando el rol aparece, la clave de todos cambia, todos se reaplican una
+ * vez y los grants surten efecto. Después vuelve a ser estable y no se aplica ninguno.
+ * Enumerar a mano era el error; esto no requiere enumerar.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -73,13 +76,20 @@ if (!url) throw new Error('DATABASE_URL is not set');
  */
 const sql = postgres(url, { max: 1, connection: { lock_timeout: 5_000 } });
 
-/** Un archivo con este marcador se reaplica en cada invocación. Ver la cabecera. */
-const MARCADOR_SIEMPRE = '@reaplicar-siempre';
-
 /** Códigos que significan "otro proceso tenía la tabla", no "la migración está mal". */
 const CONTENCION = new Set(['55P03', '40P01']); // lock_timeout · deadlock detected
 
 const hash = (s: string): string => new Bun.CryptoHasher('sha256').update(s).digest('hex');
+
+/*
+ * Parte del entorno que cambia lo que HACEN las migraciones, no solo lo que dicen. Ver la
+ * cabecera: once archivos otorgan privilegios a `macha_app` y son no-ops mientras el rol no
+ * exista. Va en la clave del registro para que crearlo dispare una reaplicación completa.
+ */
+const filasRol = await sql.unsafe<{ hay_rol: boolean }[]>(
+  `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'macha_app') AS hay_rol`,
+);
+const entorno = `macha_app=${filasRol[0]?.hay_rol === true}`;
 
 await sql.unsafe(`
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -105,15 +115,14 @@ let saltadas = 0;
 
 for (const f of files) {
   const body = readFileSync(join(dir, f), 'utf8');
-  const suma = hash(body);
-  const siempre = body.includes(MARCADOR_SIEMPRE);
+  const suma = hash(`${body}\n-- ${entorno}`);
 
-  if (!siempre && yaAplicadas.get(f) === suma) {
+  if (yaAplicadas.get(f) === suma) {
     saltadas++;
     continue;
   }
 
-  process.stdout.write(`applying ${f}${siempre ? ' (@reaplicar-siempre)' : ''} ... `);
+  process.stdout.write(`applying ${f} ... `);
 
   /*
    * Un reintento, no más. La contención con el contenedor viejo es momentánea —la request
