@@ -11,6 +11,8 @@ import type { ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
+import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
+import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { canSkipSheet } from '@/lib/sheet-classifier';
 import { insertStagingRows } from '@/lib/staging';
 import { runWithConcurrency } from '@/lib/concurrency';
@@ -229,11 +231,30 @@ export function startExcelIngestWorker(): Promise<string> {
           if (rows.length === 0) continue;
 
           /*
-           * Se captura ANTES de filtrar: en la segunda subida del mismo archivo la fila de
-           * encabezados ya está deduplicada y no llega a ningún lote, pero el modelo la
-           * sigue necesitando para armar el mapa de columnas.
+           * ═══ EL ENCABEZADO NO SIEMPRE ES LA PRIMERA FILA ═══
+           *
+           * Un Excel hecho por una persona suele empezar con el nombre de la empresa y un
+           * título antes de la tabla. Si se asume la fila 0, TODO se desplaza a la vez —el
+           * pre-filtro, el mapa de columnas y los índices del modelo— y no falla nada
+           * visible: los datos salen de las columnas equivocadas.
+           *
+           * Se descartan también las filas de ARRIBA del encabezado: son títulos, no
+           * movimientos, y mandárselas al modelo es pagar por que conteste que no son datos.
+           *
+           * Se captura antes de filtrar por huella: en la segunda subida las filas ya están
+           * deduplicadas y no llegan a ningún lote, pero el modelo sigue necesitando el
+           * encabezado para armar el mapa de columnas.
            */
-          const headerRow = rows[0] ?? [];
+          const filaEncabezado = detectarFilaDeEncabezado(rows);
+          const headerRow = rows[filaEncabezado] ?? [];
+          if (filaEncabezado > 0) {
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}": el encabezado está en ` +
+                `la fila ${filaEncabezado}, no en la 0. Se descartan ${filaEncabezado} fila(s) ` +
+                `de título.`,
+            );
+            rows.splice(0, filaEncabezado);
+          }
 
           /*
            * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
@@ -246,6 +267,29 @@ export function startExcelIngestWorker(): Promise<string> {
            * modo de fallo que se evita es silencioso: descartar una hoja financiera haría
            * que esos datos nunca aparecieran en el dashboard del cliente, sin error.
            */
+          /*
+           * SEGUNDO FILTRO: hojas que no son tablas EN ABSOLUTO.
+           *
+           * El pre-filtro de catálogos de abajo mira QUÉ describen los encabezados. Este mira
+           * la FORMA: una tabla dinámica con un bloque por mes no tiene columnas, tiene
+           * layout, y ninguna fila suya es un movimiento. Mandársela al modelo es pagar para
+           * que devuelva filas marcadas.
+           *
+           * Se guarda el motivo en lenguaje del cliente: si el archivo termina sin filas, el
+           * mensaje puede decir QUÉ hoja no se entendió en vez de un genérico.
+           */
+          const forma = analizarFormaDeHoja(rows);
+          if (forma.esReporte) {
+            totalRowsSkippedPreFiltro += rows.length;
+            unusableReasons.add(`la hoja "${sheetName}" ${forma.motivo}`);
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por forma ` +
+                `(${forma.motivo}): ${rows.length} filas no van al modelo`,
+            );
+            continue;
+          }
+
+          // `rows[0]` ya ES el encabezado real: el corte de arriba quitó los títulos.
           if (canSkipSheet(rows[0] ?? [])) {
             totalRowsSkippedPreFiltro += rows.length;
             console.info(
