@@ -47,8 +47,7 @@ CREATE TABLE IF NOT EXISTS ingested_rows (
 -- empresa. Sin RLS, una consulta mal escrita podría contar las huellas de otra empresa y
 -- hacer que sus filas se saltaran la IA — que además de fuga de aislamiento sería pérdida
 -- de datos: las filas del cliente nunca se procesarían.
-ALTER TABLE ingested_rows ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ingested_rows FORCE ROW LEVEL SECURITY;
+SELECT macha_asegurar_rls('ingested_rows');
 
 DROP POLICY IF EXISTS ingested_rows_tenant_isolation ON ingested_rows;
 

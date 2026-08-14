@@ -27,7 +27,8 @@
 --   CREATE ROLE macha_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS
 --     PASSWORD '<generated>';
 -- Then set APP_DATABASE_URL in Railway to a connection string using that role, and
--- either redeploy (this migration re-runs every deploy, see migrate.ts) or re-run
+-- either redeploy (crear el rol cambia la clave del registro de migraciones, así que el
+-- siguiente deploy las reaplica todas una vez — ver la cabecera de migrate.ts) or re-run
 -- `bun run db:migrate` once — the GRANT/REVOKE block below only takes effect once
 -- macha_app actually exists; until then it's a no-op (logged via NOTICE), and
 -- APP_DATABASE_URL falls back to DATABASE_URL (env.ts) so nothing breaks meanwhile —
@@ -42,7 +43,7 @@ BEGIN
     'ai_usage_events','credit_transactions','insight_requests','reports','report_versions',
     'alert_rules','alert_events','notifications','company_users','subscriptions','payments'
   ] LOOP
-    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);
+    PERFORM macha_asegurar_rls(t);
   END LOOP;
 END $$;
 
@@ -50,6 +51,23 @@ DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'macha_app') THEN
     RAISE NOTICE 'macha_app role does not exist yet — skipping GRANT/REVOKE block. See migration header for the manual CREATE ROLE step.';
+    RETURN;
+  END IF;
+
+  -- ═══ SALIDA TEMPRANA: no repetir GRANT/REVOKE que ya están puestos ═══
+  --
+  -- Este archivo se reaplica en CADA deploy (es el único `@reaplicar-siempre`), y
+  -- GRANT/REVOKE toman AccessExclusiveLock sobre cada tabla igual que un ALTER. Repetirlos
+  -- para no cambiar nada es pedir ~23 locks por deploy contra una base con tráfico vivo —
+  -- exactamente lo que tumbó el deploy del 2026-08-14 por el lado del RLS.
+  --
+  -- El centinela mira las DOS mitades del bloque, porque una sola no distingue "ya corrió
+  -- entero" de "corrió a medias": que macha_app pueda LEER transactions (la mitad GRANT) y
+  -- a la vez NO pueda ACTUALIZAR un ledger append-only (la mitad REVOKE). Si algo quedó a
+  -- medias, el centinela no se cumple y el bloque corre completo.
+  IF has_table_privilege('macha_app', 'transactions', 'SELECT')
+     AND NOT has_table_privilege('macha_app', 'ai_usage_events', 'UPDATE') THEN
+    RAISE NOTICE 'GRANT/REVOKE para macha_app ya aplicados — no se piden locks.';
     RETURN;
   END IF;
 

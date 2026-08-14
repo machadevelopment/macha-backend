@@ -44,8 +44,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS document_ingest_batches_uq ON document_ingest_
 -- `app.cross_tenant`. Sin esto la tabla nacería sin backstop y el panel admin no la vería.
 -- `nullif(..., '')` es obligatorio: un GUC revertido al cerrar la transacción vale cadena
 -- vacía, y `''::uuid` revienta en la siguiente request de esa conexión.
-ALTER TABLE document_ingest_batches ENABLE ROW LEVEL SECURITY;
-ALTER TABLE document_ingest_batches FORCE ROW LEVEL SECURITY;
+SELECT macha_asegurar_rls('document_ingest_batches');
 
 DROP POLICY IF EXISTS document_ingest_batches_tenant_isolation ON document_ingest_batches;
 
