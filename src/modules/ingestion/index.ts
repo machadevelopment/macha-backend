@@ -232,6 +232,79 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * soft-deletes de transactions/invoices/bills y el cambio de estado del documento
    * se confirman o se revierten juntos.
    */
+  /**
+   * Cancelar una carga en curso.
+   *
+   * ═══ LA SALIDA QUE NO EXISTÍA ═══
+   *
+   * Un documento en `queued`/`processing` no tenía ninguna: `revert` exige `promoted` y
+   * devuelve 409, y reintentar no aplica porque el job sigue vivo. Si una carga se colgaba,
+   * el cliente se quedaba mirando "PROCESSING" sin poder hacer nada. Reportado el
+   * 2026-08-14 ("llevo aca como 10min... tampoco tengo forma de parar el upload") y hubo que
+   * destrabarlo a mano contra la base.
+   *
+   * ═══ LA CANCELACIÓN ES COOPERATIVA, Y NO PUEDE SER DE OTRA FORMA ═══
+   *
+   * Esto NO mata el job: no se puede interrumpir una llamada a Claude ya pagada ni abortar
+   * una transacción en vuelo desde otra request. Lo que hace es marcar el documento, y el
+   * worker lo consulta ANTES de cada lote y se detiene.
+   *
+   * Consecuencia que hay que aceptar de frente: si el worker está a mitad de un lote, ese
+   * lote se termina y se cobra. Cancelar acota el gasto, no lo corta en seco. Prometer lo
+   * segundo sería mentir sobre lo que el sistema puede hacer.
+   *
+   * Lo ya procesado NO se borra: esos lotes se pagaron y sus huellas quedan registradas, así
+   * que volver a subir el archivo cobra solo lo que falta. Cancelar es barato justamente
+   * porque la deduplicación existe.
+   */
+  .post('/:id/cancel', async ({ companyId, role, params, set, db }) => {
+    // Mismo permiso que revertir: las dos son "deshacer mi propia carga".
+    assertClientCapability(role, 'revert_upload', set);
+
+    const [doc] = await db
+      .select({ id: documents.id, status: documents.status })
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+
+    // Idempotente, igual que revert: un doble clic o un reintento de red no es un error.
+    if (doc.status === 'cancelled') {
+      return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: true };
+    }
+
+    /*
+     * Solo tiene sentido sobre una carga EN CURSO. Cancelar una ya terminada escondería un
+     * malentendido detrás de un 200 — y sobre todo, cancelar una `promoted` no desharía sus
+     * filas: para eso está `revert`, y el mensaje lo dice para que nadie use una por la otra.
+     */
+    if (doc.status !== 'queued' && doc.status !== 'processing') {
+      set.status = 409;
+      return {
+        error:
+          doc.status === 'promoted'
+            ? 'Esta carga ya terminó. Para deshacer sus datos usa "revertir", no "cancelar".'
+            : `Solo se puede cancelar una carga en curso (estado actual: ${doc.status}).`,
+      };
+    }
+
+    const [empresa] = await db
+      .select({ locale: companies.locale })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    await db
+      .update(documents)
+      .set({
+        status: 'cancelled',
+        errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser(),
+      })
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+    return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: false };
+  })
   .post('/:id/revert', async ({ companyId, role, params, set, db }) => {
     assertClientCapability(role, 'revert_upload', set);
 

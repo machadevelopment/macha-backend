@@ -76,7 +76,16 @@ export const documents = pgTable(
       // `unsupported` (migración 0018): terminal, el archivo no se pudo leer y
       // reintentarlo da lo mismo — distinto de `failed`, que sí es reintentable.
       .$type<
-        'queued' | 'processing' | 'review' | 'promoted' | 'reverted' | 'failed' | 'unsupported'
+        | 'queued'
+        | 'processing'
+        | 'review'
+        | 'promoted'
+        | 'reverted'
+        | 'failed'
+        | 'unsupported'
+        // El CLIENTE paró la carga (migración 0026). Terminal, y deliberadamente distinto de
+        // `failed`: una carga que el usuario decidió parar no salió mal.
+        | 'cancelled'
       >()
       .notNull()
       .default('queued'),

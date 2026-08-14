@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
 import { runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
-import { assemblePayload, type ColumnMap, type RowVerdict } from './row-assembly';
+import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -224,7 +224,7 @@ type VeredictoCrudo = {
  * datos, y esa declaración es justamente lo que las distingue de una fila perdida. No
  * generan fila de staging, pero SÍ cuentan como cubiertas.
  */
-function construirFilas(
+export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
   params: { rows: unknown[][]; baseCurrency: string },
   columns: ColumnMap,
@@ -232,15 +232,49 @@ function construirFilas(
   const out: ClassifiedRow[] = [];
   for (const [i, v] of porIndice) {
     if (v.e === 'skip') continue;
+    const row = params.rows[i]!;
+    const verdict = { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf };
+
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({
-        verdict: { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf },
-        row: params.rows[i]!,
-        columns,
-        baseCurrency: params.baseCurrency,
-      }),
+      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
+    });
+
+    /*
+     * ═══ UNA FILA DE VENTA CON COSTO PRODUCE DOS TRANSACCIONES ═══
+     *
+     * Los libros de PYME traen el ingreso y el costo en la MISMA línea. Como cada fila
+     * producía UNA transacción, el costo se perdía entero: `cogs = 0` para todos los
+     * productos y margen 100 % en la pantalla de Ventas por producto — con el dato ahí, en
+     * la celda de al lado. Observado en producción el 2026-08-14.
+     *
+     * Solo se desdobla una fila de INGRESO: el costo acompaña a una venta. Si el modelo ya
+     * clasificó la fila como `cogs`, su monto YA es el costo y agregarle otro lo duplicaría.
+     * Y solo para `transaction` — una factura o una cuenta por pagar no llevan costo de
+     * ventas propio.
+     *
+     * La fila de costo hereda fecha, producto y categoría de la venta: es el mismo hecho
+     * económico visto por su otra cara, y sin la fecha no entraría al mismo período ni sin
+     * el producto al mismo margen.
+     */
+    if (v.e !== 'transaction' || v.t !== 'revenue') continue;
+    const costo = costoDeLaFila(row, columns);
+    if (costo === null || costo === 0) continue;
+
+    const venta = assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency });
+    out.push({
+      targetEntity: 'transaction',
+      confidence: typeof v.cf === 'number' ? v.cf : 0,
+      payload: {
+        ...venta,
+        type: 'cogs',
+        category: 'costo_de_ventas',
+        originalAmount: costo,
+        // Las unidades ya las contó la fila de ingreso. Repetirlas acá las duplicaría en
+        // cualquier conteo de "unidades vendidas".
+        quantity: null,
+      },
     });
   }
   return out;
@@ -291,7 +325,7 @@ export type ClassifySheetResult = {
 export const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financieros para Macha Finance.
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
-2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto y fecha de vencimiento. Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
+2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto, fecha de vencimiento y COSTO de la fila (ver punto 11 — si la hoja trae el costo junto al ingreso, señalarlo es obligatorio: sin él el sistema calcula 100% de margen en todo). Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
 3. Devolver EXACTAMENTE UNA entrada por cada fila del lote, sin excepción: si el lote trae 88 filas, "rows" trae 88 entradas con los índices 0 a 87, cada uno una sola vez. Ninguna fila se omite y ningún índice se inventa. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
 4. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
 5. Asignar "cf" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
@@ -300,7 +334,8 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 8. Cuando "sheetUsable" sea false, explica en "unusableReason" qué tiene el archivo, en una frase dirigida al dueño de una PYME: sin jerga técnica y describiendo lo que viste, no lo que falta.
 9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
 10. La columna "quantity" del mapa se señala solo si la hoja trae unidades explícitas. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
-11. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
+11. "costTotal" y "costUnit" son las columnas de COSTO de la propia fila, y solo una de las dos (o ninguna). Muchos libros de PYME traen el ingreso y el costo en la misma línea ("Ingreso Total" junto a "Costo Total", o "PrecioUnitario" junto a "CostoUnitario"). Señala "costTotal" cuando la columna ya es el costo de la línea completa, y "costUnit" cuando es el costo de UNA unidad. NUNCA señales como costo una columna de precio de venta, de utilidad, de margen ni de descuento: el costo es lo que le costó al negocio, no lo que cobró ni lo que ganó. Si la hoja no trae costo, las dos van en null — inventarlo produciría un margen falso.
+12. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
 /**
  * ESQUEMA COMPACTO — el cambio que baja el costo y el tiempo a la vez (2026-08-12).
@@ -340,6 +375,23 @@ export const CLASSIFY_ROWS_SCHEMA = {
         quantity: { type: ['integer', 'null'] },
         productCategory: { type: ['integer', 'null'] },
         dueDate: { type: ['integer', 'null'] },
+        /*
+         * El COSTO de la propia fila de venta. Sin esto, una hoja que trae "Ingreso Total"
+         * y "Costo Total" en la misma línea perdía el costo entero: `cogs = 0` para todos
+         * los productos y 100 % de margen en toda la pantalla. Observado en producción el
+         * 2026-08-14 con el archivo de una cafetería.
+         *
+         * Dos índices porque las hojas reales traen las dos formas y confundirlas multiplica
+         * o divide el costo por las unidades.
+         */
+        costTotal: {
+          type: ['integer', 'null'],
+          description: 'Columna con el COSTO TOTAL de la línea. No el precio de venta.',
+        },
+        costUnit: {
+          type: ['integer', 'null'],
+          description: 'Columna con el costo de UNA unidad, si la hoja lo da así.',
+        },
       },
       required: [
         'date',
@@ -351,6 +403,8 @@ export const CLASSIFY_ROWS_SCHEMA = {
         'quantity',
         'productCategory',
         'dueDate',
+        'costTotal',
+        'costUnit',
       ],
       additionalProperties: false,
     },
@@ -526,16 +580,57 @@ export class SheetIndexShiftError extends Error {
  * que terminen todos los lotes, y para entonces las filas ya estarían insertadas. Esto corre
  * ANTES de la transacción del lote, así que un mapa discrepante no llega a escribir nada.
  */
-export function assertMismoMapa(sheetName: string, canonico: ColumnMap, delLote: ColumnMap): void {
-  const difieren = (Object.keys(canonico) as (keyof ColumnMap)[]).filter(
-    (k) => canonico[k] !== delLote[k],
-  );
-  if (difieren.length === 0) return;
+export function fusionarMapaDeColumnas(
+  sheetName: string,
+  canonico: ColumnMap,
+  delLote: ColumnMap,
+): ColumnMap {
+  const conflictos: string[] = [];
+  const fusionado = {} as ColumnMap;
 
-  throw new SheetColumnMapMismatchError(
-    sheetName,
-    difieren.map((k) => `${k}: ${canonico[k]} vs ${delLote[k]}`),
-  );
+  for (const k of Object.keys(canonico) as (keyof ColumnMap)[]) {
+    const a = canonico[k];
+    const b = delLote[k];
+
+    /*
+     * ═══ "UN VALOR CONTRA NULL" NO ES UNA CONTRADICCIÓN ═══
+     *
+     * Es el error que cometí al escribir este guardia, y salió a producción: comparaba con
+     * `!==`, así que `amount: 7 vs null` contaba como conflicto y tumbaba el documento.
+     *
+     * Un lote devuelve null en una columna cuando SU tramo de filas no permite verla — un
+     * bloque de totales, filas vacías, una sección con celdas en blanco. No está afirmando
+     * "esa columna no existe en la hoja"; está diciendo "acá no la distingo". Que otro lote
+     * sí la haya visto no lo contradice: la completa.
+     *
+     * Observado en archivos reales de clientes el 2026-08-14 (hojas "Racum 2025" y
+     * "Ventas_Diarias"): documentos abortados y atascados en `processing` por esto.
+     *
+     * Se toma el valor que exista. Si los dos existen y coinciden, no hay nada que decidir.
+     */
+    if (a === null) {
+      fusionado[k] = b;
+      continue;
+    }
+    if (b === null || a === b) {
+      fusionado[k] = a;
+      continue;
+    }
+
+    /*
+     * LA CORRUPCIÓN DE VERDAD, y la única: dos lotes afirman que la MISMA columna está en
+     * posiciones distintas. Uno lee `TotalLinea` y el otro `PrecioUnitario` — las dos son
+     * columnas de dinero creíbles, así que media hoja entraría con el precio de una unidad
+     * en vez del total de la línea y ningún validador lo notaría.
+     *
+     * Acá sí se aborta, y antes de la transacción del lote: no se escribe una sola fila.
+     */
+    conflictos.push(`${k}: ${a} vs ${b}`);
+    fusionado[k] = a;
+  }
+
+  if (conflictos.length > 0) throw new SheetColumnMapMismatchError(sheetName, conflictos);
+  return fusionado;
 }
 
 /**
@@ -570,6 +665,12 @@ export async function classifySheetRows(params: {
   rows: unknown[][];
   /** Moneda de la empresa: se usa cuando la hoja no trae columna de moneda. */
   baseCurrency: string;
+  /**
+   * Mapa que ya fijaron los lotes ANTERIORES de esta hoja. Se fusiona con el que devuelve
+   * este lote y el resultado es lo que arma los valores: una columna que este lote no pudo
+   * distinguir se lee igual, porque es la misma hoja.
+   */
+  columnsCanonicas?: ColumnMap;
   /**
    * Marca la segunda pasada sobre las filas que el modelo no cubrió. Corta la recursión en
    * uno: si el reintento tampoco las cubre, el problema no es suerte y seguir intentando solo
@@ -650,6 +751,15 @@ export async function classifySheetRows(params: {
    * Ahora se compara lo devuelto contra lo enviado. Es una resta que el código siempre pudo
    * hacer y no hacía.
    */
+  /*
+   * El mapa con el que se arman los valores es el de la HOJA, no el de este lote: si un lote
+   * anterior distinguió la columna de monto y este no, se usa la del anterior. Lanza solo
+   * ante un conflicto real (la misma columna en dos posiciones).
+   */
+  const columnas = params.columnsCanonicas
+    ? fusionarMapaDeColumnas(params.sheetName, params.columnsCanonicas, parsed.columns)
+    : parsed.columns;
+
   const { porIndice, fueraDeRango } = indexarVeredictos(parsed.rows, params.rows.length);
 
   if (hayDesplazamiento(parsed.rows, params.rows.length)) {
@@ -682,8 +792,8 @@ export async function classifySheetRows(params: {
     return {
       // Lo que sí vino del primer intento, más lo que rescató el reintento. Los payloads del
       // reintento ya se armaron contra las MISMAS filas crudas, así que se concatenan tal cual.
-      rows: [...construirFilas(porIndice, params, parsed.columns), ...reintento.rows],
-      columns: parsed.columns,
+      rows: [...construirFilas(porIndice, params, columnas), ...reintento.rows],
+      columns: columnas,
       // `unclassifiedRows` del reintento indexa SU lote; se remapea a los índices originales.
       unclassifiedRows: reintento.unclassifiedRows.map((k) => faltantes[k]!),
       sheetUsable: parsed.sheetUsable ?? true,
@@ -703,7 +813,7 @@ export async function classifySheetRows(params: {
     );
   }
 
-  const rows = construirFilas(porIndice, params, parsed.columns);
+  const rows = construirFilas(porIndice, params, columnas);
 
   /*
    * ═══ LA FILA QUE NI ASÍ SE CLASIFICÓ NO SE TIRA: SE MANDA A REVISIÓN ═══
@@ -729,7 +839,7 @@ export async function classifySheetRows(params: {
       payload: assemblePayload({
         verdict: { i, targetEntity: 'transaction', type: null, category: null, confidence: 0 },
         row: params.rows[i]!,
-        columns: parsed.columns,
+        columns: columnas,
         baseCurrency: params.baseCurrency,
       }),
     });
@@ -744,7 +854,7 @@ export async function classifySheetRows(params: {
 
   return {
     rows,
-    columns: parsed.columns,
+    columns: columnas,
     /*
      * Las filas que ni el primer intento ni el reintento cubrieron. NO se pierden: el worker
      * las manda a staging con confianza 0 para que caigan en revisión interna. Es la válvula

@@ -47,6 +47,26 @@ export type ColumnMap = {
   quantity: number | null;
   productCategory: number | null;
   dueDate: number | null;
+  /*
+   * ═══ EL COSTO DE LA PROPIA FILA DE VENTA ═══
+   *
+   * Muchos libros de PYME traen el ingreso Y el costo en la MISMA fila:
+   *
+   *   Fecha | Producto | Unidades | Ingreso Total (Q) | Costo Total (Q) | Utilidad (Q)
+   *   46174 | Café Am. | 6        | 108               | 27              | 81
+   *
+   * Hasta acá esa columna no la leía nadie: una fila producía UNA transacción, la de
+   * ingreso, y el costo se perdía. Consecuencia observada en producción (2026-08-14):
+   * `cogs = 0` para todos los productos y margen 100 % en toda la pantalla de Ventas por
+   * producto — con el dato ahí, en la celda de al lado.
+   *
+   * Dos índices y no uno porque las hojas reales traen las dos formas y confundirlas
+   * multiplica o divide el costo por las unidades:
+   *   · `costTotal` — el costo de ESTA línea completa ("Costo Total (Q)" = 27).
+   *   · `costUnit`  — el costo de UNA unidad ("CostoUnitario" = 135,52 con Cantidad 2).
+   */
+  costTotal: number | null;
+  costUnit: number | null;
 };
 
 /** Lo que el modelo devuelve POR FILA. Cuatro campos cortos, sin valores copiados. */
@@ -171,6 +191,25 @@ function asCurrency(value: unknown, baseCurrency: string): string {
  * misma regla que el prompt le exigía al modelo, ahora garantizada por código en vez de por
  * instrucción — que es estrictamente más fiable.
  */
+/**
+ * El costo de ESTA fila, si la hoja lo trae. `null` = no hay costo que registrar.
+ *
+ * Se prefiere el total de línea cuando existe: es un dato directo del archivo. El unitario
+ * solo se usa multiplicado por las unidades, y **solo si la fila trae unidades** — sin ellas
+ * no se puede saber el costo de la línea, y la respuesta correcta es no inventarlo. Esa es la
+ * misma regla que el prompt ya exige para `quantity`: si la fila no dice cuántas, no sabemos
+ * cuántas.
+ */
+export function costoDeLaFila(row: unknown[], columns: ColumnMap): number | null {
+  const total = asNumber(cell(row, columns.costTotal));
+  if (total !== null) return Math.abs(total);
+
+  const unitario = asNumber(cell(row, columns.costUnit));
+  const unidades = asNumber(cell(row, columns.quantity));
+  if (unitario === null || unidades === null) return null;
+  return Math.abs(unitario * unidades);
+}
+
 export function assemblePayload(params: {
   verdict: RowVerdict;
   row: unknown[];
