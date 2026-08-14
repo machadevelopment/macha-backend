@@ -78,3 +78,49 @@ describe('tablas de verdad: ninguna se descarta', () => {
     ).toBe(false);
   });
 });
+
+describe('datos a lo ancho: una fila que son veinticuatro movimientos', () => {
+  test('columnas que son meses delatan el layout', () => {
+    /*
+     * `Ficha de clientes acumulada` de un archivo real: 41 columnas, de las cuales 24 son
+     * "ene-25, feb-25, …, dic-26". Cada fila es un cliente con dos años de compras al lado.
+     *
+     * Esa hoja se le mandaba al modelo para que la descartara fila por fila. La información
+     * ES real —ventas por cliente y mes— pero hoy no la sabemos representar: un movimiento por
+     * fila no la describe. Decirlo y no pagarla es mejor que pagarla y no decirlo.
+     */
+    const enc = [
+      'Cliente',
+      ...['ene', 'feb', 'mar', 'abr', 'may', 'jun'].flatMap((m) => [`${m}-25`, `${m}-26`]),
+      'Tipo de cliente',
+    ];
+    const hoja = [enc, ...Array.from({ length: 20 }, () => enc.map(() => 0))];
+    const r = analizarFormaDeHoja(hoja);
+    expect(r.esReporte).toBe(true);
+    expect(r.motivo).toContain('meses o períodos');
+  });
+
+  test('una columna "Mes" suelta NO descarta la hoja', () => {
+    /*
+     * El falso positivo que hay que evitar. Una tabla de movimientos perfectamente normal
+     * puede traer "Mes" o "Periodo" como una columna más — y descartarla perdería la
+     * contabilidad del cliente en silencio.
+     *
+     * Por eso se exige un mínimo ABSOLUTO de columnas-período además de la proporción: con
+     * solo la proporción, una hoja angosta con dos columnas así se descartaría sin motivo.
+     */
+    const hoja = [
+      ['Fecha', 'Mes', 'Cliente', 'Producto', 'Monto'],
+      ...Array.from({ length: 20 }, () => [46174, 'Enero', 'Aldo', 'Café', 100]),
+    ];
+    expect(analizarFormaDeHoja(hoja).esReporte).toBe(false);
+  });
+
+  test('el motivo explica el layout, no solo que se descartó', () => {
+    // Lo lee el dueño de una PYME: tiene que entender POR QUÉ su hoja no entró y qué la
+    // distingue de las que sí. "Formato no soportado" no le dice nada accionable.
+    const enc = ['Cliente', 'ene-25', 'feb-25', 'mar-25', 'abr-25', 'may-25'];
+    const hoja = [enc, ...Array.from({ length: 20 }, () => enc.map(() => 0))];
+    expect(analizarFormaDeHoja(hoja).motivo).toContain('un valor por mes');
+  });
+});
