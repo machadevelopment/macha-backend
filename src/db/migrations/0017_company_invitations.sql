@@ -85,8 +85,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS company_invitations_pending_uq
 CREATE INDEX IF NOT EXISTS company_invitations_company_status_idx
   ON company_invitations (company_id, status);
 
-ALTER TABLE company_invitations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE company_invitations FORCE ROW LEVEL SECURITY;
+SELECT macha_asegurar_rls('company_invitations');
 
 DROP POLICY IF EXISTS company_invitations_tenant_isolation ON company_invitations;
 

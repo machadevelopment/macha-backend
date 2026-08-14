@@ -6,7 +6,7 @@ DO $$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['subscriptions', 'payments'] LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
+    PERFORM macha_asegurar_rls(t);
     BEGIN
       EXECUTE format($f$
         CREATE POLICY %I_tenant_isolation ON %I
