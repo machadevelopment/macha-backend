@@ -52,7 +52,28 @@ function puntaje(fila: unknown[], anchoMaximo: number): number {
   const unicos = new Set(llenas.map((c) => String(c).trim().toLowerCase())).size / llenas.length;
   const cobertura = Math.min(1, llenas.length / Math.max(anchoMaximo, 1));
 
-  return proporcionTexto * 0.45 + unicos * 0.25 + cobertura * 0.3;
+  /*
+   * ═══ UN ENCABEZADO NOMBRA LAS COLUMNAS: SI NOMBRA POCAS, ES UN TÍTULO ═══
+   *
+   * Piso duro y no solo un peso, porque sin él la aritmética se da vuelta. Caso real
+   * (2026-08-14, hoja "Resumen" de un archivo de cliente):
+   *
+   *   [0] 6 celdas de 76:  "RESUMEN ANNUAL 2026", "KAPEL BLEND", "HOUSE BLEND", ...
+   *   [1] 69 celdas de 76: "Mes", "Clientes", "Cantidad", "Peso en gr", ...   ← el real
+   *
+   * La fila 0 gana en proporción de texto (1,0) y en unicidad (1,0) porque son seis rótulos
+   * distintos. La fila 1 queda PENALIZADA en unicidad por repetir etiquetas de bloque
+   * ("Entregado", "Ingreso por ventas") una vez por producto. Resultado: el título le ganaba
+   * al encabezado.
+   *
+   * Y esto se me pasó en el test: había escrito una versión simplificada de esa hoja que sí
+   * daba 1. Con la hoja de verdad daba 0. El corpus de hojas reales es lo que lo destapó.
+   */
+  if (cobertura < 0.25) return 0;
+
+  // La cobertura pesa más que las otras dos justamente por lo de arriba: es la señal que
+  // distingue "nombra la tabla" de "rotula algo", y las otras dos se dejan engañar.
+  return proporcionTexto * 0.35 + unicos * 0.15 + cobertura * 0.5;
 }
 
 /**
