@@ -15,6 +15,13 @@ import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
 import { canSkipSheet } from '@/lib/sheet-classifier';
+import {
+  ameritaAdvertencia,
+  diferenciasDeMapa,
+  guardarPerfil,
+  perfilVigente,
+  type PerfilDeColumnas,
+} from '@/lib/column-profile';
 import { insertStagingRows } from '@/lib/staging';
 import { runWithConcurrency } from '@/lib/concurrency';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
@@ -183,6 +190,34 @@ export function startExcelIngestWorker(): Promise<string> {
          * eventos de Bun no interrumpe entre el `get` y el `set`.
          */
         const mapasPorHoja = new Map<string, ColumnMap>();
+
+        /**
+         * El perfil de columnas que esta empresa YA tenía para cada hoja (CU-868krmrcj).
+         *
+         * Se llena después de planear los lotes y se usa para dos cosas distintas:
+         *
+         *   · Como PISTA para el primer lote de cada hoja. Hoy el primer lote no tiene mapa
+         *     canónico —lo está fijando él— así que si no logra ver la columna de monto, todas
+         *     SUS filas entran sin monto y se van a revisión con el dato ahí al lado. Con el
+         *     perfil, el primer lote arranca sabiendo lo que la empresa ya demostró.
+         *   · Para COMPARAR al final y advertir si la estructura se movió.
+         *
+         * NO se mete en `mapasPorHoja`, y la diferencia importa: ese mapa es el árbitro de
+         * conflictos y `fusionarMapaDeColumnas` ABORTA cuando dos lotes se contradicen.
+         * Sembrarlo con el perfil convertiría "el modelo hoy opina distinto que la última
+         * carga" en una carga abortada — justo el bloqueo duro que Keneth descartó.
+         */
+        const perfilesPorHoja = new Map<string, PerfilDeColumnas>();
+
+        /**
+         * Encabezados por hoja, para poder guardar el perfil al final sin recorrer el libro
+         * otra vez. Se llena en la pasada de planificación, que es donde ya se resolvió cuál
+         * es la fila de encabezado real.
+         */
+        const encabezadosPorHoja = new Map<string, unknown[]>();
+
+        /** Avisos para el cliente. Ver `INTAKE_MESSAGES[locale].estructuraCambiada`. */
+        const avisos: string[] = [];
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -418,8 +453,39 @@ export function startExcelIngestWorker(): Promise<string> {
               batch,
               fingerprints: batchFingerprints,
             });
+            encabezadosPorHoja.set(sheetName, headerRow);
           }
         }
+
+        /*
+         * ═══ EL PERFIL DE LA EMPRESA, ANTES DE LLAMAR AL MODELO (CU-868krmrcj) ═══
+         *
+         * Va acá y no dentro del bucle de planificación por una razón concreta: en el bucle
+         * habría una consulta por hoja INTERCALADA con el resto del trabajo, y varias de esas
+         * hojas terminan descartadas por el pre-filtro o por dedup. Acá ya se sabe qué hojas
+         * de verdad van al modelo, así que se consulta solo por esas.
+         *
+         * Una consulta por hoja y no una sola con `IN`: son como mucho 30 hojas por libro (el
+         * cap de `maxSheetsPerWorkbook`), la consulta pega en el índice
+         * `(company_id, header_hash, version DESC)`, y armar el `IN` obligaría a mapear los
+         * resultados de vuelta a su hoja por hash, que es más código para ahorrar milisegundos
+         * en un job que dura minutos.
+         *
+         * Si esto falla NO se cae la carga: el perfil es una optimización y una advertencia,
+         * no un requisito. Perderlo significa trabajar como se trabajaba antes de este ticket.
+         */
+        await withCompanyScope(companyId, async (db) => {
+          for (const [sheetName, headerRow] of encabezadosPorHoja) {
+            const perfil = await perfilVigente(db, companyId, headerRow);
+            if (perfil) perfilesPorHoja.set(sheetName, perfil);
+          }
+        }).catch((err) => {
+          console.error(
+            `[excel-ingest] company=${companyId} no se pudieron leer los perfiles de columnas ` +
+              `(se sigue sin ellos):`,
+            err,
+          );
+        });
 
         /**
          * ¿El cliente canceló mientras corríamos?
@@ -471,7 +537,18 @@ export function startExcelIngestWorker(): Promise<string> {
              * dejaba TODAS sus filas sin monto — se marcaban `invalid_amount` y se iban a
              * revisión manual, con el dato ahí al lado en la celda.
              */
-            columnsCanonicas: mapasPorHoja.get(sheetName),
+            /*
+             * CU-868krmrcj: si esta hoja todavía no fijó su mapa —o sea, este ES el primer
+             * lote— se le pasa el PERFIL de la empresa. Sin él, el primer lote de cada hoja
+             * es el único que trabaja a ciegas, y si no distingue la columna de monto, todas
+             * sus filas entran sin monto.
+             *
+             * Es una pista, no una orden: el modelo puede devolver un mapa distinto y ese es
+             * el que manda (y el que dispara la advertencia al final). El perfil nunca aborta
+             * una carga.
+             */
+            columnsCanonicas:
+              mapasPorHoja.get(sheetName) ?? perfilesPorHoja.get(sheetName)?.columnMap,
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -591,6 +668,63 @@ export function startExcelIngestWorker(): Promise<string> {
           intakeConfig.batchConcurrency,
         );
         if (errors.length > 0) throw errors[0];
+
+        /*
+         * ═══ APRENDER Y ADVERTIR (CU-868krmrcj) ═══
+         *
+         * Con todos los lotes confirmados, `mapasPorHoja` tiene el mapa definitivo de cada
+         * hoja. Dos cosas con él:
+         *
+         *   1. Comparar contra el perfil que la empresa ya tenía. Si algo que ANTES se leía
+         *      ahora no está, o está en otra columna, se le avisa al cliente. Ganar una
+         *      columna nueva no avisa: es una mejora, y un aviso que salta siempre deja de
+         *      leerse (ver `ameritaAdvertencia`).
+         *   2. Guardar el mapa como versión nueva del perfil, para que la próxima carga
+         *      arranque sabiendo esto.
+         *
+         * VA DESPUÉS DE LOS LOTES Y ANTES DE PROMOVER. Después, porque hasta que el último
+         * lote no confirma, el mapa de la hoja todavía puede afinarse (`fusionarMapaDeColumnas`
+         * completa los nulos de un lote con lo que vio otro). Antes de promover, porque el
+         * aviso tiene que poder viajar con el estado final del documento.
+         *
+         * NO ROMPE LA CARGA SI FALLA. Guardar el perfil es aprendizaje, no contabilidad: los
+         * datos del cliente ya están en staging y su promoción no depende de esto. Un fallo
+         * acá —incluida la colisión de versión entre dos cargas simultáneas, que el UNIQUE de
+         * la migración arbitra— solo significa que la próxima carga vuelve a inferir el mapa.
+         */
+        for (const [sheetName, mapaFinal] of mapasPorHoja) {
+          const headerRow = encabezadosPorHoja.get(sheetName);
+          if (!headerRow) continue;
+
+          const perfil = perfilesPorHoja.get(sheetName);
+          if (perfil) {
+            const diferencias = diferenciasDeMapa(perfil.columnMap, mapaFinal);
+            if (ameritaAdvertencia(diferencias)) {
+              const campos = diferencias.filter((d) => d.antes !== null).map((d) => d.campo);
+              avisos.push(INTAKE_MESSAGES[locale].estructuraCambiada(sheetName, campos));
+              console.warn(
+                `[excel-ingest] company=${companyId} hoja "${sheetName}": la estructura cambió ` +
+                  `respecto al perfil v${perfil.version} — ${campos.join(', ')} ya no están donde estaban`,
+              );
+            }
+          }
+
+          await withCompanyScope(companyId, (db) =>
+            guardarPerfil(db, {
+              companyId,
+              headerRow,
+              sheetName,
+              columnMap: mapaFinal,
+              source: 'inferido',
+            }),
+          ).catch((err) => {
+            console.error(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}": no se pudo guardar el ` +
+                `perfil de columnas (la carga sigue, se re-inferirá la próxima vez):`,
+              err,
+            );
+          });
+        }
 
         /*
          * El número con el que se verifica EN PRODUCCIÓN que la deduplicación funciona.
@@ -720,6 +854,28 @@ export function startExcelIngestWorker(): Promise<string> {
               .where(eq(documents.id, documentId));
             return false;
           }
+          /*
+           * CU-868krmrcj: el aviso de estructura viaja con el documento ya promovido.
+           *
+           * Se escribe en `errorReason` porque ese campo es, de hecho, el canal de mensaje al
+           * cliente y no solo de errores — `nothingNew` ya lo usa exactamente así sobre un
+           * documento `promoted`. Meter una columna nueva para esto sería una migración a
+           * cambio de nada.
+           *
+           * Va DESPUÉS de `promoteDocument`, que es quien fija `status` y `row_count`: al
+           * revés, la promoción pisaría el mensaje.
+           *
+           * Solo en el camino limpio. Si el documento quedó en revisión o sin filas, ese
+           * estado es lo que el cliente necesita leer primero, y encima ahí `errorReason` ya
+           * lleva su propio mensaje.
+           */
+          if (avisos.length > 0) {
+            await db
+              .update(documents)
+              .set({ errorReason: avisos.join(' ') })
+              .where(eq(documents.id, documentId));
+          }
+
           // CU-868kfvab1: cache-aside — recomputa solo los rollups que la empresa ya
           // había visto antes; los nunca vistos se llenan perezosamente en /metrics.
           await refreshExistingRollups(db, companyId);

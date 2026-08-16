@@ -48,6 +48,18 @@ export const INTAKE_MESSAGES = {
       `así que no se duplicó nada. Cuando subas uno con movimientos nuevos, procesaremos ` +
       `solo esos.`,
     /*
+     * CU-868krmrcj — la ADVERTENCIA, no un bloqueo (decisión de Keneth, 2026-08-16).
+     *
+     * Se nombran las columnas que cambiaron, no se dice "el archivo es incompatible": un
+     * aviso genérico no le dice a nadie qué revisar y lo único que enseña es a ignorarlo. Y
+     * los datos SÍ entraron — el mensaje tiene que dejar claro que no se perdió nada, solo
+     * que vale la pena confirmar.
+     */
+    estructuraCambiada: (hoja: string, campos: string[]) =>
+      `Los datos entraron, pero en la hoja "${hoja}" cambió de lugar lo que solíamos leer ` +
+      `como ${campos.join(', ')}. Si el archivo viene de otro sistema o alguien movió ` +
+      `columnas, revisa que las cifras cuadren.`,
+    /*
      * El texto NO dice "cancelado" a secas: dice qué pasó con lo ya procesado y qué costará
      * volver a intentarlo. Es la pregunta que se hace cualquiera después de cancelar algo a
      * medias, y la respuesta es buena — por eso conviene darla sin que la pidan.
@@ -78,6 +90,11 @@ export const INTAKE_MESSAGES = {
     nothingNew: (filas: number) =>
       `We already had all ${filas.toLocaleString('en')} rows in this file on record, so ` +
       `nothing was duplicated. Upload one with new movements and we'll process just those.`,
+    /** CU-868krmrcj: ver la nota del mismo mensaje en `es`. */
+    estructuraCambiada: (hoja: string, campos: string[]) =>
+      `Your data came through, but in the "${hoja}" sheet what we used to read as ` +
+      `${campos.join(', ')} has moved. If this file comes from a different system or ` +
+      `someone rearranged columns, double-check that the figures add up.`,
     cancelledByUser: () =>
       `You cancelled this upload. Whatever we had already processed is saved, so if you ` +
       `upload the same file again we'll only charge for what's left.`,
