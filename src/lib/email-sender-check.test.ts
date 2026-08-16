@@ -67,7 +67,7 @@ describe('clave ausente', () => {
   test('en un deploy grita: nadie recibe nada', () => {
     const status = evaluateEmailSender({
       apiKey: '',
-      fromEmail: 'notificaciones@machafinance.com',
+      fromEmail: 'notificaciones@macha.finance',
       ...DEPLOY,
     });
     expect(status.deliverable).toBe(false);
@@ -77,7 +77,7 @@ describe('clave ausente', () => {
   test('en local calla: no tener Resend es el estado normal', () => {
     const status = evaluateEmailSender({
       apiKey: '',
-      fromEmail: 'notificaciones@machafinance.com',
+      fromEmail: 'notificaciones@macha.finance',
       ...LOCAL,
     });
     expect(status.deliverable).toBe(false);
@@ -85,11 +85,26 @@ describe('clave ausente', () => {
   });
 });
 
+/*
+ * EL DOMINIO DE ESTOS EJEMPLOS ES `macha.finance`, NO `machafinance.com`.
+ *
+ * Son dos dominios distintos y los dos existen (verificado por DNS el 2026-08-16):
+ *
+ *   · `macha.finance`     → el dominio del PRODUCTO. Apunta a Vercel y sirve la app.
+ *                           Es el que corresponde al remitente, y el que ya trae por
+ *                           defecto `env.ts`.
+ *   · `machafinance.com`  → el sitio corporativo (Squarespace) con Google Workspace
+ *                           (`MX → smtp.google.com`). Ahí vive el correo del equipo, como
+ *                           development@machafinance.com. NO se toca para esto.
+ *
+ * Se deja escrito porque confundirlos manda a verificar el dominio equivocado en Resend, y
+ * el síntoma sería idéntico al bug original: correos que "se envían" y no llegan.
+ */
 describe('configuración sana', () => {
   test('dominio propio y clave puesta: ni una palabra', () => {
     const status = evaluateEmailSender({
       apiKey: 're_algo',
-      fromEmail: 'notificaciones@machafinance.com',
+      fromEmail: 'notificaciones@macha.finance',
       ...DEPLOY,
     });
     expect(status.deliverable).toBe(true);
