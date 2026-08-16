@@ -224,6 +224,17 @@ export function startExcelIngestWorker(): Promise<string> {
         /** Avisos para el cliente. Ver `INTAKE_MESSAGES[locale].estructuraCambiada`. */
         const avisos: string[] = [];
 
+        /**
+         * Hojas de existencias que van al inventario (CU-868krkfrh), anotadas durante la
+         * planificación y aplicadas junto a la promoción.
+         *
+         * No se aplican al detectarlas porque eso pasa ANTES del chequeo de cancelación: un
+         * cliente que cancelara se quedaría con el inventario cambiado y sus movimientos sin
+         * promover. Ver la nota del sitio donde se llenan.
+         */
+        const hojasDeInventario: { sheetName: string; headerRow: unknown[]; filas: unknown[][] }[] =
+          [];
+
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
         // veces y el cliente leería un muro. Se deduplica y se muestran las primeras.
@@ -392,33 +403,23 @@ export function startExcelIngestWorker(): Promise<string> {
              * adivinar. Ver `lib/inventory-import.ts`.
              */
             if (firma === 'existencias') {
-              const resultado = await withCompanyScope(companyId, (db) =>
-                importarInventario(db, {
-                  companyId,
-                  userId: uploadedBy,
-                  headerRow: rows[0] ?? [],
-                  rows: rows.slice(1),
-                  baseCurrency: baseCurrency as Currency,
-                }),
-              ).catch((err) => {
-                // El inventario es un módulo aparte de la contabilidad: que falle no puede
-                // tumbar la carga de los movimientos, que es lo que el cliente vino a hacer.
-                console.error(
-                  `[excel-ingest] company=${companyId} hoja "${sheetName}": falló la importación de inventario:`,
-                  err,
-                );
-                return null;
-              });
-
-              if (resultado) {
-                console.info(
-                  `[excel-ingest] company=${companyId} hoja "${sheetName}" importada a inventario: ` +
-                    `${resultado.creados} altas, ${resultado.ajustados} ajustes, ` +
-                    `${resultado.sinCambio} sin cambio, ${resultado.omitidas} omitidas`,
-                );
-              }
-              // Sus filas NO cuentan como descartadas por el pre-filtro: se procesaron, solo
-              // que por otro camino. Sumarlas ahí haría mentir a la métrica de descarte.
+              /*
+               * SE ANOTA, NO SE APLICA TODAVÍA — y esto no es organización, es corrección.
+               *
+               * La primera versión importaba acá mismo, dentro de la planificación. El
+               * problema: la planificación corre ANTES de los lotes y, sobre todo, antes del
+               * chequeo de cancelación. Un cliente que cancelara la carga se habría quedado
+               * con el inventario ya modificado mientras sus movimientos —por decisión
+               * explícita de este worker— NO se promueven. "Cancelé y aun así me cambió el
+               * stock" es exactamente la sorpresa que el botón de cancelar existe para
+               * evitar.
+               *
+               * Aplicarlo junto a la promoción alinea las dos mitades del archivo: o entra
+               * todo lo que el cliente subió, o no entra nada.
+               */
+              hojasDeInventario.push({ sheetName, headerRow: rows[0] ?? [], filas: rows.slice(1) });
+              // Sus filas NO cuentan como descartadas por el pre-filtro: se van a procesar,
+              // solo que por otro camino. Sumarlas ahí haría mentir a la métrica de descarte.
               continue;
             }
 
@@ -819,6 +820,45 @@ export function startExcelIngestWorker(): Promise<string> {
               `cliente: ${totalRowsProcessed} filas alcanzaron a procesarse y NO se promueven`,
           );
           return;
+        }
+
+        /*
+         * ═══ EL INVENTARIO SE APLICA ACÁ (CU-868krkfrh) ═══
+         *
+         * Después del chequeo de cancelación de arriba, que es lo que importa: si el cliente
+         * paró la carga, no se le toca el stock — igual que no se le promueven los
+         * movimientos. Las dos mitades del archivo entran juntas o no entra ninguna.
+         *
+         * En su propia transacción y NO en la de la promoción: son dos módulos distintos y un
+         * fallo del inventario no puede tumbar la contabilidad, que es lo que el cliente vino
+         * a subir. Al revés tampoco — el inventario ya aplicado es correcto aunque la
+         * promoción después quede en revisión, porque lo que dice es "hoy tengo esto", no
+         * "esto pasó".
+         */
+        for (const hoja of hojasDeInventario) {
+          const resultado = await withCompanyScope(companyId, (db) =>
+            importarInventario(db, {
+              companyId,
+              userId: uploadedBy,
+              headerRow: hoja.headerRow,
+              rows: hoja.filas,
+              baseCurrency: baseCurrency as Currency,
+            }),
+          ).catch((err) => {
+            console.error(
+              `[excel-ingest] company=${companyId} hoja "${hoja.sheetName}": falló la importación de inventario:`,
+              err,
+            );
+            return null;
+          });
+
+          if (resultado) {
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${hoja.sheetName}" importada a inventario: ` +
+                `${resultado.creados} altas, ${resultado.ajustados} ajustes, ` +
+                `${resultado.sinCambio} sin cambio, ${resultado.omitidas} omitidas`,
+            );
+          }
         }
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
