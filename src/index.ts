@@ -12,6 +12,7 @@ import { startReportTickWorker } from '@/queue/workers/report-tick';
 import { startEmailSendWorker } from '@/queue/workers/email-send';
 import { startDbBackupWorker } from '@/queue/workers/db-backup';
 import { runStartupIsolationCheck } from '@/lib/db-role-check';
+import { evaluateEmailSender } from '@/lib/email-sender-check';
 import { sql } from '@/db/client';
 
 // Macha Finance backend — Bun + Elysia. Tenant scoping is enforced in guards/derive
@@ -33,6 +34,18 @@ if (env.billingCheckoutOptional) {
       : '[billing] MODO PILOTO: BILLING_CHECKOUT_OPTIONAL=true — los registros no pasan por checkout.',
   );
 }
+
+// CU-868krkndr: mismo trato que los avisos de arriba. Producción estaba enviando desde
+// `onboarding@resend.dev`, el remitente de caja de arena de Resend, que solo entrega al
+// dueño de la cuenta — así que las invitaciones "se enviaban" y no llegaban a nadie, sin
+// un solo error. Ver src/lib/email-sender-check.ts.
+const correoSaliente = evaluateEmailSender({
+  apiKey: env.resendApiKey,
+  fromEmail: env.resendFromEmail,
+  railwayEnvironment: env.railwayEnvironment,
+  nodeEnv: env.nodeEnv,
+});
+if (correoSaliente.warning) console.warn(`[email] ${correoSaliente.warning}`);
 export type { App };
 
 // CU-868kjbw5h: verifica contra la conexión REAL que el rol de la app no es el dueño de
