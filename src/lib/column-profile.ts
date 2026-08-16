@@ -1,7 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { companyColumnProfiles } from '@/db/schema';
-import type { ColumnMap } from './row-assembly';
+import { CLAVES_DE_COLUMNA, type ColumnMap } from './row-assembly';
 import { encabezadosNormalizados, hashDeEncabezados } from './header-hash';
 
 /**
@@ -124,10 +124,22 @@ export async function guardarPerfil(
 
   const actual = await perfilVigente(db, params.companyId, params.headerRow);
 
+  /*
+   * Campo por campo, NO por `JSON.stringify`.
+   *
+   * `actual.columnMap` viene de una columna `jsonb`, y Postgres guarda jsonb normalizado: las
+   * claves vuelven reordenadas por longitud y después alfabéticamente, no en el orden en que
+   * se escribieron. Comparar las dos serializaciones daba SIEMPRE distinto aunque los mapas
+   * fueran idénticos, así que cada carga del cliente semanal escribía una versión nueva
+   * repitiendo lo mismo — y el historial, que vale por ser corto, se habría vuelto inútil.
+   *
+   * Lo atrapó el test de integración, no el typecheck: los tipos son correctos en las dos
+   * versiones. Hacía falta una base de verdad para verlo.
+   */
   if (
     actual &&
     actual.source === params.source &&
-    JSON.stringify(actual.columnMap) === JSON.stringify(params.columnMap)
+    diferenciasDeMapa(actual.columnMap, params.columnMap).length === 0
   ) {
     return { version: actual.version, escrito: false };
   }
@@ -158,15 +170,21 @@ export async function guardarPerfil(
  *
  * Se comparan los campos canónicos, no los índices crudos: al cliente le importa "ya no
  * encuentro la columna de fecha", no "el índice 4 pasó a ser 7".
+ *
+ * SE RECORRE `CLAVES_DE_COLUMNA` Y NO `Object.keys(anterior)`. Cualquiera de los dos mapas
+ * puede venir de una columna `jsonb`, y ahí las claves vuelven en el orden que Postgres
+ * decide — pero además un mapa guardado por una versión ANTERIOR del código puede no tener
+ * los campos que se agregaron después. Recorriendo el mapa recibido, esos campos nuevos no se
+ * compararían nunca: un campo que se movió de columna pasaría inadvertido justo en el caso
+ * peligroso. La lista canónica los cubre todos, y `undefined !== 5` los detecta.
  */
 export function diferenciasDeMapa(
   anterior: ColumnMap,
   nuevo: ColumnMap,
 ): Array<{ campo: keyof ColumnMap; antes: number | null; ahora: number | null }> {
-  const campos = Object.keys(anterior) as Array<keyof ColumnMap>;
-  return campos
-    .filter((campo) => anterior[campo] !== nuevo[campo])
-    .map((campo) => ({ campo, antes: anterior[campo], ahora: nuevo[campo] }));
+  return CLAVES_DE_COLUMNA.filter(
+    (campo) => (anterior[campo] ?? null) !== (nuevo[campo] ?? null),
+  ).map((campo) => ({ campo, antes: anterior[campo] ?? null, ahora: nuevo[campo] ?? null }));
 }
 
 /**

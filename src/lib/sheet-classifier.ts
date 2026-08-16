@@ -194,3 +194,28 @@ export function classifySheet(headerRow: unknown[]): SheetKind {
 export function canSkipSheet(headerRow: unknown[]): boolean {
   return classifySheet(headerRow) === 'catalog';
 }
+
+/**
+ * QUÉ catálogo es, cuando es catálogo. `null` si no lo es.
+ *
+ * Hasta acá la clasificación solo decía sí/no y toda hoja de catálogo terminaba igual: en la
+ * basura. Pero no todos los catálogos son igual de inútiles — el de EXISTENCIAS es el
+ * inventario del cliente, y descartarlo es exactamente el bug que reportó Macha
+ * (CU-868krkfrh: "Inventario no carga datos con ningún archivo"). En producción se veía así,
+ * en cada carga de cada empresa:
+ *
+ *   hoja "Inventario" descartada por encabezados (catálogo, no movimientos): 211 filas
+ *
+ * Esta función es lo que permite tratar `existencias` distinto SIN tocar el pre-filtro, que
+ * sigue ahorrando el 50 % de las filas de cada archivo. Los otros catálogos —contactos,
+ * ubicaciones, productos— se siguen descartando, y eso está bien: no hay nada en el producto
+ * que los consuma.
+ */
+export function firmaDeCatalogo(headerRow: unknown[]): string | null {
+  if (classifySheet(headerRow) !== 'catalog') return null;
+  const headers = new Set(headerRow.map(normalizeHeader).filter(Boolean));
+  return (
+    CATALOG_SIGNATURES.find((sig) => sig.needed.filter((h) => headers.has(h)).length >= sig.min)
+      ?.name ?? null
+  );
+}

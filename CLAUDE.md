@@ -56,10 +56,19 @@ Conventions & gotchas:
      nombres de columna repetidos). Los reportes con bloques a lo ancho —una fila = un cliente
      con doce meses al lado— no son movimientos y solo devuelven filas marcadas.
   3. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
-     (clientes, proveedores, inventario, productos, tiendas) no llegan al modelo. Los archivos
+     (clientes, proveedores, productos, tiendas) no llegan al modelo. Los archivos
      reales de PYME son volcados operativos completos, no exportes contables: ~31% de las filas.
      El sesgo es deliberado hacia PAGAR DE MÁS — `unknown` siempre va al modelo, porque
      descartar de más pierde contabilidad del cliente en silencio.
+     **EXCEPCIÓN: la firma `existencias` ya no se tira** (CU-868krkfrh, 2026-08-16). Seguía el
+     mismo camino que el resto y era el bug "Inventario no carga datos con ningún archivo":
+     producción descartaba 211 filas de inventario por carga, en cada una de las tres empresas.
+     Ahora `firmaDeCatalogo()` dice CUÁL catálogo es y esa hoja va a `lib/inventory-import.ts`,
+     **sin pasar por el modelo** — sus encabezados son predecibles y mandarla a la IA desharía
+     lo que este mismo filtro vino a lograr. La cantidad del archivo se trata como un CONTEO,
+     no como un movimiento: SKU nuevo → alta con existencia inicial, SKU conocido → ajuste por
+     la diferencia, sin diferencia → no se escribe nada. Por eso resubir el archivo semanal no
+     duplica el stock. Todo pasa por `recordMovement`, nunca se escribe `quantity_on_hand`.
   4. **Cabecera y detalle del mismo dinero** (`lib/sheet-duplication.ts`, 2026-08-14). Un archivo
      real trae `OrdenesCompra` (60 filas, Q 2.707.318) y `LineasOC` (220 filas, Q 2.707.318):
      **la misma plata a dos granularidades**. Si las dos producen movimientos, las compras del

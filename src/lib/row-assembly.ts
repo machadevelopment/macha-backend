@@ -69,6 +69,40 @@ export type ColumnMap = {
   costUnit: number | null;
 };
 
+/**
+ * Las claves de `ColumnMap`, en una lista recorrible.
+ *
+ * ═══ POR QUÉ NO SE USA `Object.keys(unMapa)` ═══
+ *
+ * Porque un `ColumnMap` que vuelve de la base NO trae las claves en el orden en que se
+ * escribieron: Postgres guarda `jsonb` normalizado y las reordena (por longitud y después
+ * alfabéticamente). Comparar dos mapas con `JSON.stringify` da distinto aunque sean idénticos
+ * campo por campo — lo atrapó el test de integración del perfil de columnas
+ * (CU-868krmrcj): "reguardar lo mismo no crea una versión nueva" fallaba porque el mapa leído
+ * nunca era igual al mapa en memoria, así que cada carga escribía una versión nueva diciendo
+ * exactamente lo mismo.
+ *
+ * El `Record` de arriba es lo que hace que esto no se pueda desincronizar: agregar un campo a
+ * `ColumnMap` sin agregarlo acá **no compila**. Una lista escrita a mano sí se habría
+ * desincronizado, y el síntoma habría sido que el campo nuevo se ignora en silencio al
+ * comparar dos mapas.
+ */
+const COBERTURA_DE_COLUMNAS: Record<keyof ColumnMap, true> = {
+  date: true,
+  amount: true,
+  currency: true,
+  description: true,
+  counterparty: true,
+  product: true,
+  quantity: true,
+  productCategory: true,
+  dueDate: true,
+  costTotal: true,
+  costUnit: true,
+};
+
+export const CLAVES_DE_COLUMNA = Object.keys(COBERTURA_DE_COLUMNAS) as Array<keyof ColumnMap>;
+
 /** Lo que el modelo devuelve POR FILA. Cuatro campos cortos, sin valores copiados. */
 export type RowVerdict = {
   /** Índice de la fila dentro del lote, tal como se le presentó. */
