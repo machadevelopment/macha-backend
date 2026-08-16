@@ -64,7 +64,7 @@ rate limits, or billing. See `.env.example` for the full annotated list; summary
 | `WORKOS_API_KEY` | Yes | Alta JIT de una identidad nueva (CU-868kjkfdf): el access token no trae email/nombre y `users.email` es NOT NULL, así que el perfil se le pide a la Management API por el `sub` ya firmado. Una llamada por usuario en toda su vida. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Yes | ZDR contract only; model kept in config, never hardcoded. |
 | `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Yes | Binaries only; DB stores keys, not files. |
-| `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. |
+| `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Yes | Transactional email. **`RESEND_FROM_EMAIL` debe ser una dirección de un dominio VERIFICADO en Resend.** El remitente de caja de arena (`onboarding@resend.dev`) responde OK y solo entrega al dueño de la cuenta: las invitaciones se dan por enviadas y no llegan (CU-868krkndr). El arranque avisa si lo detecta. |
 | `SENTRY_DSN` | Prod/staging | No-op without it (local/dev/CI never set it). En un despliegue, faltar = servir sin monitoreo; el arranque lo avisa (§Observabilidad). |
 | `SENTRY_ENVIRONMENT` | No (se deduce) | Etiqueta del entorno en cada evento. Por omisión `RAILWAY_ENVIRONMENT_NAME` y luego `NODE_ENV`. |
 | `APP_BASE_URL` | No (has default) | Absolute links in emails + Recurrente redirects. |

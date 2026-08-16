@@ -244,7 +244,7 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
       .from(companies)
       .where(eq(companies.id, companyId));
 
-    const { current, previous, series } = await computePeriodMetrics(
+    const { current, previous, series, dataRange } = await computePeriodMetrics(
       db,
       companyId,
       query.from,
@@ -260,6 +260,9 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
       current,
       previous,
       series,
+      // CU-868krn2up: primer y último día con movimientos de la empresa, para que un
+      // período en cero pueda distinguirse de un producto roto. Ver `rangoConDatos`.
+      dataRange,
     };
   },
   {
@@ -272,6 +275,10 @@ export const metricsPeriod = new Elysia().use(tenantDerive).get(
         current: PERIOD_TOTALS,
         previous: PERIOD_TOTALS,
         series: t.Array(t.Composite([t.Object({ date: t.String() }), PERIOD_TOTALS])),
+        // `null` cuando la empresa no tiene ni una transacción viva — que es distinto de
+        // "no tiene en este rango", y la UI necesita separarlos para decir la frase
+        // correcta ("todavía no subiste nada" vs. "no hay nada en este período").
+        dataRange: t.Union([t.Object({ from: t.String(), to: t.String() }), t.Null()]),
       }),
       400: t.Object({ error: t.String() }),
       429: rateLimitedResponse,
