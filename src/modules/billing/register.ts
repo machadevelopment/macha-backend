@@ -13,6 +13,7 @@ import { grantInitialCredits } from '@/lib/credits';
 import { startSubscriptionCheckout, appBaseUrl } from '@/lib/billing/provider';
 import { isBillingConfigured } from '@/lib/billing/recurrente-client';
 import { BillingNotConfiguredError } from '@/lib/billing/billing-errors';
+import { onboardingUrl } from '@/lib/app-urls';
 import { env } from '@/lib/env';
 import { normalizeIndustry } from '@/lib/industry-template';
 
@@ -248,7 +249,22 @@ export const register = new Elysia({ prefix: '/register' })
             amountUsdCents: planElegido.amountUsdCents,
             companyId: company!.id,
             planName: planElegido.name,
-            successUrl: `${appBaseUrl}/?registered=1`,
+            /*
+             * CU-868krmrcj (fase C): vuelve al paso de configuración de archivos, no a `/`.
+             *
+             * Este destino es el del cliente que SÍ paga, y es la mitad del flujo que el
+             * frontend no controla: `register-wizard.tsx` decide a dónde ir cuando NO hay
+             * cobro, pero cuando lo hay manda a Recurrente y el regreso lo dicta esta línea.
+             * Cambiar solo el frontend habría dejado a los clientes de pago como los únicos
+             * que se saltan el onboarding — exactamente al revés de lo deseable.
+             *
+             * `/` además ni siquiera era el panel: es la pantalla de ENTRADA. El cliente
+             * terminaba de pagar y aterrizaba en la puerta, no adentro. Por eso la URL pasa
+             * a `lib/app-urls.ts` en vez de quedarse como plantilla suelta acá: ese módulo
+             * existe justamente porque un template string suelto ya mandó a un 404 a todos
+             * los correos de "reporte listo".
+             */
+            successUrl: onboardingUrl({ fromCheckout: true }),
             cancelUrl: `${appBaseUrl}/register?cancelled=1`,
           })
         : null;
