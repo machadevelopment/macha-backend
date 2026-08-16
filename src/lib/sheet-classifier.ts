@@ -58,7 +58,7 @@ export type SheetKind =
  * Lo que va entre paréntesis es una anotación de unidad o moneda, no parte del nombre de la
  * columna. Se quita ANTES de borrar la puntuación, porque después ya es indistinguible.
  */
-function normalizeHeader(value: unknown): string {
+export function normalizeHeader(value: unknown): string {
   return String(value ?? '')
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
