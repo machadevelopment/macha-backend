@@ -97,4 +97,9 @@ export const APPEND_ONLY_LEDGERS = [
   // mercadería; si se puede editar no sirve para eso. Una corrección es un movimiento de
   // ajuste, igual que en credit_transactions.
   'inventory_movements',
+  // Migración 0027. Un mapa de columnas equivocado desplaza TODA la contabilidad de una hoja
+  // hacia la columna de al lado, con datos plausibles y sin un solo error. Cuando pase, la
+  // única pregunta útil es "¿con qué mapa se leyó la carga del martes?", y solo se contesta
+  // si las versiones anteriores siguen ahí. Un UPDATE las borraría.
+  'company_column_profiles',
 ] as const;

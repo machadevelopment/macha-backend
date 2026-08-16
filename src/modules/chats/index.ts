@@ -6,6 +6,7 @@ import { chats, chatMessages, companies, reportVersions } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
 import { enforceTokenBucket } from '@/lib/rate-limit';
+import { esTituloPorDefecto, tituloDesdePrimerMensaje, tituloPorDefecto } from '@/lib/chat-title';
 
 /**
  * CU-868kfvabw/868kfvabq: hilos nombrados por (company_id, user_id) + orquestación
@@ -51,12 +52,20 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         }
       }
 
+      // CU-868krkw4p: el marcador nace en el idioma de la EMPRESA. Estaba quemado en
+      // español, así que una empresa con `locale='en'` veía "Nuevo chat" en su lista —
+      // y el `title` se guarda en base, no se traduce al pintarlo.
+      const [company] = await db
+        .select({ locale: companies.locale })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+
       const [chat] = await db
         .insert(chats)
         .values({
           companyId,
           userId,
-          title: body?.title ?? 'Nuevo chat',
+          title: body?.title ?? tituloPorDefecto(company?.locale ?? 'es'),
           reportVersionId: body?.reportVersionId,
         })
         .returning();
@@ -106,7 +115,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       if (limited) return limited;
 
       const [chat] = await db
-        .select({ id: chats.id })
+        .select({ id: chats.id, title: chats.title })
         .from(chats)
         .where(
           and(eq(chats.id, params.id), eq(chats.companyId, companyId), eq(chats.userId, userId)),
@@ -147,11 +156,44 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         role: 'assistant',
         content: result.assistantText,
       });
-      await db.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, params.id));
+      /*
+       * CU-868krkw4p — LA CONVERSACIÓN SE NOMBRA SOLA CON LA PRIMERA PREGUNTA.
+       *
+       * Macha reportó una lista donde todos los hilos se llamaban "Nuevo chat", que es lo
+       * mismo que no tener lista: no hay forma de volver a una conversación anterior si
+       * todas se ven igual.
+       *
+       * DOS CONDICIONES, Y LAS DOS HACEN FALTA:
+       *
+       *   · `esTituloPorDefecto` — un título que el usuario puso a mano (o el que vino en el
+       *     `POST /chats` al abrir un hilo desde un reporte) NO se pisa. Es suyo.
+       *   · que el título derivado no sea null — un primer mensaje que es solo un emoji o
+       *     puro espacio daría un título peor que el marcador, o vacío.
+       *
+       * VA EN EL MISMO `update` QUE `updatedAt`, no en uno aparte: son el mismo hecho (este
+       * chat acaba de tener actividad) y separarlos abriría una ventana donde la lista se
+       * reordena por fecha y todavía muestra el nombre viejo.
+       *
+       * Se decide contra el título que se leyó ANTES de escribir los mensajes, así que el
+       * mensaje de este turno es el primero por construcción: si hubiera habido otro antes,
+       * ese turno ya habría cambiado el título y `esTituloPorDefecto` sería falso.
+       */
+      const tituloNuevo = esTituloPorDefecto(chat.title)
+        ? tituloDesdePrimerMensaje(body.content)
+        : null;
+
+      await db
+        .update(chats)
+        .set({ updatedAt: new Date(), ...(tituloNuevo ? { title: tituloNuevo } : {}) })
+        .where(eq(chats.id, params.id));
 
       await maybeCloseSegment(db, companyId, params.id, segment.id);
 
-      return { content: result.assistantText };
+      // Se devuelve el título EFECTIVO (el nuevo si se acaba de derivar, el de siempre si
+      // no) y no solo cuando cambia: así el cliente sincroniza su lista con una asignación
+      // incondicional en vez de con un `if`, y no necesita una segunda petición para
+      // enterarse de que el hilo ya se llama distinto.
+      return { content: result.assistantText, title: tituloNuevo ?? chat.title };
     },
     { body: t.Object({ content: t.String() }) },
   );

@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/bun';
 import { resend } from './resend';
 import { env } from './env';
 import { type DB } from '@/db/client';
@@ -97,19 +98,52 @@ export async function sendAlertTriggeredEmail(params: {
   });
 }
 
+/**
+ * Un envío que no salió deja de morir en una tabla que nadie mira.
+ *
+ * CU-868krkndr. `notifications` guardaba el fallo con su motivo y ahí terminaba todo: no hay
+ * pantalla que liste esa tabla, así que "la invitación no llega" solo se descubría cuando el
+ * invitado lo decía. Se reporta a Sentry, que es el canal que sí avisa.
+ *
+ * Va como MENSAJE de nivel `error` y no como excepción lanzada: el worker no debe reintentar
+ * —una clave ausente o un dominio sin verificar no se arreglan solos y el backoff solo
+ * multiplicaría el ruido— pero un correo que el cliente esperaba y no salió tampoco es un
+ * evento informativo.
+ *
+ * `fingerprint` agrupa por tipo de correo y motivo, NO por destinatario: si un dominio sin
+ * verificar tumba doscientos envíos, eso es un problema, no doscientos. Y el destinatario va
+ * en el contexto y no en el título por lo mismo.
+ */
+function reportarFalloDeEnvio(payload: EmailSendPayload, motivo: string): void {
+  Sentry.captureMessage(`[email] no se pudo entregar un correo de tipo '${payload.kind}'`, {
+    level: 'error',
+    tags: { emailKind: payload.kind },
+    fingerprint: ['email-delivery-failed', payload.kind, motivo],
+    extra: {
+      motivo,
+      companyId: payload.companyId,
+      refId: payload.refId,
+      recipientEmail: payload.recipientEmail,
+      from: env.resendFromEmail,
+    },
+  });
+}
+
 /** Called only by the email.send worker (src/queue/workers/email-send.ts). */
 export async function deliverEmail(db: DB, payload: EmailSendPayload): Promise<void> {
   if (!resend) {
     // No RESEND_API_KEY in this environment — record the attempt as failed rather
     // than silently pretending it sent, so notifications/monitoring stays honest.
+    const motivo = 'RESEND_API_KEY not configured';
     await db.insert(notifications).values({
       companyId: payload.companyId,
       kind: payload.kind,
       recipientEmail: payload.recipientEmail,
       refId: payload.refId,
       status: 'failed',
-      errorReason: 'RESEND_API_KEY not configured',
+      errorReason: motivo,
     });
+    reportarFalloDeEnvio(payload, motivo);
     return;
   }
 
@@ -129,6 +163,10 @@ export async function deliverEmail(db: DB, payload: EmailSendPayload): Promise<v
     status: result.error ? 'failed' : 'sent',
     errorReason: result.error?.message,
   });
+
+  // El registro en base se escribe SIEMPRE primero: si Sentry está caído o sin DSN, el
+  // fallo igual queda anotado donde ya estaba.
+  if (result.error) reportarFalloDeEnvio(payload, result.error.message);
 }
 
 /**

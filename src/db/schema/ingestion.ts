@@ -232,3 +232,65 @@ export const ingestedRows = pgTable(
     pk: primaryKey({ columns: [t.companyId, t.fingerprint] }),
   }),
 );
+
+/**
+ * Perfil de mapeo de columnas POR EMPRESA — el override de `industry_templates`
+ * (migración `0027`, CU-868krmrcj · ARCHITECTURE 6.3.11 y 6.3.12).
+ *
+ * El molde por industria es demasiado grueso para la contabilidad de una PYME, que trae
+ * encabezados propios. Visto en producción: una empresa con `industry="candelas"` corriendo
+ * con la plantilla genérica porque su industria no tiene una, sin forma de que el sistema
+ * aprenda cómo son SUS archivos.
+ *
+ * CONVIVE con la plantilla global, no la reemplaza: esta tabla no toca `industryTemplates`
+ * ni sus versiones. Si el perfil no aplica, la plantilla sigue siendo el molde.
+ *
+ * APPEND-ONLY Y VERSIONADO, y no por simetría con los demás ledgers: un mapa de columnas
+ * equivocado desplaza toda la contabilidad de una hoja a la columna de al lado, con datos
+ * plausibles y sin un solo error. Cuando eso pase, la única pregunta útil es "¿con qué mapa
+ * se leyó la carga del martes?", y solo se contesta si las versiones viejas siguen ahí. El
+ * rol `macha_app` no tiene UPDATE ni DELETE sobre esta tabla.
+ *
+ * La vigente es la de mayor `version` para el par (empresa, `headerHash`).
+ */
+export const companyColumnProfiles = pgTable(
+  'company_column_profiles',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id),
+    /** sha256 hex de los encabezados normalizados y EN ORDEN — ver `lib/header-hash.ts`. */
+    headerHash: text('header_hash').notNull(),
+    /**
+     * Los encabezados normalizados que produjeron el hash. Redundante a propósito: el hash
+     * dice si el layout es el mismo pero no se puede leer, y esto es lo único que permite
+     * diagnosticar por qué un perfil dejó de calzar sin adivinar.
+     */
+    headers: jsonb('headers').notNull(),
+    /** Informativo, NO parte de la identidad: "Ventas" y "Ventas 2026" son el mismo layout. */
+    sheetName: text('sheet_name'),
+    /** El `ColumnMap` de `lib/row-assembly.ts`. */
+    columnMap: jsonb('column_map').notNull(),
+    /** `inferido` | `confirmado_por_cliente` | `corregido_por_staff`. */
+    source: text('source').notNull().default('inferido'),
+    version: integer('version').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** `null` = lo infirió la ingesta sola, sin persona de por medio. */
+    createdBy: uuid('created_by'),
+  },
+  (t) => ({
+    // El árbitro real contra dos versiones con el mismo número: dos cargas simultáneas de la
+    // misma empresa pueden calcular `max(version) + 1` a la vez. Acá la segunda falla.
+    versionUq: uniqueIndex('company_column_profiles_version_uq').on(
+      t.companyId,
+      t.headerHash,
+      t.version,
+    ),
+    vigenteIdx: index('company_column_profiles_vigente_idx').on(
+      t.companyId,
+      t.headerHash,
+      t.version,
+    ),
+  }),
+);

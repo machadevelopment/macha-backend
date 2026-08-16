@@ -112,17 +112,68 @@ async function seriePorDia(
   return [...porDia.values()];
 }
 
+/**
+ * Primer y último día con movimientos de la empresa, sin filtro de rango. `null` = la
+ * empresa no tiene ni una transacción viva.
+ *
+ * ═══ POR QUÉ EXISTE (CU-868krn2up) ═══
+ *
+ * Macha reportó "la data solo aparece en Este año; por mes, semana o día no aparece". Las
+ * capturas muestran el filtro anual con Q 101.380 y el mensual en Q 0,00 — y el mensual
+ * además con un delta en rojo de −100 %.
+ *
+ * El cálculo estaba bien: los tres filtros pasan por la MISMA consulta sobre el mismo
+ * ledger, y no hay camino especial para el año. Lo que pasa es que la contabilidad que subió
+ * el cliente no llega hasta el mes en curso. O sea: no había ningún dato que mostrar.
+ *
+ * Pero la pantalla no decía eso. Decía "Q 0,00" y "−100 %", que es lo que diría un negocio
+ * que dejó de vender — y con el número anual justo al lado contradiciéndolo, la lectura
+ * inevitable es "el producto está roto". Un cero sin explicación y un bug se ven idénticos,
+ * y esa ambigüedad es el defecto de verdad.
+ *
+ * Con el rango real de los datos, la UI puede decir la única frase que cierra la pregunta:
+ * "no hay movimientos en este período; los tuyos van del X al Y".
+ *
+ * ES BARATO: `transactions_live_date_idx` es exactamente `(company_id, date) WHERE
+ * deleted_at IS NULL` (migración 0004), así que min y max son dos saltos a los extremos del
+ * índice, no un recorrido. Y va en el mismo `Promise.all` que el resto, así que no agrega
+ * latencia de ida y vuelta.
+ */
+async function rangoConDatos(
+  db: DB,
+  companyId: string,
+): Promise<{ from: string; to: string } | null> {
+  const [fila] = await db
+    .select({
+      min: rawSql<string | null>`min(${transactions.date})::text`,
+      max: rawSql<string | null>`max(${transactions.date})::text`,
+    })
+    .from(transactions)
+    .where(and(eq(transactions.companyId, companyId), isNull(transactions.deletedAt)));
+
+  // Sobre cero filas, `min()` y `max()` devuelven NULL y el `select` devuelve UNA fila con
+  // los dos en NULL — no cero filas. Por eso se comprueban los valores y no la longitud.
+  if (!fila?.min || !fila.max) return null;
+  return { from: fila.min, to: fila.max };
+}
+
 export async function computePeriodMetrics(
   db: DB,
   companyId: string,
   from: string,
   to: string,
-): Promise<{ current: PeriodTotals; previous: PeriodTotals; series: PeriodPoint[] }> {
+): Promise<{
+  current: PeriodTotals;
+  previous: PeriodTotals;
+  series: PeriodPoint[];
+  dataRange: { from: string; to: string } | null;
+}> {
   const previa = ventanaAnterior(from, to);
-  const [current, previous, series] = await Promise.all([
+  const [current, previous, series, dataRange] = await Promise.all([
     totalesPorTipo(db, companyId, from, to),
     totalesPorTipo(db, companyId, previa.from, previa.to),
     seriePorDia(db, companyId, from, to),
+    rangoConDatos(db, companyId),
   ]);
-  return { current, previous, series };
+  return { current, previous, series, dataRange };
 }
