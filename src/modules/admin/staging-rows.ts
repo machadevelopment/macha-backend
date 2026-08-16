@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { and, asc, eq, getTableColumns } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { stagingRows, companies, documents } from '@/db/schema';
@@ -88,12 +88,38 @@ export const adminStagingRows = new Elysia({ prefix: '/admin/staging-rows' })
       // `getTableColumns` mantiene el resto de la respuesta exactamente igual que el
       // `select()` sin argumentos que había antes: solo suma la columna, no cambia la
       // forma existente.
+      /*
+       * ═══ LAS MÁS NUEVAS PRIMERO (CU-868krkc9r) ═══
+       *
+       * Iba `asc(createdAt)` — las más VIEJAS primero — y esa es la causa del reporte "no
+       * aparecen nuevas filas marcadas". No era un fallo de refresco ni de la vista: la
+       * bandeja es CROSS-TENANT y trae 50 filas por página, así que las filas de la carga
+       * que se acaba de hacer quedaban detrás de todo el rezago acumulado de todas las
+       * empresas. El operador subía un archivo, entraba a revisar, y veía exactamente lo
+       * mismo que antes de subirlo.
+       *
+       * Y el orden viejo tenía una propiedad peor que ser incómodo: una fila que nadie
+       * resuelve nunca se queda arriba PARA SIEMPRE, empujando hacia abajo todo lo que
+       * llegue después. FIFO suena a "que no se pudra nada", pero sin nadie que vacíe la
+       * cabeza de la cola es una pared, no una fila.
+       *
+       * Al revés no se pierde nada: el rezago sigue alcanzable con "cargar más", y los
+       * filtros por empresa y documento que este mismo endpoint ya acepta son el camino
+       * para ir a una carga concreta.
+       *
+       * El desempate por `id` importa con `offset`: `created_at` tiene resolución de
+       * milisegundos y una carga inserta cientos de filas en el mismo instante, así que sin
+       * un segundo criterio estable Postgres puede devolver ese bloque en distinto orden
+       * entre la página 1 y la 2 — y ahí una fila se repite en las dos o no sale en
+       * ninguna. Es el mismo motivo por el que un `ORDER BY` con `LIMIT/OFFSET` tiene que
+       * ser total.
+       */
       const rows = await db
         .select({ ...getTableColumns(stagingRows), companyName: companies.name })
         .from(stagingRows)
         .innerJoin(companies, eq(companies.id, stagingRows.companyId))
         .where(and(...conditions))
-        .orderBy(asc(stagingRows.createdAt))
+        .orderBy(desc(stagingRows.createdAt), desc(stagingRows.id))
         .limit(limit + 1)
         .offset(offset);
       return { rows: rows.slice(0, limit), hasMore: rows.length > limit };
