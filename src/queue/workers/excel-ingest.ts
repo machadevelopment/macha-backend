@@ -14,7 +14,9 @@ import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
-import { canSkipSheet } from '@/lib/sheet-classifier';
+import { canSkipSheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
+import { importarInventario } from '@/lib/inventory-import';
+import type { Currency } from '@/lib/fx';
 import {
   ameritaAdvertencia,
   diferenciasDeMapa,
@@ -73,9 +75,8 @@ export function startExcelIngestWorker(): Promise<string> {
           db.update(documents).set({ status: 'processing' }).where(eq(documents.id, documentId)),
         );
 
-        const { templateVersion, s3Key, creditRule, locale, baseCurrency } = await withCompanyScope(
-          companyId,
-          async (db) => {
+        const { templateVersion, s3Key, creditRule, locale, baseCurrency, uploadedBy } =
+          await withCompanyScope(companyId, async (db) => {
             const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
             if (!doc) throw new Error(`document ${documentId} not found for company ${companyId}`);
 
@@ -113,9 +114,13 @@ export function startExcelIngestWorker(): Promise<string> {
               creditRule,
               locale: company.locale,
               baseCurrency,
+              // CU-868krkfrh: a quién se le atribuyen los movimientos de inventario que
+              // genere este archivo. El worker no tiene sesión; quien subió el archivo es la
+              // atribución honesta, y es la que el historial necesita para poder contestar
+              // "¿quién metió estas 211 unidades?".
+              uploadedBy: doc.uploadedBy,
             };
-          },
-        );
+          });
 
         const fileBuffer = await downloadObject(s3Key);
         const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
@@ -368,7 +373,55 @@ export function startExcelIngestWorker(): Promise<string> {
           }
 
           // `rows[0]` ya ES el encabezado real: el corte de arriba quitó los títulos.
-          if (canSkipSheet(rows[0] ?? [])) {
+          const firma = firmaDeCatalogo(rows[0] ?? []);
+          if (firma) {
+            /*
+             * ═══ EL CATÁLOGO DE EXISTENCIAS NO SE TIRA: ES EL INVENTARIO (CU-868krkfrh) ═══
+             *
+             * Hasta acá TODO catálogo terminaba igual, en la basura, y eso es lo que producía
+             * el reporte "Inventario no carga datos con ningún archivo". En producción se veía
+             * en cada carga de cada empresa: 211 filas de inventario descartadas.
+             *
+             * El pre-filtro sigue intacto —contactos, ubicaciones y productos se siguen
+             * descartando, y siguen sin costar un token—; lo único que cambia es que la firma
+             * `existencias` tiene ahora a dónde ir.
+             *
+             * SIN IA, y es deliberado: una hoja de existencias tiene encabezados predecibles,
+             * y mandarla al modelo desharía justo lo que el pre-filtro vino a lograr. Si el
+             * mapeo por encabezados no alcanza, no se importa y se dice — no se paga por
+             * adivinar. Ver `lib/inventory-import.ts`.
+             */
+            if (firma === 'existencias') {
+              const resultado = await withCompanyScope(companyId, (db) =>
+                importarInventario(db, {
+                  companyId,
+                  userId: uploadedBy,
+                  headerRow: rows[0] ?? [],
+                  rows: rows.slice(1),
+                  baseCurrency: baseCurrency as Currency,
+                }),
+              ).catch((err) => {
+                // El inventario es un módulo aparte de la contabilidad: que falle no puede
+                // tumbar la carga de los movimientos, que es lo que el cliente vino a hacer.
+                console.error(
+                  `[excel-ingest] company=${companyId} hoja "${sheetName}": falló la importación de inventario:`,
+                  err,
+                );
+                return null;
+              });
+
+              if (resultado) {
+                console.info(
+                  `[excel-ingest] company=${companyId} hoja "${sheetName}" importada a inventario: ` +
+                    `${resultado.creados} altas, ${resultado.ajustados} ajustes, ` +
+                    `${resultado.sinCambio} sin cambio, ${resultado.omitidas} omitidas`,
+                );
+              }
+              // Sus filas NO cuentan como descartadas por el pre-filtro: se procesaron, solo
+              // que por otro camino. Sumarlas ahí haría mentir a la métrica de descarte.
+              continue;
+            }
+
             totalRowsSkippedPreFiltro += rows.length;
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
