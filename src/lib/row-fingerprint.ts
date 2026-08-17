@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { ingestedRows } from '@/db/schema';
+import { documents, ingestedRows } from '@/db/schema';
 
 /**
  * Huella estable de una fila cruda de Excel, para deduplicar ANTES de llamar a la IA.
@@ -140,13 +140,56 @@ export function fingerprintSheet(params: {
 }
 
 /**
- * Cuáles de estas huellas YA se ingirieron para esta empresa, ignorando las que registró el
- * documento actual.
+ * Estados de documento cuyas filas están —o van a estar— VIVAS en producción.
+ *
+ * Solo una huella registrada por uno de estos puede bloquear una carga nueva. La lista es
+ * corta a propósito: cada estado que entra acá es una promesa de que esos datos ya le
+ * sirven al cliente.
+ *
+ *   · `promoted` — sus filas están en producción.
+ *   · `review`   — promoción PARCIAL (migración 0020): lo limpio ya entró y lo dudoso entra
+ *                  a medida que staff lo resuelve. Tiene datos vivos.
+ *   · `queued` / `processing` — todavía no, pero un job en vuelo está a punto de promoverlas,
+ *                  y filtrar aquí evita que dos cargas simultáneas del mismo archivo se
+ *                  dupliquen entre sí.
+ */
+const ESTADOS_CON_DATOS_VIVOS = ['promoted', 'review', 'queued', 'processing'] as const;
+
+/**
+ * Cuáles de estas huellas YA se ingirieron para esta empresa **y siguen contando**, ignorando
+ * las que registró el documento actual.
  *
  * Lo de "ignorando el documento actual" es lo que mantiene estable el plan de lotes entre
  * reintentos del mismo archivo: si el intento 1 registró huellas y el intento 2 las
  * filtrara, el lote `n` cubriría filas distintas y la guarda de reanudación abortaría la
  * carga. Ver el comentario largo en `queue/workers/excel-ingest.ts`.
+ *
+ * ═══ POR QUÉ SE MIRA EL ESTADO DEL DOCUMENTO (bug reportado por Jose, 2026-08-14) ═══
+ *
+ * Síntoma textual: *"cuando se borra un archivo y luego se carga otro, aparece como done pero
+ * no se actualiza la data"*.
+ *
+ * La consulta solo excluía el documento actual, así que las huellas de un documento REVERTIDO
+ * seguían bloqueando. El cliente revertía una carga y volvía a subir el mismo archivo: todas
+ * sus filas se filtraban como "ya ingeridas", el documento llegaba a la promoción sin nada, y
+ * terminaba en `promoted` con el mensaje "ya teníamos todo". Cero datos.
+ *
+ * Y no era recuperable: mientras la huella existiera, ese archivo quedaba **permanentemente**
+ * bloqueado. Revertir era un viaje de ida.
+ *
+ * El mismo agujero afectaba a `cancelled`, `failed` y `unsupported`: los cuatro dejan huellas
+ * registradas y ninguno deja filas vivas en producción, así que los cuatro bloqueaban datos
+ * que el cliente nunca llegó a tener.
+ *
+ * ═══ POR QUÉ NO SE BORRAN LAS HUELLAS AL REVERTIR ═══
+ *
+ * Sería lo obvio y es peor. La migración `0024` ya razonó que revertir no debe borrarlas —una
+ * huella significa "esta fila ya se le mostró al modelo", y eso no deja de ser cierto porque
+ * después se revierta— y además `ingested_rows` es de solo INSERT para el rol de la app: no
+ * hay DELETE que ejecutar aunque se quisiera.
+ *
+ * Filtrar por estado conserva las dos propiedades: el historial de lo que se pagó queda
+ * intacto, y lo que no tiene datos vivos deja de bloquear.
  *
  * Se consulta en trozos porque una hoja grande puede traer miles de huellas y Postgres tiene
  * un techo de parámetros por sentencia; 1.000 es holgado y deja margen.
@@ -170,11 +213,15 @@ export async function findSeenFingerprints(
     const filas = await db
       .select({ fingerprint: ingestedRows.fingerprint })
       .from(ingestedRows)
+      // INNER JOIN y no LEFT: una huella cuyo documento ya no existe no puede acreditar que
+      // sus datos estén vivos, así que tampoco debe bloquear.
+      .innerJoin(documents, eq(documents.id, ingestedRows.firstSeenDocumentId))
       .where(
         and(
           eq(ingestedRows.companyId, companyId),
           ne(ingestedRows.firstSeenDocumentId, currentDocumentId),
           inArray(ingestedRows.fingerprint, trozo),
+          inArray(documents.status, [...ESTADOS_CON_DATOS_VIVOS]),
         ),
       );
     for (const f of filas) encontradas.add(f.fingerprint);

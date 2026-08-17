@@ -49,9 +49,35 @@ export function assertZdrModel(model: string): void {
   }
 }
 
+/**
+ * Techo por llamada, en milisegundos.
+ *
+ * ═══ POR QUÉ EXPLÍCITO Y NO EL DEFAULT DEL SDK (Jose, 2026-08-14) ═══
+ *
+ * Síntoma reportado: *"ahorita se quedó trabada la ingesta"*. La causa principal ya se
+ * arregló por otro lado —un documento podía quedarse en `processing` para siempre sin
+ * posibilidad de reintento—, pero el techo de una llamada colgada seguía siendo implícito.
+ *
+ * El default del SDK son 10 minutos, y con sus 2 reintentos automáticos una sola llamada
+ * atascada puede comerse 30 minutos. El job entero vence a los 60 (`expireInSeconds` en
+ * `queue/index.ts`), así que UNA llamada colgada podía consumir la mitad del presupuesto del
+ * archivo completo.
+ *
+ * Cinco minutos sale de una medición, no de una intuición: un lote de 85 filas tardó entre
+ * 140 y 220 segundos (ver la nota de `QUEUES.excelIngest`). Cinco minutos deja más del doble
+ * del peor caso observado, y acota el desastre a 15 minutos con los reintentos incluidos.
+ *
+ * Si algún día los lotes crecen, este número sube ANTES que `expireInSeconds` — al revés, el
+ * job muere a media llamada y el lote se paga sin confirmarse.
+ */
+const TIMEOUT_POR_LLAMADA_MS = 5 * 60 * 1_000;
+
 let client: Anthropic | undefined;
 export function getClient(): Anthropic {
-  client ??= new Anthropic({ apiKey: env.anthropicApiKey });
+  client ??= new Anthropic({
+    apiKey: env.anthropicApiKey,
+    timeout: TIMEOUT_POR_LLAMADA_MS,
+  });
   return client;
 }
 
