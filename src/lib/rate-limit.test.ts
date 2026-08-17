@@ -222,3 +222,68 @@ describe('rate limit por usuario (CU-868kjc950)', () => {
     );
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ * SI REDIS NO CONTESTA, SE DEJA PASAR — CU-868kt2bf5
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `checkTokenBucket` no tenía `try/catch`, y esa ausencia era un modo de fallo entero:
+ * `redis.eval` lanza ante cualquier tropiezo del servicio, la excepción salía del handler
+ * y Elysia respondía **500**. Cualquier parpadeo de Redis tumbaba TODAS las rutas de
+ * lectura de TODOS los clientes a la vez.
+ *
+ * Así se reportó: *"el sistema se cae al escribir un email"* en el flujo de invitación.
+ * No era el formulario — `GET /members/` pasa por este bucket y `GET /members/invitations`
+ * no, y el panel reemplaza la pantalla entera cuando falla la lista de miembros.
+ *
+ * Un limitador de tasa que provoca la caída que existe para evitar está al revés.
+ */
+function redisCaido(mensaje = 'ECONNREFUSED') {
+  return {
+    eval: () => Promise.reject(new Error(mensaje)),
+  };
+}
+
+describe('el bucket falla ABIERTO (CU-868kt2bf5)', () => {
+  test('si Redis lanza, la petición pasa en vez de reventar', async () => {
+    // Antes esto rechazaba la promesa y el handler devolvía 500.
+    const result = await checkTokenBucket('read', 'company-a', redisCaido());
+    expect(result).toEqual({ allowed: true, retryAfterSeconds: 0 });
+  });
+
+  test('`enforceTokenBucket` devuelve null: para el llamador es "seguí"', async () => {
+    /*
+     * Es la forma que importa: los handlers hacen `if (limited) return limited`, así que
+     * `null` es lo único que los deja continuar. Devolver el cuerpo de 429 acá convertiría
+     * la caída de Redis en un 429 masivo — mejor que un 500, pero igual de inservible.
+     */
+    const set = { status: 200, headers: {} as Record<string, string> };
+    const limited = await enforceTokenBucket(
+      'read',
+      'company-a',
+      set as never,
+      'GET /members/',
+      redisCaido(),
+    );
+
+    expect(limited).toBeNull();
+    expect(set.status).toBe(200);
+  });
+
+  test('vale para TODOS los buckets, no solo el de lectura', async () => {
+    // `ai` también: dejar caído el chat y los insights por un parpadeo de Redis sería el
+    // mismo error. El gasto lo sigue frenando el saldo de créditos, que es de Postgres.
+    for (const bucket of ['read', 'ai'] as const) {
+      const r = await checkTokenBucket(bucket, 'company-a', redisCaido());
+      expect(r.allowed).toBe(true);
+    }
+  });
+
+  test('un rechazo LEGÍTIMO sigue rechazando', async () => {
+    // El contraste que impide que "fallar abierto" se convierta en "no limitar nunca":
+    // cuando Redis SÍ contesta y dice que no hay cupo, el 429 se mantiene.
+    const result = await checkTokenBucket('read', 'company-a', fakeRedis([0, 0]));
+    expect(result.allowed).toBe(false);
+  });
+});
