@@ -27,6 +27,13 @@ type ReportGeneratePayload = {
   sections?: string[];
   instructions?: string | null;
   debit?: boolean;
+  /**
+   * CU-868krvuct. Ausente = el idioma de la empresa, que es lo que manda el tick diario:
+   * ese reporte no lo pidió ninguna persona. El endpoint a demanda sí lo manda, con el del
+   * usuario que lo pidió. Opcional también por compatibilidad, igual que el resto: un job
+   * encolado con el payload viejo justo antes del despliegue tiene que seguir corriendo.
+   */
+  locale?: 'es' | 'en';
 };
 
 export function startReportGenerateWorker(): Promise<string> {
@@ -42,6 +49,10 @@ export function startReportGenerateWorker(): Promise<string> {
         sections,
         instructions: payload.instructions,
         debit: payload.debit,
+        // Se valida igual que `sections`, y por la misma razón: el payload de un job es un
+        // JSON en una tabla, no una entrada de TypeBox. Cualquier otro valor se ignora y
+        // cae al idioma de la empresa.
+        locale: payload.locale === 'es' || payload.locale === 'en' ? payload.locale : undefined,
       }),
     );
   });

@@ -27,6 +27,7 @@ import { insights, creditsBalance } from '@/modules/insights';
 import {
   metrics,
   arAp,
+  arApCounterparties,
   metricsPeriod,
   metricsProducts,
   metricsCategories,
@@ -78,6 +79,7 @@ const clientApi = new Elysia()
   .use(industryTemplateDownload)
   .use(metrics)
   .use(arAp)
+  .use(arApCounterparties)
   .use(metricsPeriod)
   .use(metricsProducts)
   .use(metricsCategories)

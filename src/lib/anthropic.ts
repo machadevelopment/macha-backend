@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
-import { runAi } from './ai-errors';
+import { AiProviderError, runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
 import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
@@ -1149,6 +1149,17 @@ NEVER invent or recompute figures — use only the snapshot's. Respond in Englis
 text, no markdown.`;
 
 /**
+ * Presupuesto de salida del reporte automático (dos secciones: KPIs + recomendaciones).
+ *
+ * Era 2048 y estaba QUEMADO para todos los reportes por igual, incluidos los de seis
+ * secciones que introdujo la generación a demanda. Ahí nació el truncamiento: seis
+ * secciones de narrativa no caben en el presupuesto que se dimensionó para dos. El
+ * llamador que sabe cuántas secciones pidió es quien calcula el suyo
+ * (`lib/report-budget.ts`); este valor queda como el del tick diario, que no cambia.
+ */
+export const REPORT_MAX_TOKENS_POR_DEFECTO = 2048;
+
+/**
  * Periodic report narrative (CU-868kfvacg) — same "AI narrates, never calculates" rule as
  * insights.
  *
@@ -1163,20 +1174,54 @@ export async function generateReportNarrative(
   metricsSnapshot: unknown,
   locale: 'es' | 'en',
   systemPrompt?: string,
+  maxTokens: number = REPORT_MAX_TOKENS_POR_DEFECTO,
 ): Promise<NarrativeResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
 
   const stream = anthropic.messages.stream({
     model: anthropicModel,
-    max_tokens: 2048,
+    max_tokens: maxTokens,
     system: systemPrompt ?? REPORT_SYSTEM_PROMPT(locale),
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
   });
   const message = await runAi('report_narrative', () => stream.finalMessage());
 
   const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
-  if (!textBlock) throw new Error('Claude response had no text block');
+
+  /*
+   * ═══ EL REPORTE "A MEDIAS" (CU-868krw2wn) ═══
+   *
+   * Macha reportó reportes que salían cortados, "como si se hubieran quedado a medias".
+   * Esto es exactamente eso, y hasta acá NO se notaba en ninguna parte: cuando el modelo
+   * agota `max_tokens` la llamada devuelve 200, con un bloque de texto perfectamente
+   * válido que termina a mitad de una frase. El código de arriba lo tomaba y seguía.
+   *
+   * Lo que pasaba después es lo que vuelve esto grave y no cosmético:
+   *
+   *   1. La narrativa cortada se sube a S3 y se inserta en `report_versions`.
+   *   2. `report_versions` es APPEND-ONLY (REVOKE UPDATE,DELETE en la migración 0010).
+   *      **El reporte truncado ya no se puede corregir ni borrar.** Queda de versión
+   *      vigente de la empresa para siempre.
+   *   3. Y se le manda por correo al cliente.
+   *
+   * De ahí que se corte ACÁ y no más adelante: el único momento en que esto es reparable
+   * es antes de escribir. Cortar acá cuesta un reporte que hay que volver a pedir; no
+   * cortar cuesta una fila inmutable con basura.
+   *
+   * Se comprueba también el bloque de texto AUSENTE o VACÍO en la misma condición, y no
+   * con el `throw new Error` suelto que había antes: los dos casos son el mismo hecho —la
+   * llamada respondió pero no produjo narrativa usable— y merecen el mismo error de
+   * dominio, que ya se traduce a un mensaje que se le puede enseñar a un cliente
+   * (`aiFailureMessage`). El `Error` pelado salía como 500 sin texto.
+   */
+  if (message.stop_reason === 'max_tokens' || !textBlock || textBlock.text.trim() === '') {
+    throw new AiProviderError('incomplete', 'report_narrative', {
+      cause: new Error(
+        `stop_reason=${message.stop_reason} max_tokens=${maxTokens} output_tokens=${message.usage.output_tokens} texto=${textBlock?.text.length ?? 0} chars`,
+      ),
+    });
+  }
 
   return {
     narrative: textBlock.text,

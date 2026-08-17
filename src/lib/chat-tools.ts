@@ -140,28 +140,55 @@ async function toolQueryTransactions(
 }
 
 /** Dispatches a single tool_use block. Never trusts a company_id from `input` — there isn't one to trust, by schema design above. */
+/**
+ * CU-868krw2gx — UNA HERRAMIENTA QUE FALLA NO PUEDE DEJAR MUDO AL ASESOR.
+ *
+ * Macha reportó que el asesor no contesta preguntas simples y que, tras insistir, deja de
+ * responder del todo. Esta función era una de las dos causas.
+ *
+ * El `input` de una herramienta lo escribe el MODELO, no un esquema validado: puede mandar
+ * `dateFrom: "el mes pasado"`, un `limit` absurdo, o una categoría que no existe. Cuando
+ * eso hacía que la consulta lanzara, la excepción subía por `runChatTurn`, salía del
+ * endpoint como 500, y el turno entero se perdía — la pregunta del usuario tampoco se
+ * guardaba. Una fecha mal escrita por el modelo borraba la conversación.
+ *
+ * Ahora el fallo se le devuelve AL MODELO como resultado de la herramienta. Es la forma
+ * correcta de manejarlo y no un parche: el modelo puede corregir el argumento y reintentar,
+ * o decirle al usuario que ese dato no se pudo consultar. En los dos casos el usuario
+ * recibe una respuesta, que es justo lo que faltaba.
+ *
+ * El texto del error NO viaja al modelo. `message` de una excepción de Postgres trae el SQL
+ * y nombres de columnas, y esto va dentro de una conversación que el usuario ve. Se manda
+ * el nombre de la herramienta y nada más; el detalle queda en el log del servidor, que es
+ * donde sirve.
+ */
 export async function executeChatTool(
   ctx: ChatToolContext,
   name: string,
   input: unknown,
 ): Promise<string> {
-  switch (name) {
-    case 'get_latest_report_narrative':
-      return toolLatestReportNarrative(ctx);
-    case 'get_monthly_rollup':
-      return toolMonthlyRollup(ctx, input as { months: number; type?: RollupType });
-    case 'query_transactions':
-      return toolQueryTransactions(
-        ctx,
-        input as {
-          type?: RollupType;
-          category?: string;
-          dateFrom?: string;
-          dateTo?: string;
-          limit?: number;
-        },
-      );
-    default:
-      return `Unknown tool: ${name}`;
+  try {
+    switch (name) {
+      case 'get_latest_report_narrative':
+        return await toolLatestReportNarrative(ctx);
+      case 'get_monthly_rollup':
+        return await toolMonthlyRollup(ctx, input as { months: number; type?: RollupType });
+      case 'query_transactions':
+        return await toolQueryTransactions(
+          ctx,
+          input as {
+            type?: RollupType;
+            category?: string;
+            dateFrom?: string;
+            dateTo?: string;
+            limit?: number;
+          },
+        );
+      default:
+        return `Unknown tool: ${name}`;
+    }
+  } catch (error) {
+    console.error(`[chat-tools] la herramienta "${name}" falló`, error);
+    return `ERROR: la herramienta "${name}" no pudo completarse. Si los argumentos pueden estar mal, corrígelos y vuelve a intentar UNA vez; si no, responde al usuario con lo que ya tengas y dile que ese dato no se pudo consultar.`;
   }
 }

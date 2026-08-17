@@ -16,6 +16,7 @@ import {
   type ReportType,
 } from '@/lib/report-sections';
 import { buildReportSystemPrompt } from '@/lib/report-prompt';
+import { presupuestoDeNarrativa } from '@/lib/report-budget';
 import { renderReportHtml } from '@/lib/report-render';
 
 export interface GenerateReportResult {
@@ -47,6 +48,23 @@ export interface GenerateReportParams {
    * tiene un usuario detrás decidiendo.
    */
   debit?: boolean;
+  /**
+   * Idioma en que se escribe la NARRATIVA, cuando hay una persona detrás que lo pidió.
+   *
+   * CU-868krvuct: Macha generó un reporte con la plataforma en español y salió en inglés.
+   * El prompt sí llevaba el idioma —eso ya estaba bien—; lo que estaba mal es DE DÓNDE
+   * salía. Se leía de `companies.locale`, que se fija una sola vez en el registro y hoy no
+   * se puede editar desde ninguna pantalla (la de Ajustes de empresa es CU-868kj3gm0, que
+   * está bloqueada). Y el selector de idioma del producto resultó ser **solo una cookie del
+   * navegador** (`app/actions/set-locale.ts` en el frontend): cambiarlo nunca llegaba al
+   * servidor. Así que la plataforma se veía en español y el reporte se escribía en el
+   * idioma que la empresa hubiera elegido meses antes.
+   *
+   * Ahora el reporte a demanda viaja con el idioma de QUIEN LO PIDIÓ, que es quien lo va a
+   * leer. Ausente = el de la empresa, que es lo correcto para el tick diario: ahí no hay
+   * solicitante, el reporte es de la empresa y va a todos sus destinatarios.
+   */
+  locale?: 'es' | 'en';
 }
 
 /**
@@ -77,7 +95,7 @@ export async function generateReport(
     })
     .from(companies)
     .where(eq(companies.id, companyId));
-  const locale = company?.locale ?? 'es';
+  const locale = params.locale ?? company?.locale ?? 'es';
 
   const data = await computeReportSections(
     db,
@@ -88,10 +106,16 @@ export async function generateReport(
     sections,
   );
 
+  // El presupuesto de salida sale de CUÁNTAS secciones se pidieron, no de una constante
+  // (CU-868krw2wn: 2048 fijos truncaban los reportes de muchas secciones). Y si aun así
+  // se agota, `generateReportNarrative` lanza `AiProviderError('incomplete')` y no se
+  // escribe nada — importa acá porque las tres escrituras de abajo (S3, `report_versions`,
+  // correo) son irreversibles: el ledger es append-only y el correo ya salió.
   const result = await generateReportNarrative(
     data,
     locale,
     buildReportSystemPrompt({ locale, reportType, sections, instructions: params.instructions }),
+    presupuestoDeNarrativa(sections),
   );
 
   await insertAiUsageEvent(db, {
