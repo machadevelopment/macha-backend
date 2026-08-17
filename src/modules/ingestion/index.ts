@@ -429,5 +429,18 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       flaggedCount: doc.flaggedCount,
       errorReason: doc.errorReason,
       createdAt: doc.createdAt,
+      /*
+       * CU-868krmrcj: qué entendió el sistema de ESTE archivo — hojas procesadas, descartadas
+       * con su motivo, y de qué columna salió cada campo.
+       *
+       * Va en el detalle y no en el listado a propósito: es un objeto por documento que solo
+       * tiene sentido mirar de a uno, y meterlo en la lista lo mandaría por la red en cada
+       * poll de estado (esta ruta es la de polling del pipeline) multiplicado por documento.
+       *
+       * `null` = documento anterior a la migración 0028, o que nunca llegó a procesarse. La UI
+       * lo distingue de un resumen vacío: al primero no le debe una explicación al cliente,
+       * del segundo sí.
+       */
+      readSummary: doc.readSummary ?? null,
     };
   });

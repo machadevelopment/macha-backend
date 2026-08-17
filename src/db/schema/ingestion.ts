@@ -12,6 +12,7 @@ import {
   primaryKey,
 } from 'drizzle-orm/pg-core';
 import { companies } from './companies';
+import type { ResumenDeLectura } from '@/lib/read-summary';
 
 // 4.13 industry_templates — global (NOT tenant-scoped) mapping templates by industry.
 export const industryTemplates = pgTable(
@@ -72,6 +73,18 @@ export const documents = pgTable(
     industryTemplateVersionId: uuid('industry_template_version_id').references(
       () => industryTemplateVersions.id,
     ),
+    /**
+     * Qué entendió el sistema de este archivo (migración `0028`, CU-868krmrcj): hojas
+     * procesadas, descartadas con su motivo, y de qué columna salió cada campo.
+     *
+     * Existe porque los dos fallos que de verdad hacen daño en una ingesta son SILENCIOSOS —
+     * leer el monto de la columna equivocada, y descartar hojas sin decirlo. Ninguno se
+     * arregla restringiendo lo que el cliente sube; se arreglan haciéndolos visibles.
+     *
+     * `null` = documento anterior a la migración, o que nunca llegó a procesarse. Distinto de
+     * un resumen vacío, que sería "se procesó y no se entendió nada". Ver `lib/read-summary.ts`.
+     */
+    readSummary: jsonb('read_summary').$type<ResumenDeLectura | null>(),
     status: text('status')
       // `unsupported` (migración 0018): terminal, el archivo no se pudo leer y
       // reintentarlo da lo mismo — distinto de `failed`, que sí es reintentable.
