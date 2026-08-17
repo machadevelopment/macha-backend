@@ -16,7 +16,7 @@ import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
 import { documents, companies } from '@/db/schema';
-import { enqueue, QUEUES } from '@/queue';
+import { enqueue, QUEUES, RETRY_POLICY } from '@/queue';
 
 const ALLOWED_MIME_EXT: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -358,17 +358,67 @@ export const ingestion = new Elysia({ prefix: '/documents' })
     assertClientCapability(role, 'upload_excel', set);
 
     const [doc] = await db
-      .select({ id: documents.id, status: documents.status })
+      .select({
+        id: documents.id,
+        status: documents.status,
+        createdAt: documents.createdAt,
+        updatedAt: documents.updatedAt,
+      })
       .from(documents)
       .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
     if (!doc) {
       set.status = 404;
       return { error: 'Document not found' };
     }
-    if (doc.status !== 'failed') {
+
+    /*
+     * ═══ TAMBIÉN SE PUEDE DESATASCAR UNA CARGA COLGADA (Jose, 2026-08-14) ═══
+     *
+     * Síntoma textual: *"ahorita se quedó trabada la ingesta"*.
+     *
+     * Antes esto exigía `failed` y nada más. Pero un documento puede quedarse en
+     * `processing` PARA SIEMPRE, y ese estado no lo escribe ningún fallo:
+     *
+     *   · pg-boss VENCE el job (`expireInSeconds`, una hora para la ingesta) y abandona la
+     *     promesa del worker. El `catch` que escribe `status='failed'` nunca corre.
+     *   · Con `retryLimit: 3` agotado, pg-boss marca el job fallido en SUS tablas — pero
+     *     nadie escribe `documents.status`. El documento queda en `processing` sin ningún
+     *     job vivo detrás.
+     *   · El proceso muere a media carga (deploy, OOM) después del último reintento.
+     *
+     * En los tres casos el documento quedaba **irrecuperable desde la interfaz**: no se
+     * puede revertir (exige `promoted`), no se puede cancelar (el worker que leería la
+     * cancelación ya no existe) y no se podía reintentar. La única salida era volver a
+     * subir el archivo — y desde el bug de las huellas, ni eso funcionaba.
+     *
+     * ES SEGURO REENCOLARLO, y no por optimismo: el worker es REANUDABLE, no solo
+     * idempotente. Lleva la marca de cada lote confirmado en `document_ingest_batches` y se
+     * los salta ANTES de llamar a Claude, así que un reintento cubre exactamente lo que
+     * falta. Es la misma garantía sobre la que ya se apoyan los reintentos de pg-boss.
+     *
+     * EL UMBRAL ES EL VENCIMIENTO DE LA COLA, no un número inventado: pasado ese tiempo
+     * pg-boss ya dio el job por muerto, así que no puede haber uno vivo con el que chocar.
+     * Y aunque lo hubiera, la reanudación por lote acota el daño a repetir un lote.
+     *
+     * `updated_at` NO se mantiene (no hay trigger y ningún UPDATE lo escribe), así que en la
+     * práctica la referencia es la hora de CREACIÓN del documento. Es el lado conservador a
+     * propósito: exige que pase más tiempo, no menos, y no depende de una columna que hoy
+     * miente. Si algún día se agrega el trigger, este código empieza a ser más preciso solo.
+     */
+    const vencimientoMs = (RETRY_POLICY[QUEUES.excelIngest].expireInSeconds ?? 3_600) * 1_000;
+    const referencia = doc.updatedAt ?? doc.createdAt;
+    const colgado =
+      (doc.status === 'processing' || doc.status === 'queued') &&
+      referencia !== null &&
+      Date.now() - new Date(referencia).getTime() > vencimientoMs;
+
+    if (doc.status !== 'failed' && !colgado) {
       set.status = 409;
       return {
-        error: `Solo se puede reintentar un documento fallido (estado actual: ${doc.status}).`,
+        error:
+          doc.status === 'processing' || doc.status === 'queued'
+            ? `Esta carga todavía está en curso. Si sigue así en un rato, vuelve a intentarlo (estado actual: ${doc.status}).`
+            : `Solo se puede reintentar un documento fallido o una carga colgada (estado actual: ${doc.status}).`,
       };
     }
 

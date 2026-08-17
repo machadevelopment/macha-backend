@@ -63,14 +63,22 @@ async function upsertMonthlyRollup(
       .set({ amountBase: String(amountBase), computedAt: new Date() })
       .where(eq(metricRollups.id, existing.id));
   } else {
-    await db.insert(metricRollups).values({
-      companyId,
-      granularity: 'month',
-      period,
-      type,
-      category: null,
-      amountBase: String(amountBase),
-    });
+    /*
+     * Misma ventana que en la versión por lotes: entre el SELECT de arriba y este INSERT otro
+     * proceso pudo crear la fila. `onConflictDoNothing` la absorbe en vez de tumbar la
+     * promoción entera por un rollup — que es un caché, no contabilidad.
+     */
+    await db
+      .insert(metricRollups)
+      .values({
+        companyId,
+        granularity: 'month',
+        period,
+        type,
+        category: null,
+        amountBase: String(amountBase),
+      })
+      .onConflictDoNothing();
   }
 }
 
@@ -203,7 +211,23 @@ export async function getOrComputeMonthlyAmounts(
     category: null,
     amountBase: String(computed.get(`${period}|${type}`) ?? 0),
   }));
-  await db.insert(metricRollups).values(toInsert);
+  /*
+   * `onConflictDoNothing` y no un insert a secas — bug reportado por Jose (2026-08-14).
+   *
+   * Entre el SELECT de arriba y este INSERT hay una ventana, y dos dashboards abiertos a la
+   * vez la atraviesan juntos: los dos ven el caché vacío, los dos calculan, los dos insertan.
+   *
+   * Hasta la migración 0029 eso no fallaba y era MUCHO peor que fallar: `metric_rollups_uq`
+   * incluye `category`, que es NULL en todas estas filas, y en Postgres NULL no colisiona en
+   * un índice único. Los dos INSERT entraban y la empresa se quedaba con filas duplicadas del
+   * mismo período — a partir de ahí cada lectura devolvía la que Postgres diera primero y dos
+   * usuarios veían cifras distintas.
+   *
+   * Con el índice parcial de 0029 la colisión ya es real, así que hay que absorberla. Perder
+   * este insert es inofensivo: el que ganó calculó sobre EL MISMO ledger y escribió el mismo
+   * número.
+   */
+  await db.insert(metricRollups).values(toInsert).onConflictDoNothing();
 
   for (const { period, type } of missing) {
     result.get(period)![type] = computed.get(`${period}|${type}`) ?? 0;
