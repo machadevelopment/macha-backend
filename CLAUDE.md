@@ -167,7 +167,15 @@ Conventions & gotchas:
 Rough layout: `app/(app)/` (customer), `app/admin/` (backoffice), `components/ui/` (shadcn), `components/charts/` (Tremor), `lib/format/`, `lib/i18n/`, `styles/globals.css` (tokens).
 
 ## Environments
-Production + persistent staging (synthetic data only) + ephemeral per-PR previews. **`dev` is the integration branch: `feat/*` branches off `dev` and merges back into `dev`** (agent-merged once checks pass, no per-ticket human review). `main` is the trunk that Railway/Vercel deploy to STAGING; it only receives merges from `dev` per completed epic, reviewed (by another AI or Semi if requested) and merged by the owner — never by the agent. Prod requires manual promote. CI gate: lint + test (GitHub Actions) + local pre-push hook. Backups: Railway native + nightly `pg_dump` to S3 (30-day rolling). See `flux.md` for the full process.
+**⚠️ NO HAY STAGING. `main` despliega a PRODUCCIÓN** (decisión de Keneth, verificada contra Railway el 2026-08-17). Versiones anteriores de este archivo describían "production + persistent staging (synthetic data only)" y **eso nunca fue cierto**: el proyecto `macha-backend-staging` en Railway tiene solo Postgres y Redis, sin servicio de aplicación, y sin deploy desde 2026-08-04. El único backend que corre es el del proyecto `macha-production`, y despliega desde `main`.
+
+Consecuencias que hay que tener presentes porque no son las que el flujo original suponía:
+- **Un merge `dev → main` llega a clientes reales**, no a un ensayo. No existe el "promote manual a prod" del FRENO 3: `main` YA es prod.
+- **Las migraciones de schema auto-aplican sobre la base de producción** en ese mismo deploy, sin pasada previa en otro entorno. De ahí que importe tanto que no pidan locks (ver la nota de `schema_migrations` arriba).
+- **La QA se hace sobre la contabilidad de clientes reales.** Es deliberado mientras el producto está en fase de prueba; subir un archivo de prueba a una empresa real deja filas reales en su dashboard, y revertirlo es un soft-delete por `document_id`.
+- **Recurrente corre con la clave `sk_test_`, a propósito**: todavía no hay cobros. La `sk_live_` está guardada al lado en `RECURRENTE_SECRET_KEY_LIVE_GUARDADA`. El día que se facture hay que promoverla **junto con** su `RECURRENTE_WEBHOOK_SECRET` — van en par, cambiar una sola rompe la verificación del webhook.
+
+**Ramas:** **`dev` is the integration branch: `feat/*` branches off `dev` and merges back into `dev`** (agent-merged once checks pass, no per-ticket human review). `main` solo recibe merges desde `dev` por épica completada, y **lo mergea el dueño, nunca el agente** — esa regla no cambia; al contrario, importa más ahora que se sabe que `main` es producción. CI gate: lint + test (GitHub Actions) + local pre-push hook. Vercel sí genera previews efímeras por PR. Backups: Railway native + nightly `pg_dump` to S3 (30-day rolling). See `flux.md` for the full process.
 
 ## Docs (planning source of truth, in this workspace)
 `PRD.md` · `data model.md` · `design guide.md` · `flux.md` (proceso/ramas). Read the relevant one before changing behavior in that area.
