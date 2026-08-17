@@ -23,6 +23,7 @@ export type AiFailure =
   | 'unavailable' // el proveedor está caído o dio 5xx → nuestro, transitorio
   | 'rate_limited' // 429 del proveedor → transitorio
   | 'too_large' // la petición excede el contexto del modelo → del contenido
+  | 'incomplete' // la llamada salió BIEN pero el texto llegó cortado o vacío → inservible
   | 'invalid'; // cualquier otro 4xx → programación nuestra
 
 export class AiProviderError extends Error {
@@ -43,9 +44,13 @@ export function aiFailureStatus(failure: AiFailure): number {
       return 429;
     case 'too_large':
       return 413;
+    // `incomplete` cae acá, en 503 y no en un 4xx, porque el contenido del cliente no tiene
+    // la culpa de que el modelo se quedara sin presupuesto de salida — y reintentar es
+    // exactamente lo que corresponde.
     case 'invalid':
     case 'not_configured':
     case 'unavailable':
+    case 'incomplete':
       return 503;
   }
 }
@@ -60,6 +65,12 @@ export function aiFailureMessage(failure: AiFailure): string {
       return 'El servicio de análisis está recibiendo demasiadas solicitudes. Intenta de nuevo en un momento.';
     case 'too_large':
       return 'El contenido es demasiado extenso para analizarlo de una sola vez. Divídelo en partes más pequeñas.';
+    // Caso EXPLÍCITO aunque el `default` de abajo diría algo aceptable: el mensaje genérico
+    // ("no está disponible") describe mal lo que pasó —el servicio respondió— y el usuario
+    // que lo lea después de esperar la generación de un reporte merece saber que reintentar
+    // es exactamente lo que hay que hacer.
+    case 'incomplete':
+      return 'La respuesta llegó incompleta y no se guardó. Vuelve a intentarlo.';
     default:
       return 'El servicio de análisis no está disponible en este momento. Intenta de nuevo más tarde.';
   }

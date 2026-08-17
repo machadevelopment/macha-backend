@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { anthropicModel, assertZdrModel, getClient } from '@/lib/anthropic';
-import { runAi } from '@/lib/ai-errors';
+import { AiProviderError, runAi } from '@/lib/ai-errors';
 import { CHAT_TOOLS, executeChatTool, type ChatToolContext } from '@/lib/chat-tools';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 
@@ -116,8 +116,40 @@ export async function runChatTurn(params: {
 
     if (response.stop_reason !== 'tool_use') {
       const textBlock = response.content.find((b): b is Anthropic.TextBlock => b.type === 'text');
+
+      /*
+       * ═══ "EL ASESOR NO RESPONDE" (CU-868krw2gx) ═══
+       *
+       * Acá estaba el `?? ''`, y era literalmente el bug reportado. Si el mensaje final no
+       * traía bloque de texto, o traía uno vacío, esta función devolvía **cadena vacía con
+       * toda normalidad**: el endpoint respondía 200, guardaba un mensaje de asistente
+       * vacío en `chat_messages`, y el usuario veía una burbuja en blanco. Sin error, sin
+       * reintento, sin nada que indicara que algo había fallado.
+       *
+       * Y empeoraba solo: el mensaje vacío queda en el historial, así que la siguiente
+       * pregunta se manda con un turno degenerado adentro. Eso explica el "tras dar 2
+       * prompts más, ni siquiera devuelve una respuesta".
+       *
+       * `stop_reason === 'max_tokens'` va en la MISMA condición aunque sí haya texto: es
+       * una respuesta cortada a mitad de frase, y para el que la lee eso no es una
+       * respuesta. Es el mismo fallo que trunca los reportes (CU-868krw2wn), en la otra
+       * superficie donde el modelo escribe para el cliente.
+       *
+       * Se lanza el error de dominio que ya existe en vez de devolver vacío: el endpoint lo
+       * traduce a un status y a un mensaje presentable, el frontend ya sabe mostrar ese
+       * error (`sendError` en chat-client.tsx), y —clave— el turno NO se guarda, así que
+       * reintentar parte del mismo estado y no de uno contaminado.
+       */
+      if (response.stop_reason === 'max_tokens' || !textBlock || textBlock.text.trim() === '') {
+        throw new AiProviderError('incomplete', 'chat_turn', {
+          cause: new Error(
+            `stop_reason=${response.stop_reason} ronda=${round} texto=${textBlock?.text.length ?? 0} chars`,
+          ),
+        });
+      }
+
       return {
-        assistantText: textBlock?.text ?? '',
+        assistantText: textBlock.text,
         totalInputTokens,
         totalOutputTokens,
         callCount,
@@ -135,5 +167,12 @@ export async function runChatTurn(params: {
     messages.push({ role: 'user', content: toolResults });
   }
 
-  throw new Error('Chat turn exceeded max tool-use rounds without a final answer');
+  /*
+   * Agotar las 8 rondas también es una respuesta que nunca llegó, así que sale por el mismo
+   * camino que los otros dos casos. Antes era un `Error` pelado: 500 sin cuerpo útil, que
+   * en la pantalla del cliente se ve igual que el silencio.
+   */
+  throw new AiProviderError('incomplete', 'chat_turn', {
+    cause: new Error('el turno agotó las 8 rondas de tool-use sin producir una respuesta'),
+  });
 }
