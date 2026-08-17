@@ -2,9 +2,10 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { chats, chatMessages, companies, reportVersions } from '@/db/schema';
+import { chats, chatMessages, reportVersions } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
+import { localeDeContenido } from '@/lib/content-locale';
 import { enforceTokenBucket } from '@/lib/rate-limit';
 import { esTituloPorDefecto, tituloDesdePrimerMensaje, tituloPorDefecto } from '@/lib/chat-title';
 
@@ -52,20 +53,19 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         }
       }
 
-      // CU-868krkw4p: el marcador nace en el idioma de la EMPRESA. Estaba quemado en
-      // español, así que una empresa con `locale='en'` veía "Nuevo chat" en su lista —
-      // y el `title` se guarda en base, no se traduce al pintarlo.
-      const [company] = await db
-        .select({ locale: companies.locale })
-        .from(companies)
-        .where(eq(companies.id, companyId));
+      // CU-868krkw4p: el marcador nace en un idioma, no quemado en español — el `title` se
+      // guarda en base y no se traduce al pintarlo, así que elegir mal acá es permanente.
+      // CU-868krvuct: ese idioma pasa a ser el del USUARIO y no el de la empresa. El chat
+      // es suyo y aparece en su lista; dos socios que leen en idiomas distintos deben ver
+      // cada uno su marcador.
+      const locale = await localeDeContenido(db, companyId, userId);
 
       const [chat] = await db
         .insert(chats)
         .values({
           companyId,
           userId,
-          title: body?.title ?? tituloPorDefecto(company?.locale ?? 'es'),
+          title: body?.title ?? tituloPorDefecto(locale),
           reportVersionId: body?.reportVersionId,
         })
         .returning();
@@ -125,11 +125,9 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         return { error: 'Chat not found' };
       }
 
-      const [company] = await db
-        .select({ locale: companies.locale })
-        .from(companies)
-        .where(eq(companies.id, companyId));
-      const locale = company?.locale ?? 'es';
+      // CU-868krvuct: el idioma de la RESPUESTA es el de quien pregunta, no el que la
+      // empresa eligió el día del registro. Ver `lib/content-locale.ts`.
+      const locale = await localeDeContenido(db, companyId, userId);
 
       const segment = await getOrCreateActiveSegment(db, companyId, params.id);
       const history = await buildChatHistory(db, params.id, segment.id);

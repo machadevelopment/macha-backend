@@ -29,6 +29,7 @@ import {
   reportFrequencySchema,
 } from '@/lib/report-schedule';
 import { renderReportPdf, renderReportXlsx, SECTION_LABELS } from '@/lib/report-render';
+import { localeDeContenido } from '@/lib/content-locale';
 
 /** Mismo formato de fecha que valida `/metrics/period`. */
 const RANGO_ISO = t.String({
@@ -191,7 +192,7 @@ export const reports_ = new Elysia({ prefix: '/reports' })
    */
   .post(
     '/generate',
-    async ({ companyId, role, body, set, db }) => {
+    async ({ companyId, userId, role, body, set, db }) => {
       // `edit_send_reports` (owner/admin) y no `view_dashboard_reports`: esto GASTA
       // créditos de la empresa. Ver es de todos; gastar el saldo con el que se paga el
       // resto de la IA no.
@@ -277,6 +278,11 @@ export const reports_ = new Elysia({ prefix: '/reports' })
         // El débito se conecta SOLO en esta vía. El tick diario sigue sin cobrar: ver la
         // nota de `GenerateReportParams.debit` en lib/reports.ts.
         debit: true,
+        // CU-868krvuct: el reporte se escribe en el idioma de QUIEN LO PIDIÓ. Se resuelve
+        // acá y viaja en el payload porque el worker corre sin usuario — para él este job
+        // es anónimo. El tick diario no manda nada y se queda con el de la empresa, que es
+        // lo correcto: ese reporte no lo pidió nadie. Ver `lib/content-locale.ts`.
+        locale: await localeDeContenido(db, companyId, userId),
       });
 
       set.status = 202;
@@ -345,7 +351,27 @@ export const reports_ = new Elysia({ prefix: '/reports' })
         .orderBy(desc(reports.updatedAt))
         .limit(limit + 1)
         .offset(offset);
-      return { reports: rows.slice(0, limit), hasMore: rows.length > limit };
+      /*
+       * `ready` — CU-868krw2wn, criterio "un reporte que falla a medias NO se muestra como
+       * completo".
+       *
+       * La fila de `reports` se crea ANTES de encolar el job (hay que devolverle un id al
+       * usuario para que consulte el estado), así que una generación que falla deja la fila
+       * sin versión. Hasta acá esa fila se devolvía idéntica a una buena: la lista la
+       * pintaba como un reporte más, y al abrirla `GET /reports/:id` respondía 404 "Report
+       * not found" — una mentira, porque el reporte existe; lo que no existe es su
+       * contenido.
+       *
+       * Se deriva en el servidor en vez de exponer `currentVersionId` en crudo: es lo único
+       * que el cliente necesita saber, y un booleano no invita a usar ese id para nada más
+       * (fue exactamente el error de CU-868kh8uau, mandar un `reports.id` donde iba un
+       * `report_versions.id`).
+       */
+      const conEstado = rows.slice(0, limit).map(({ currentVersionId, ...r }) => ({
+        ...r,
+        ready: currentVersionId !== null,
+      }));
+      return { reports: conEstado, hasMore: rows.length > limit };
     },
     { query: t.Object({ limit: t.Optional(t.String()), offset: t.Optional(t.String()) }) },
   )
