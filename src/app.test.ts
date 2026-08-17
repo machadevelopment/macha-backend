@@ -93,6 +93,9 @@ describe('rutas guardadas — 401 sin token', () => {
     ['/metrics/products?from=2026-01-01&to=2026-01-31', undefined],
     ['/metrics/categories?from=2026-01-01&to=2026-01-31', undefined],
     ['/ar-ap', undefined],
+    // CU-868kt29t0, misma razón que las tres de arriba: una ruta escrita pero no montada
+    // responde 404 y no 401, y esta lista es lo único que lo distingue.
+    ['/ar-ap/counterparties', undefined],
     ['/inventory/', undefined],
     ['/inventory/movements', undefined],
     ['/inventory/', { method: 'POST', body: '{}' }],

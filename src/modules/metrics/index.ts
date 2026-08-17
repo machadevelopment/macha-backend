@@ -10,6 +10,7 @@ import { computePeriodMetrics } from './period';
 import { companies, invoices, bills } from '@/db/schema';
 import { productPerformance } from './products';
 import { categoryBreakdown } from './categories';
+import { counterpartyConcentration } from './counterparties';
 
 function monthStart(monthsAgo: number): string {
   const d = new Date();
@@ -211,6 +212,37 @@ const PERIOD_TOTALS = t.Object({
 });
 
 /**
+ * Forma de la concentración por contraparte (CU-868kt29t0). Se declara una vez y se usa
+ * para `ar` y `ap`: son la misma pregunta con semántica inversa, y dos copias del esquema
+ * es como se acaba con uno de los dos lados divergiendo sin que nada avise.
+ *
+ * `resto` no es opcional: viene en cero cuando la cartera cabe entera en el tope. Un campo
+ * ausente obligaría a la UI a distinguir "no hay resto" de "el backend no lo mandó", y la
+ * respuesta correcta a las dos es la misma.
+ */
+const CONCENTRACION = t.Object({
+  top: t.Array(
+    t.Object({
+      counterparty: t.String(),
+      total: t.Number(),
+      overdue: t.Number(),
+      invoiceCount: t.Number(),
+      // Los cinco baldes escritos a mano, como en `/ar-ap` de arriba. Un `.map()` sobre
+      // `AGING_BUCKETS` devuelve `TSchema[]` y no una tupla, así que TypeBox infiere el
+      // literal como `never` y el handler deja de tipar contra su propio esquema.
+      worstBucket: t.Union([
+        t.Literal('current'),
+        t.Literal('1_30'),
+        t.Literal('31_60'),
+        t.Literal('61_90'),
+        t.Literal('90_plus'),
+      ]),
+    }),
+  ),
+  resto: t.Object({ total: t.Number(), counterpartyCount: t.Number() }),
+});
+
+/**
  * Totales de un rango ARBITRARIO + la ventana anterior del mismo tamaño + serie diaria.
  * Lo consume el filtro de período del dashboard (Hoy / Semana / Mes / Año / Custom).
  *
@@ -375,6 +407,53 @@ export const metricsCategories = new Elysia().use(tenantDerive).get(
             sharePct: t.Number(),
           }),
         ),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+/**
+ * Concentración de la cartera por contraparte — CU-868kt29t0, tabs de Cuentas por cobrar y
+ * por pagar.
+ *
+ * Ruta aparte de `/ar-ap` y no un campo más en aquella respuesta: `/ar-ap` la llama el
+ * DASHBOARD en cada carga, y ahí solo se pintan los cinco baldes de antigüedad. Colgarle la
+ * concentración le sumaría dos agregaciones por contraparte a la pantalla de entrada de
+ * todos los usuarios para devolver datos que solo mira quien abre el tab.
+ *
+ * Sin `from`/`to`, y eso es deliberado: la cartera abierta es ESTADO VIVO, no una serie del
+ * período. Lo que el dueño necesita saber es a quién le cobra hoy, y una factura de marzo
+ * que sigue sin pagarse pertenece a esa respuesta aunque el filtro diga "este mes". Es la
+ * misma razón por la que `/ar-ap` tampoco los recibe.
+ */
+export const arApCounterparties = new Elysia().use(tenantDerive).get(
+  '/ar-ap/counterparties',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /ar-ap/counterparties');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const { ar, ap } = await counterpartyConcentration(db, companyId, Number(query.limit ?? 10));
+
+    return { baseCurrency: company?.baseCurrency ?? 'GTQ', ar, ap };
+  },
+  {
+    // `limit` como texto y acotado en el servicio, igual que en `/reports`: un query param
+    // es siempre texto y `t.Number()` sobre él rechaza `?limit=10` con un 422 que el
+    // cliente no puede accionar.
+    query: t.Object({ limit: t.Optional(t.String()) }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        ar: CONCENTRACION,
+        ap: CONCENTRACION,
       }),
       429: rateLimitedResponse,
     },
