@@ -68,7 +68,45 @@ export type TokenBucketName = keyof typeof rateLimitConfig.tokenBucket;
  */
 export type TokenBucketRedis = Pick<ReturnType<typeof getRedis>, 'eval'>;
 
-/** 429 + Retry-After en el bucket agotado (respuesta acordada con Jose, CU-868kfv97f). */
+/**
+ * 429 + Retry-After en el bucket agotado (respuesta acordada con Jose, CU-868kfv97f).
+ *
+ * ═══ SI REDIS NO CONTESTA, SE DEJA PASAR (CU-868kt2bf5) ═══
+ *
+ * Esto no tenía `try/catch`, y esa ausencia era un modo de fallo entero.
+ *
+ * `redis.eval` lanza ante cualquier tropiezo del servicio —caído, reinicio, conexión
+ * cortada, timeout—. La excepción salía de `enforceTokenBucket`, salía del handler, y
+ * Elysia respondía **500**. En una plataforma donde Redis es un servicio aparte que se
+ * reinicia con sus propios deploys, cualquier parpadeo tumbaba **todas las rutas de
+ * lectura de todos los clientes a la vez**: `/metrics`, `/ar-ap`, `/documents`,
+ * `/reports`, `/members`, el chat y los insights.
+ *
+ * Así se reportó: *"el sistema se cae al escribir un email"* en el flujo de invitación
+ * (CU-868kt2bf5). No era el formulario. `GET /members/` pasa por este bucket y
+ * `GET /members/invitations` no, y el panel reemplaza toda la pantalla cuando falla la
+ * lista de miembros — así que un 500 acá se veía como la pantalla de Equipo rota.
+ *
+ * **Un limitador de tasa que provoca la caída que existe para evitar está al revés.**
+ * Ante un fallo de su propia dependencia, deja pasar.
+ *
+ * ═══ POR QUÉ DEJAR PASAR ES SEGURO AQUÍ, Y NO UNA CONCESIÓN ═══
+ *
+ * Porque este bucket **no es el único freno**, y los otros dos no dependen de Redis:
+ *
+ *   · el gasto de IA lo corta el **saldo de créditos**, que se verifica contra Postgres
+ *     ANTES de cualquier llamada al proveedor (`modules/insights`, `modules/ingestion`);
+ *   · el trabajo pesado lo corta el **gate de profundidad de cola**, que lee las tablas
+ *     de pg-boss — Postgres también.
+ *
+ * O sea: con Redis caído se pierde el suavizado de ráfagas, no el control del gasto. Lo
+ * que se gana es que el producto siga funcionando. El intercambio sería otro si este
+ * bucket fuera un control de seguridad; no lo es, es de capacidad.
+ *
+ * El fallo NO desaparece: va a Sentry con `mechanism: 'token_bucket_caido'`. Sin eso,
+ * fallar abierto convertiría una caída de Redis en algo indetectable — y entonces el
+ * producto funcionaría sin límites durante días sin que nadie se enterara.
+ */
 export async function checkTokenBucket(
   bucket: TokenBucketName,
   companyId: string,
@@ -78,15 +116,31 @@ export async function checkTokenBucket(
   const refillPerMs = rpm / 60_000;
   const now = Date.now();
 
-  const [allowed, tokensLeft] = (await redis.eval(
-    TOKEN_BUCKET_LUA,
-    1,
-    `rl:${bucket}:${companyId}`,
-    burst,
-    refillPerMs,
-    now,
-    1,
-  )) as [number, number];
+  let allowed: number;
+  let tokensLeft: number;
+  try {
+    [allowed, tokensLeft] = (await redis.eval(
+      TOKEN_BUCKET_LUA,
+      1,
+      `rl:${bucket}:${companyId}`,
+      burst,
+      refillPerMs,
+      now,
+      1,
+    )) as [number, number];
+  } catch (error) {
+    // `getRedis()` también puede lanzar al construirse (sin URL configurada), y cae acá
+    // por el mismo camino: el default del parámetro se evalúa dentro de esta llamada.
+    console.error(
+      `[rate-limit] Redis no respondió para el bucket "${bucket}" — se deja pasar`,
+      error,
+    );
+    Sentry.captureException(error, {
+      tags: { mechanism: 'token_bucket_caido', bucket },
+      extra: { companyId },
+    });
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
 
   if (allowed === 1) return { allowed: true, retryAfterSeconds: 0 };
 
