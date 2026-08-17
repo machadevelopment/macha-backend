@@ -12,6 +12,8 @@ import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropi
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
+import { directivaDeEscritura, directivaDeIdioma } from '@/lib/insight-directives';
+import { localeDeContenido } from '@/lib/content-locale';
 import { insightRequests, companies } from '@/db/schema';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { eq } from 'drizzle-orm';
@@ -48,14 +50,34 @@ export const insights = new Elysia().use(tenantDerive).post(
       }
     }
 
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+    const baseCurrency = company?.baseCurrency ?? 'GTQ';
+
     const months = Array.from({ length: 3 }, (_, i) => monthStart(2 - i));
-    const snapshot: Record<string, Record<string, number>> = {};
+    const porPeriodo: Record<string, Record<string, number>> = {};
     for (const period of months) {
-      snapshot[period] = {};
+      porPeriodo[period] = {};
       for (const type of ROLLUP_TYPES) {
-        snapshot[period]![type] = await getOrComputeMonthlyAmount(db, companyId, period, type);
+        porPeriodo[period]![type] = await getOrComputeMonthlyAmount(db, companyId, period, type);
       }
     }
+
+    /*
+     * CU-868krvtjw: la MONEDA viaja en el snapshot.
+     *
+     * Antes eran tres meses de números crudos y nada más — ni un campo que dijera si son
+     * quetzales o dólares. Pedirle al modelo que escriba el símbolo sin darle el dato lo
+     * obligaría a adivinar la moneda de las cifras de una empresa, que es de los pocos
+     * errores que este producto no puede permitirse.
+     *
+     * Los montos quedan bajo `amounts` en vez de en la raíz: un campo suelto al lado de las
+     * claves de período (`2026-06-01`, …) se lee como un período más y el modelo podría
+     * narrarlo como si fuera un mes.
+     */
+    const snapshot = { baseCurrency, amounts: porPeriodo };
 
     // CU-868kfvafy: prompt editable por super_admin (platform_settings), no
     // hardcodeado — insight_requests.prompt_snapshot congela el que se usó.
@@ -64,20 +86,27 @@ export const insights = new Elysia().use(tenantDerive).post(
       SETTINGS_KEYS.insightPromptTemplate,
       DEFAULT_INSIGHT_PROMPT,
     );
-    // CU-868kfvam8 (i18n transversal): la IA debe respetar el idioma de la empresa —
-    // chat (chat-orchestrator) y reportes (reports.ts) ya lo hacían, insight se había
-    // quedado con un prompt fijo en español sin importar companies.locale. El template
-    // guardado en platform_settings es un solo texto (no localizado por diseño, un
-    // admin lo edita una vez) — la instrucción de idioma se agrega aparte, después del
-    // template, para que valga sin importar lo que el admin haya escrito ahí.
-    const [company] = await db
-      .select({ locale: companies.locale })
-      .from(companies)
-      .where(eq(companies.id, companyId));
-    const locale = company?.locale ?? 'es';
-    const localizedPrompt = `${promptTemplate}\n\n${
-      locale === 'en' ? 'Respond in English.' : 'Responde en español.'
-    }`;
+    /*
+     * CU-868kfvam8 (i18n transversal): la IA debe respetar el idioma. El template guardado
+     * en `platform_settings` es un solo texto —no localizado por diseño, un admin lo edita
+     * una vez— así que las directivas se agregan DESPUÉS, y por eso valen sin importar lo
+     * que ese admin haya escrito ahí. Escribirlas dentro de `DEFAULT_INSIGHT_PROMPT` no
+     * llegaría a producción: ese texto es solo el respaldo para entornos sin la fila.
+     *
+     * CU-868krvuct: el idioma pasa a ser el de QUIEN PIDIÓ el insight, no el de la empresa.
+     * El chat y los reportes a demanda ya se corrigieron; los insights se habían quedado
+     * leyendo `companies.locale`, que se fija en el registro y no se puede editar desde
+     * ninguna pantalla. Los tres caminos de IA usan ahora el mismo resolvedor.
+     *
+     * CU-868krvtjw: y la directiva de escritura —símbolo de moneda, sin decimales, empezar
+     * por el hallazgo— viaja por el mismo carril, por la misma razón.
+     */
+    const locale = await localeDeContenido(db, companyId, userId);
+    const localizedPrompt = [
+      promptTemplate,
+      directivaDeIdioma(locale),
+      directivaDeEscritura({ locale, baseCurrency }),
+    ].join('\n\n');
     const result = await generateInsightNarrative(snapshot, localizedPrompt);
 
     const insightRequestId = randomUUID();
