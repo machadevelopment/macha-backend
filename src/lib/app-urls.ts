@@ -36,3 +36,23 @@ export function alertUrl(alertEventId: string): string {
 export function invitationAcceptUrl(token: string): string {
   return `${env.appBaseUrl}/invitations/accept?token=${encodeURIComponent(token)}`;
 }
+
+/**
+ * Paso de configuración de archivos tras el alta (CU-868krmrcj fase C). Ruta:
+ * `app/onboarding/page.tsx` — fuera del grupo `(app)`, es pantalla de vitrina.
+ *
+ * ENTRA A ESTE MÓDULO PORQUE YA COMETIÓ EL ERROR QUE ESTE MÓDULO EXISTE PARA EVITAR. El
+ * `successUrl` del checkout era un template string suelto en `modules/billing/register.ts`
+ * apuntando a `/?registered=1`: el cliente terminaba de pagar y aterrizaba en la pantalla
+ * de ENTRADA, no dentro del producto. Nadie lo notó porque nada falla — la URL existe, solo
+ * que no es donde debía llegar. Es exactamente la forma del bug de `/reports/{versionId}`
+ * que originó este archivo.
+ *
+ * `registered=1` se conserva para que la pantalla pueda distinguir "vengo de pagar" de
+ * "entré por el flujo sin cobro", aunque hoy todavía no lo use.
+ */
+export function onboardingUrl(params: { fromCheckout?: boolean } = {}): string {
+  return params.fromCheckout
+    ? `${env.appBaseUrl}/onboarding?registered=1`
+    : `${env.appBaseUrl}/onboarding`;
+}

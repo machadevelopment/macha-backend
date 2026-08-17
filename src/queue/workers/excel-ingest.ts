@@ -16,6 +16,7 @@ import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
 import { canSkipSheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
 import { importarInventario } from '@/lib/inventory-import';
+import { columnasEnPalabras, construirResumen, type HojaLeida } from '@/lib/read-summary';
 import type { Currency } from '@/lib/fx';
 import {
   ameritaAdvertencia,
@@ -225,6 +226,24 @@ export function startExcelIngestWorker(): Promise<string> {
         const avisos: string[] = [];
 
         /**
+         * Lo que se le va a poder ENSEÑAR al cliente sobre su propio archivo (CU-868krmrcj).
+         *
+         * Se llena a medida que cada hoja se resuelve, en el mismo sitio donde hoy ya se
+         * escribe un `console.info` que rota con los logs de Railway. Ese es el punto: la
+         * información existía y se estaba tirando.
+         */
+        const hojasLeidas: HojaLeida[] = [];
+
+        /**
+         * Filas que de verdad llegaron al modelo, por hoja.
+         *
+         * No se puede derivar de `totalRowsProcessed`, que es del documento entero, ni del
+         * tamaño de `rows` en la planificación, que es ANTES de deduplicar. El cliente
+         * necesita el número real: "de tu hoja Ventas leímos 520 movimientos".
+         */
+        const filasPorHoja = new Map<string, number>();
+
+        /**
          * Hojas de existencias que van al inventario (CU-868krkfrh), anotadas durante la
          * planificación y aplicadas junto a la promoción.
          *
@@ -365,6 +384,12 @@ export function startExcelIngestWorker(): Promise<string> {
           if (yaContada) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${yaContada}`);
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'duplica_otra_hoja',
+              filas: rows.length,
+            });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por duplicar ` +
                 `montos de otra hoja: ${rows.length} filas no van al modelo`,
@@ -376,6 +401,12 @@ export function startExcelIngestWorker(): Promise<string> {
           if (forma.esReporte) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${forma.motivo}`);
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'reporte',
+              filas: rows.length,
+            });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por forma ` +
                 `(${forma.motivo}): ${rows.length} filas no van al modelo`,
@@ -424,6 +455,12 @@ export function startExcelIngestWorker(): Promise<string> {
             }
 
             totalRowsSkippedPreFiltro += rows.length;
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'catalogo',
+              filas: rows.length,
+            });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
             );
@@ -459,7 +496,18 @@ export function startExcelIngestWorker(): Promise<string> {
             filtradas.push(rows[i]!);
             huellasFiltradas.push(huellas[i]!);
           }
-          if (filtradas.length === 0) continue;
+          if (filtradas.length === 0) {
+            // Toda la hoja ya se había ingerido. NO es un descarte del pre-filtro: es el caso
+            // de éxito de la deduplicación, y cuesta USD 0. Se distingue en el resumen porque
+            // para el cliente son cosas muy distintas — "no lo leí" contra "ya lo tenía".
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'ya_ingerida',
+              filas: rows.length,
+            });
+            continue;
+          }
 
           // A partir de acá se trabaja SOLO con lo nuevo.
           rows.length = 0;
@@ -508,6 +556,7 @@ export function startExcelIngestWorker(): Promise<string> {
               fingerprints: batchFingerprints,
             });
             encabezadosPorHoja.set(sheetName, headerRow);
+            filasPorHoja.set(sheetName, (filasPorHoja.get(sheetName) ?? 0) + batch.length);
           }
         }
 
@@ -667,8 +716,31 @@ export function startExcelIngestWorker(): Promise<string> {
              * próxima carga las filtraría. Registrarlas al confirmar significa que una
              * huella existe si y solo si su fila llegó a staging.
              *
-             * `onConflictDoNothing` cubre dos ejecuciones solapadas del mismo job y el
-             * caso de una fila que aparezca en dos hojas con el mismo contenido.
+             * ═══ SE REASIGNA LA HUELLA, NO SE IGNORA EL CONFLICTO (migración 0031) ═══
+             *
+             * Antes iba `onConflictDoNothing`, y eso abría el fallo OPUESTO al que reportó
+             * Jose. Recorrido completo, encontrado corriendo el ciclo con el worker de verdad
+             * (`tests/integration/revert-y-recarga-e2e.test.ts`):
+             *
+             *   1. `doc1` procesa y registra sus huellas apuntando a `doc1`.
+             *   2. El cliente revierte `doc1`.
+             *   3. `doc2` sube el mismo archivo. Ya no se filtra (correcto), así que procesa —
+             *      pero su INSERT choca con la fila existente y `DoNothing` la deja apuntando
+             *      a `doc1`.
+             *   4. `doc3` sube otra vez: la huella sigue señalando a `doc1`, que sigue
+             *      revertido, así que tampoco bloquea. Y así para siempre.
+             *
+             * O sea: revertir una vez desactivaba la deduplicación de ese archivo de forma
+             * PERMANENTE, y el cliente que resube su contabilidad cada semana volvía a pagarla
+             * entera cada semana sin que nada lo dijera.
+             *
+             * Al reasignar, el invariante vuelve a ser cierto: la huella apunta al documento
+             * cuyos datos están VIVOS. Y el UPDATE solo puede darse en ese caso por
+             * construcción — si el documento apuntado estuviera vivo, `findSeenFingerprints`
+             * habría filtrado la fila y no se llegaría hasta acá.
+             *
+             * Sigue cubriendo lo de antes: dos ejecuciones solapadas del mismo job y una fila
+             * que aparezca en dos hojas con el mismo contenido.
              */
             if (fingerprints.length > 0) {
               await db
@@ -681,7 +753,10 @@ export function startExcelIngestWorker(): Promise<string> {
                     sheetName,
                   })),
                 )
-                .onConflictDoNothing();
+                .onConflictDoUpdate({
+                  target: [ingestedRows.companyId, ingestedRows.fingerprint],
+                  set: { firstSeenDocumentId: documentId, sheetName },
+                });
             }
 
             // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
@@ -749,6 +824,20 @@ export function startExcelIngestWorker(): Promise<string> {
         for (const [sheetName, mapaFinal] of mapasPorHoja) {
           const headerRow = encabezadosPorHoja.get(sheetName);
           if (!headerRow) continue;
+
+          /*
+           * El resumen se arma ACÁ y no dentro de `procesarLote` porque este es el único
+           * punto donde el mapa de la hoja es FINAL: `fusionarMapaDeColumnas` lo completa
+           * lote a lote, así que el mapa del primer lote todavía puede tener nulos que el
+           * tercero rellena. Enseñarle al cliente el mapa del primer lote sería enseñarle una
+           * versión provisional de lo que entendimos.
+           */
+          hojasLeidas.push({
+            estado: 'movimientos',
+            nombre: sheetName,
+            filas: filasPorHoja.get(sheetName) ?? 0,
+            columnas: columnasEnPalabras(mapaFinal, headerRow),
+          });
 
           const perfil = perfilesPorHoja.get(sheetName);
           if (perfil) {
@@ -839,6 +928,7 @@ export function startExcelIngestWorker(): Promise<string> {
           const resultado = await withCompanyScope(companyId, (db) =>
             importarInventario(db, {
               companyId,
+              documentId,
               userId: uploadedBy,
               headerRow: hoja.headerRow,
               rows: hoja.filas,
@@ -853,6 +943,14 @@ export function startExcelIngestWorker(): Promise<string> {
           });
 
           if (resultado) {
+            hojasLeidas.push({
+              estado: 'inventario',
+              nombre: hoja.sheetName,
+              creados: resultado.creados,
+              ajustados: resultado.ajustados,
+              sinCambio: resultado.sinCambio,
+              omitidas: resultado.omitidas,
+            });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${hoja.sheetName}" importada a inventario: ` +
                 `${resultado.creados} altas, ${resultado.ajustados} ajustes, ` +
@@ -860,6 +958,37 @@ export function startExcelIngestWorker(): Promise<string> {
             );
           }
         }
+
+        /*
+         * ═══ EL RESUMEN DE LECTURA SE GUARDA PASE LO QUE PASE (CU-868krmrcj) ═══
+         *
+         * En su propia transacción y ANTES de la promoción, a propósito: el resumen tiene que
+         * existir incluso cuando el documento termina en `review`, en `unsupported` o sin una
+         * sola fila. Es justo en esos casos cuando el cliente más necesita saber QUÉ leímos —
+         * un archivo que no produjo nada y no explica por qué es exactamente el problema que
+         * este resumen viene a eliminar.
+         *
+         * Best-effort: si falla, la carga sigue. El resumen es para explicar, no para
+         * contabilizar; perderlo es una molestia, no un dato perdido del cliente.
+         */
+        await withCompanyScope(companyId, (db) =>
+          db
+            .update(documents)
+            .set({
+              readSummary: construirResumen(hojasLeidas, {
+                movimientos: totalRowsProcessed,
+                descartadas: totalRowsSkippedPreFiltro,
+                yaIngeridas: totalRowsSkippedDedup,
+              }),
+            })
+            .where(eq(documents.id, documentId)),
+        ).catch((err) => {
+          console.error(
+            `[excel-ingest] company=${companyId} document=${documentId} no se pudo guardar el ` +
+              `resumen de lectura (la carga sigue):`,
+            err,
+          );
+        });
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
           const promotion = await promoteDocument(db, companyId, documentId);

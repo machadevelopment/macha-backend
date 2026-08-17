@@ -61,6 +61,8 @@ function hoy(): string {
 }
 
 export interface CreateItemInput {
+  /** Ver `RecordMovementInput.documentId`: viaja al movimiento de apertura. */
+  documentId?: string | null;
   sku: string;
   name: string;
   productId?: string | null;
@@ -147,6 +149,7 @@ export async function createItem(
       movementType: 'in',
       quantity: inicial,
       reason: 'Existencia inicial',
+      documentId: input.documentId ?? null,
     });
   }
 
@@ -158,6 +161,12 @@ export interface RecordMovementInput {
   movementType: MovementType;
   quantity: number;
   reason?: string | null;
+  /**
+   * Carga de Excel que lo originó (CU-868krkfrh). `undefined` en todo movimiento manual, que
+   * es el camino original. Es lo que permite a `revertDocument` deshacer el inventario de una
+   * carga revertida sin tocar los conteos que alguien registró a mano después.
+   */
+  documentId?: string | null;
 }
 
 /**
@@ -233,6 +242,7 @@ export async function recordMovement(
       quantity: String(input.quantity),
       quantityAfter: String(quantityAfter),
       reason: input.reason?.trim() || null,
+      documentId: input.documentId ?? null,
       createdBy: userId,
     })
     .returning({ id: inventoryMovements.id });
