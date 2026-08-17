@@ -5,6 +5,7 @@ import { assertClientCapability } from '@/guards/require-capability';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
 import { companies, inventoryItems, inventoryMovements, products } from '@/db/schema';
 import { InventoryError, createItem, discontinueItem, recordMovement, updateItem } from './service';
+import { costosUnitariosDeducidos } from './derived-cost';
 
 /**
  * Inventario del cliente (pantalla "Inventario" del prototipo MVP Macha).
@@ -33,6 +34,12 @@ const ITEM_RESPONSE = t.Object({
   unitCostOriginal: t.Number(),
   unitCostCurrency: t.String(),
   unitCostBase: t.Number(),
+  /**
+   * CU-868kt25ev: el costo NO vino del archivo — se dedujo del costo promedio de lo que la
+   * empresa ya vendió de ese producto. La pantalla lo marca en vez de presentarlo como un
+   * dato del cliente. `false` cuando el archivo sí trajo costo, que es el caso normal.
+   */
+  unitCostIsDerived: t.Boolean(),
   /** Existencia × costo unitario en moneda base. Se calcula aquí y no en la UI para que
    *  el valor del inventario sea el mismo número en pantalla, en un reporte y en el chat. */
   stockValueBase: t.Number(),
@@ -109,10 +116,29 @@ export const inventory = new Elysia({ prefix: '/inventory' })
         .where(and(eq(inventoryItems.companyId, companyId), isNull(inventoryItems.deletedAt)))
         .orderBy(inventoryItems.name);
 
+      /*
+       * CU-868kt25ev: el costo se DEDUCE para los SKU cuyo archivo no lo trajo.
+       *
+       * Se pide una sola vez por petición y solo si de verdad hace falta — si ningún item
+       * está en cero (el caso de las empresas cuya plantilla sí trae costo), no se consulta
+       * `transactions` en absoluto. Ver `derived-cost.ts` para el porqué de deducirlo al
+       * LEER y no al importar.
+       */
+      const faltaCosto = filas.some((f) => Number(f.unitCostBase) === 0);
+      const deducidos = faltaCosto
+        ? await costosUnitariosDeducidos(db, companyId)
+        : new Map<string, number>();
+
       const items = filas.map((f) => {
         const cantidad = Number(f.quantityOnHand);
-        const costoBase = Number(f.unitCostBase);
+        const delArchivo = Number(f.unitCostBase);
         const reorden = Number(f.reorderPoint);
+
+        // El costo del archivo MANDA siempre, aunque difiera del promedio: es el dato del
+        // cliente. La deducción solo llena el hueco.
+        const deducido = delArchivo === 0 && f.productId ? deducidos.get(f.productId) : undefined;
+        const costoBase = deducido ?? delArchivo;
+
         return {
           id: f.id,
           sku: f.sku,
@@ -125,6 +151,9 @@ export const inventory = new Elysia({ prefix: '/inventory' })
           unitCostOriginal: Number(f.unitCostOriginal),
           unitCostCurrency: f.unitCostCurrency,
           unitCostBase: costoBase,
+          // La pantalla puede decir de dónde salió la cifra en vez de presentar una
+          // deducción nuestra como si viniera del archivo del cliente.
+          unitCostIsDerived: deducido !== undefined,
           stockValueBase: cantidad * costoBase,
           supplier: f.supplier,
           lastRestockDate: f.lastRestockDate,
