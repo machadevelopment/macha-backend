@@ -355,6 +355,20 @@ export async function promoteDocument(
  * Un SKU que nació de la carga revertida queda con existencia 0, no se da de baja. Es lo
  * honesto —"ya no creemos que tengas ninguno"— y es reversible: el cliente puede darlo de baja
  * si sobra. Borrarlo destruiría cualquier edición manual que se le haya hecho desde entonces.
+ *
+ * ═══ SE COMPENSA EL NETO, Y ESO LO HACE IDEMPOTENTE ═══
+ *
+ * Se suma el efecto de TODOS los movimientos de esta carga sobre cada artículo y se escribe
+ * UNA fila que lo anula. No una compensación por movimiento.
+ *
+ * La diferencia no es de estilo. Las filas compensatorias llevan el mismo `document_id` que
+ * las que anulan —tienen que llevarlo, es de dónde salieron—, así que una versión que
+ * compensara movimiento a movimiento, al correr dos veces, compensaría también sus propias
+ * compensaciones y dejaría el saldo corrido. Sumando el neto eso no puede pasar: después de
+ * la primera pasada el neto de esta carga es cero y la segunda no escribe nada.
+ *
+ * Hoy la ruta ya impide revertir dos veces (exige `promoted`), pero esta función es
+ * exportable y la corrección de un saldo no debe depender de que el llamador se acuerde.
  */
 async function compensarInventario(
   db: DB,
@@ -362,12 +376,17 @@ async function compensarInventario(
   documentId: string,
   now: Date,
 ): Promise<void> {
-  const movimientos = await db
+  // El signo con el que cada movimiento afectó al saldo: `out` resta, el resto suma. Se agrega
+  // en SQL por artículo para no traer miles de filas a JS solo para sumarlas.
+  const netos = await db
     .select({
-      id: inventoryMovements.id,
       itemId: inventoryMovements.itemId,
-      movementType: inventoryMovements.movementType,
-      quantity: inventoryMovements.quantity,
+      neto: rawSql<string>`sum(
+        case when ${inventoryMovements.movementType} = 'out'
+          then -${inventoryMovements.quantity}
+          else ${inventoryMovements.quantity}
+        end
+      )`,
     })
     .from(inventoryMovements)
     .where(
@@ -375,39 +394,38 @@ async function compensarInventario(
         eq(inventoryMovements.companyId, companyId),
         eq(inventoryMovements.documentId, documentId),
       ),
-    );
+    )
+    .groupBy(inventoryMovements.itemId);
 
-  for (const mov of movimientos) {
-    // El signo con el que ese movimiento afectó al saldo: `out` resta, el resto suma.
-    const aplicado = mov.movementType === 'out' ? -Number(mov.quantity) : Number(mov.quantity);
-    if (aplicado === 0) continue;
+  for (const fila of netos) {
+    const neto = Number(fila.neto);
+    // Neto cero = o esta carga no movió nada de este artículo, o ya se compensó. En los dos
+    // casos no hay nada que escribir, y es lo que hace que revertir dos veces sea inofensivo.
+    if (neto === 0) continue;
 
     /*
-     * Se escribe como `adjustment` y no como el tipo inverso: no entró ni salió mercadería,
-     * se corrigió el libro. Es la misma regla que ya documenta el esquema para los ajustes de
-     * conteo, y es la única lectura honesta de lo que pasó.
-     *
      * La aritmética va en SQL sobre la fila bloqueada, igual que `recordMovement`: leer el
      * saldo en JS para reescribirlo perdería la escritura de cualquier movimiento concurrente.
      */
     const [actualizado] = await db
       .update(inventoryItems)
       .set({
-        quantityOnHand: rawSql`${inventoryItems.quantityOnHand} - ${String(aplicado)}`,
+        quantityOnHand: rawSql`${inventoryItems.quantityOnHand} - ${String(neto)}`,
         updatedAt: now,
       })
-      .where(and(eq(inventoryItems.companyId, companyId), eq(inventoryItems.id, mov.itemId)))
+      .where(and(eq(inventoryItems.companyId, companyId), eq(inventoryItems.id, fila.itemId)))
       .returning({ quantityOnHand: inventoryItems.quantityOnHand });
 
     // El artículo pudo darse de baja entre medias; sin fila que actualizar no hay saldo que
-    // registrar y compensar un ledger contra un item inexistente sería inventar historia.
+    // registrar, y compensar un ledger contra un item inexistente sería inventar historia.
     if (!actualizado) continue;
 
     await db.insert(inventoryMovements).values({
       companyId,
-      itemId: mov.itemId,
+      itemId: fila.itemId,
+      // `adjustment` y no el tipo inverso: no entró ni salió mercadería, se corrigió el libro.
       movementType: 'adjustment',
-      quantity: String(-aplicado),
+      quantity: String(-neto),
       quantityAfter: actualizado.quantityOnHand,
       reason: 'Se revirtió la carga que originó este movimiento',
       documentId,

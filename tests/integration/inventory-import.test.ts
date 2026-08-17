@@ -286,5 +286,59 @@ describe('importación de inventario desde el Excel', () => {
       expect(filas.length).toBeGreaterThan(0);
       for (const f of filas) expect(f.saldo).toBe(f.suma);
     });
+
+    test('revertir DOS veces no corrompe el saldo — idempotencia', async () => {
+      /*
+       * El fallo que esto fija lo encontré revisando mi propio código, no ejecutándolo: las
+       * filas compensatorias llevan el mismo `document_id` que las que anulan —tienen que
+       * llevarlo, es de dónde salieron—, así que una compensación movimiento-a-movimiento, al
+       * correr dos veces, compensaría también sus propias compensaciones y dejaría el saldo
+       * corrido.
+       *
+       * Se resolvió sumando el NETO por artículo: tras la primera pasada el neto de esa carga
+       * es cero, y la segunda no escribe nada. Hoy la ruta ya impide revertir dos veces, pero
+       * la corrección de un saldo no debe depender de que el llamador se acuerde.
+       */
+      const [d] = await owner`
+        insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                               file_size_bytes, mime_type, status)
+        values (${empresa}, ${usuario}, ${`${empresa}/doble-revert`}, 'doble.xlsx',
+                100, 'text/csv', 'promoted')
+        returning id
+      `;
+      const documentId = d!.id;
+
+      await importarInventario(db(), {
+        companyId: empresa,
+        documentId,
+        userId: usuario,
+        headerRow: HEADER,
+        rows: [['DOB-001', 'Doble revert', 'kg', 30, 3]],
+        baseCurrency: 'GTQ',
+      });
+      expect(await existencia('DOB-001')).toBe(30);
+
+      await revertDocument(db(), empresa, documentId);
+      expect(await existencia('DOB-001')).toBe(0);
+
+      // La segunda no debe restar otros 30 y dejarlo en -30.
+      await revertDocument(db(), empresa, documentId);
+      expect(await existencia('DOB-001')).toBe(0);
+
+      // Y una tercera tampoco, por si acaso.
+      await revertDocument(db(), empresa, documentId);
+      expect(await existencia('DOB-001')).toBe(0);
+
+      // El ledger sigue cuadrando después de todo eso.
+      const [f] = await owner`
+        select i.quantity_on_hand::float8 as saldo,
+               coalesce(sum(case when m.movement_type = 'out' then -m.quantity else m.quantity end), 0)::float8 as suma
+        from inventory_items i
+        left join inventory_movements m on m.item_id = i.id
+        where i.company_id = ${empresa} and i.sku = 'DOB-001'
+        group by i.quantity_on_hand
+      `;
+      expect(f!.saldo).toBe(f!.suma);
+    });
   });
 });
