@@ -162,6 +162,8 @@ export interface ResultadoDeImportacion {
 
 export interface ImportarInventarioParams {
   companyId: string;
+  /** La carga que originó estos movimientos, para poder deshacerlos al revertirla. */
+  documentId: string;
   /** A quién se le atribuyen los movimientos: quien subió el archivo. */
   userId: string;
   headerRow: unknown[];
@@ -218,6 +220,7 @@ export async function importarInventario(
 
       if (!existente) {
         await createItem(db, params.companyId, params.userId, {
+          documentId: params.documentId,
           sku: skuCrudo,
           name: nombre,
           quantityOnHand: contado,
@@ -249,6 +252,7 @@ export async function importarInventario(
         // El motivo va en el ledger y es lo que contesta "¿de dónde salió este ajuste?"
         // dentro de seis meses.
         reason: `Conteo importado del archivo (${enSistema} → ${contado})`,
+        documentId: params.documentId,
       });
       out.ajustados++;
     } catch (err) {

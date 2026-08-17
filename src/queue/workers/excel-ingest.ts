@@ -902,6 +902,7 @@ export function startExcelIngestWorker(): Promise<string> {
           const resultado = await withCompanyScope(companyId, (db) =>
             importarInventario(db, {
               companyId,
+              documentId,
               userId: uploadedBy,
               headerRow: hoja.headerRow,
               rows: hoja.filas,

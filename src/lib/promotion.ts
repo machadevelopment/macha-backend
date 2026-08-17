@@ -1,6 +1,15 @@
-import { eq, and, inArray, isNull } from 'drizzle-orm';
+import { eq, and, inArray, isNull, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { stagingRows, documents, transactions, invoices, bills, companies } from '@/db/schema';
+import {
+  stagingRows,
+  documents,
+  transactions,
+  invoices,
+  bills,
+  companies,
+  inventoryItems,
+  inventoryMovements,
+} from '@/db/schema';
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 import { ProductResolver } from '@/lib/product-dimension';
 
@@ -316,9 +325,103 @@ export async function promoteDocument(
  * preserving the audit trail (data model §16). `documents` keeps its history —
  * status flips to 'reverted', nothing is deleted.
  */
+/**
+ * Deshace el inventario que dejó una carga, con movimientos COMPENSATORIOS.
+ *
+ * ═══ POR QUÉ COMPENSAR Y NO BORRAR ═══
+ *
+ * `inventory_movements` es un ledger append-only (CLAUDE.md) y el rol de la app no tiene
+ * DELETE sobre él. Pero además sería incorrecto aunque se pudiera: el movimiento OCURRIÓ —
+ * ese conteo se aplicó y durante un tiempo fue el saldo real de la empresa. Borrarlo dejaría
+ * un historial que no explica por qué el número cambió. La corrección es una fila que dice
+ * "esto se deshizo porque se revirtió la carga X", que es exactamente lo que un auditor
+ * necesita leer.
+ *
+ * ═══ EL HUECO QUE ESTO TAPA ═══
+ *
+ * Desde que el Excel puede poblar el inventario (CU-868krkfrh), revertir una carga devolvía
+ * la contabilidad pero **dejaba el inventario con los números del archivo malo, para siempre
+ * y sin forma de deshacerlo desde la interfaz**. Lo introdujo el propio import de inventario y
+ * se corrige antes de que llegue a un cliente.
+ *
+ * ═══ QUÉ NO TOCA ═══
+ *
+ * Los movimientos con `document_id IS NULL` — los que alguien registró A MANO. Revertir una
+ * carga no puede deshacer un conteo físico que una persona hizo después: ese movimiento no
+ * salió de este archivo y su verdad no depende de él.
+ *
+ * ═══ LOS ARTÍCULOS SE QUEDAN, EN CERO ═══
+ *
+ * Un SKU que nació de la carga revertida queda con existencia 0, no se da de baja. Es lo
+ * honesto —"ya no creemos que tengas ninguno"— y es reversible: el cliente puede darlo de baja
+ * si sobra. Borrarlo destruiría cualquier edición manual que se le haya hecho desde entonces.
+ */
+async function compensarInventario(
+  db: DB,
+  companyId: string,
+  documentId: string,
+  now: Date,
+): Promise<void> {
+  const movimientos = await db
+    .select({
+      id: inventoryMovements.id,
+      itemId: inventoryMovements.itemId,
+      movementType: inventoryMovements.movementType,
+      quantity: inventoryMovements.quantity,
+    })
+    .from(inventoryMovements)
+    .where(
+      and(
+        eq(inventoryMovements.companyId, companyId),
+        eq(inventoryMovements.documentId, documentId),
+      ),
+    );
+
+  for (const mov of movimientos) {
+    // El signo con el que ese movimiento afectó al saldo: `out` resta, el resto suma.
+    const aplicado = mov.movementType === 'out' ? -Number(mov.quantity) : Number(mov.quantity);
+    if (aplicado === 0) continue;
+
+    /*
+     * Se escribe como `adjustment` y no como el tipo inverso: no entró ni salió mercadería,
+     * se corrigió el libro. Es la misma regla que ya documenta el esquema para los ajustes de
+     * conteo, y es la única lectura honesta de lo que pasó.
+     *
+     * La aritmética va en SQL sobre la fila bloqueada, igual que `recordMovement`: leer el
+     * saldo en JS para reescribirlo perdería la escritura de cualquier movimiento concurrente.
+     */
+    const [actualizado] = await db
+      .update(inventoryItems)
+      .set({
+        quantityOnHand: rawSql`${inventoryItems.quantityOnHand} - ${String(aplicado)}`,
+        updatedAt: now,
+      })
+      .where(and(eq(inventoryItems.companyId, companyId), eq(inventoryItems.id, mov.itemId)))
+      .returning({ quantityOnHand: inventoryItems.quantityOnHand });
+
+    // El artículo pudo darse de baja entre medias; sin fila que actualizar no hay saldo que
+    // registrar y compensar un ledger contra un item inexistente sería inventar historia.
+    if (!actualizado) continue;
+
+    await db.insert(inventoryMovements).values({
+      companyId,
+      itemId: mov.itemId,
+      movementType: 'adjustment',
+      quantity: String(-aplicado),
+      quantityAfter: actualizado.quantityOnHand,
+      reason: 'Se revirtió la carga que originó este movimiento',
+      documentId,
+    });
+  }
+}
+
 export async function revertDocument(db: DB, companyId: string, documentId: string): Promise<void> {
   const now = new Date();
   const match = and(eq(transactions.companyId, companyId), eq(transactions.documentId, documentId));
+
+  // El inventario PRIMERO: lee los movimientos de esta carga, y hacerlo antes de tocar nada
+  // más deja la lectura sobre un estado que ninguna otra parte de esta función alteró.
+  await compensarInventario(db, companyId, documentId, now);
 
   await db.update(transactions).set({ deletedAt: now }).where(match);
   await db

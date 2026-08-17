@@ -4,6 +4,8 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { setupTestDatabase, ownerConnection } from './setup';
 import * as schema from '@/db/schema';
 import { importarInventario } from '@/lib/inventory-import';
+import { revertDocument } from '@/lib/promotion';
+import { recordMovement } from '@/modules/inventory/service';
 
 /**
  * Importar el inventario del cliente desde su Excel, contra Postgres real
@@ -21,6 +23,7 @@ describe('importación de inventario desde el Excel', () => {
   let owner: ReturnType<typeof ownerConnection>;
   const empresa = randomUUID();
   const usuario = randomUUID();
+  let docBase: string;
 
   // Los encabezados de la hoja "Inventario" que traen los archivos reales de los clientes.
   const HEADER = ['ID_Insumo', 'Insumo', 'Unidad de Medida', 'Stock Actual', 'Stock Mínimo'];
@@ -36,6 +39,18 @@ describe('importación de inventario desde el Excel', () => {
       insert into users (id, workos_user_id, email, name)
       values (${usuario}, ${'wu_' + usuario}, ${usuario + '@test.local'}, 'Importador')
     `;
+
+    // Documento al que se atribuyen los movimientos de los tests de importación de arriba.
+    // Existe para que `documentId` sea obligatorio en la firma y ningún camino pueda crear
+    // movimientos huérfanos que después no se puedan revertir.
+    const [base] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${empresa}, ${usuario}, ${`${empresa}/base`}, 'base.xlsx',
+              100, 'text/csv', 'promoted')
+      returning id
+    `;
+    docBase = base!.id;
   });
 
   afterAll(async () => {
@@ -47,6 +62,7 @@ describe('importación de inventario desde el Excel', () => {
   const importar = (rows: unknown[][]) =>
     importarInventario(db(), {
       companyId: empresa,
+      documentId: docBase,
       userId: usuario,
       headerRow: HEADER,
       rows,
@@ -163,5 +179,112 @@ describe('importación de inventario desde el Excel', () => {
     `;
     expect(filas.length).toBeGreaterThan(0);
     for (const f of filas) expect(f.saldo).toBe(f.suma);
+  });
+
+  describe('revertir la carga deshace su inventario', () => {
+    test('el stock vuelve atrás con movimientos COMPENSATORIOS, no borrando', async () => {
+      /*
+       * El hueco que esto tapa: desde que el Excel puede poblar el inventario, revertir una
+       * carga devolvía la contabilidad pero dejaba el inventario con los números del archivo
+       * malo — para siempre y sin forma de deshacerlo desde la interfaz.
+       *
+       * Se compensa en vez de borrar porque `inventory_movements` es append-only y porque el
+       * movimiento OCURRIÓ: durante un tiempo ese fue el saldo real. La corrección es una fila
+       * que explica por qué cambió, no la desaparición de la anterior.
+       */
+      const [d] = await owner`
+        insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                               file_size_bytes, mime_type, status)
+        values (${empresa}, ${usuario}, ${`${empresa}/inv-revert`}, 'inv.xlsx',
+                100, 'text/csv', 'promoted')
+        returning id
+      `;
+      const documentId = d!.id;
+
+      await importarInventario(db(), {
+        companyId: empresa,
+        documentId,
+        userId: usuario,
+        headerRow: HEADER,
+        rows: [['REV-001', 'Producto a revertir', 'kg', 50, 5]],
+        baseCurrency: 'GTQ',
+      });
+      expect(await existencia('REV-001')).toBe(50);
+
+      await revertDocument(db(), empresa, documentId);
+
+      // El saldo vuelve a cero: la carga que lo puso ya no cuenta.
+      expect(await existencia('REV-001')).toBe(0);
+
+      // Y el historial explica por qué, en vez de que el movimiento haya desaparecido.
+      const movimientos = await owner`
+        select m.movement_type, m.quantity::float8 as q, m.reason
+        from inventory_movements m
+        join inventory_items i on i.id = m.item_id
+        where m.company_id = ${empresa} and i.sku = 'REV-001'
+        order by m.created_at
+      `;
+      expect(movimientos).toHaveLength(2);
+      expect(movimientos[0]).toMatchObject({ movement_type: 'in', q: 50 });
+      expect(movimientos[1]).toMatchObject({ movement_type: 'adjustment', q: -50 });
+      expect(String(movimientos[1]!.reason)).toContain('revirtió');
+    });
+
+    test('NO toca los movimientos registrados a mano', async () => {
+      // Revertir una carga no puede deshacer el conteo físico que una persona hizo después:
+      // ese movimiento no salió de este archivo y su verdad no depende de él.
+      const [d] = await owner`
+        insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                               file_size_bytes, mime_type, status)
+        values (${empresa}, ${usuario}, ${`${empresa}/inv-mixto`}, 'mixto.xlsx',
+                100, 'text/csv', 'promoted')
+        returning id
+      `;
+      const documentId = d!.id;
+
+      await importarInventario(db(), {
+        companyId: empresa,
+        documentId,
+        userId: usuario,
+        headerRow: HEADER,
+        rows: [['MIX-001', 'Mixto', 'kg', 20, 2]],
+        baseCurrency: 'GTQ',
+      });
+
+      // Alguien cuenta la bodega y registra 5 más, a mano.
+      const [item] = await owner`
+        select id from inventory_items where company_id = ${empresa} and sku = 'MIX-001'
+      `;
+      await recordMovement(db(), empresa, usuario, {
+        itemId: item!.id,
+        movementType: 'in',
+        quantity: 5,
+        reason: 'Conteo físico',
+      });
+      expect(await existencia('MIX-001')).toBe(25);
+
+      await revertDocument(db(), empresa, documentId);
+
+      // Se van los 20 de la carga; los 5 del conteo manual se quedan.
+      expect(await existencia('MIX-001')).toBe(5);
+    });
+
+    test('el saldo SIGUE siendo el doblez de su ledger después de revertir', async () => {
+      // La comprobación que resume todo: si la compensación tocara el saldo sin escribir su
+      // movimiento —o al revés— acá se vería.
+      const filas = await owner`
+        select i.sku,
+               i.quantity_on_hand::float8 as saldo,
+               coalesce(sum(
+                 case when m.movement_type = 'out' then -m.quantity else m.quantity end
+               ), 0)::float8 as suma
+        from inventory_items i
+        left join inventory_movements m on m.item_id = i.id
+        where i.company_id = ${empresa}
+        group by i.sku, i.quantity_on_hand
+      `;
+      expect(filas.length).toBeGreaterThan(0);
+      for (const f of filas) expect(f.saldo).toBe(f.suma);
+    });
   });
 });

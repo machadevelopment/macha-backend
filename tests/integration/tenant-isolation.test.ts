@@ -148,11 +148,20 @@ describe('aislamiento por RLS entre empresas (CU-868kh8zbj)', () => {
     expect(rows).toEqual([]);
   });
 
-  test('el conteo total con el rol dueño confirma que las dos filas existen', async () => {
+  test('el conteo con el rol dueño confirma que las dos filas existen', async () => {
     // Cierra el círculo: los tests de arriba podrían pasar simplemente porque la
     // tabla está vacía. Esto prueba que los datos SÍ están y que lo que los oculta
     // es RLS, no la ausencia de filas.
-    const [row] = await owner`select count(*)::int as count from documents`;
+    //
+    // Se cuenta SOLO sobre las dos empresas de este test, no la tabla entera. Un conteo
+    // global afirma algo sobre el resto de la suite —que ningún otro archivo cree
+    // documentos— que no es asunto de este test y que se rompe cada vez que alguien agrega
+    // un fixture en otro lado. Pasó: los tests de importación de inventario empezaron a
+    // crear los suyos y este falló sin que el aislamiento tuviera nada malo.
+    const [row] = await owner`
+      select count(*)::int as count from documents
+      where company_id in (${companyA}, ${companyB})
+    `;
     expect(row!.count).toBe(2);
   });
 });

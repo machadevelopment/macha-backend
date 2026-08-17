@@ -136,6 +136,18 @@ export const inventoryMovements = pgTable(
      *  sin tener que re-doblar el ledger para saber cómo iba el conteo en cada punto. */
     quantityAfter: numeric('quantity_after', { precision: 18, scale: 3 }).notNull(),
     reason: text('reason'),
+    /**
+     * Carga de Excel que originó este movimiento (migración `0030`).
+     *
+     * `null` = registrado A MANO desde la pantalla de Inventario, que es el camino original y
+     * el mayoritario. La distinción no es informativa: `revertDocument` compensa los
+     * movimientos de la carga que se revierte, y no puede tocar el conteo físico que alguien
+     * registró después a mano.
+     *
+     * Sin FK a `documents` a propósito: el movimiento es un hecho del ledger append-only y
+     * debe sobrevivir aunque el documento se purgue. Es trazabilidad, no integridad.
+     */
+    documentId: uuid('document_id'),
     occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
