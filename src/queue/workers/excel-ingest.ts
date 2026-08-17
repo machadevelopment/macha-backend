@@ -716,8 +716,31 @@ export function startExcelIngestWorker(): Promise<string> {
              * próxima carga las filtraría. Registrarlas al confirmar significa que una
              * huella existe si y solo si su fila llegó a staging.
              *
-             * `onConflictDoNothing` cubre dos ejecuciones solapadas del mismo job y el
-             * caso de una fila que aparezca en dos hojas con el mismo contenido.
+             * ═══ SE REASIGNA LA HUELLA, NO SE IGNORA EL CONFLICTO (migración 0031) ═══
+             *
+             * Antes iba `onConflictDoNothing`, y eso abría el fallo OPUESTO al que reportó
+             * Jose. Recorrido completo, encontrado corriendo el ciclo con el worker de verdad
+             * (`tests/integration/revert-y-recarga-e2e.test.ts`):
+             *
+             *   1. `doc1` procesa y registra sus huellas apuntando a `doc1`.
+             *   2. El cliente revierte `doc1`.
+             *   3. `doc2` sube el mismo archivo. Ya no se filtra (correcto), así que procesa —
+             *      pero su INSERT choca con la fila existente y `DoNothing` la deja apuntando
+             *      a `doc1`.
+             *   4. `doc3` sube otra vez: la huella sigue señalando a `doc1`, que sigue
+             *      revertido, así que tampoco bloquea. Y así para siempre.
+             *
+             * O sea: revertir una vez desactivaba la deduplicación de ese archivo de forma
+             * PERMANENTE, y el cliente que resube su contabilidad cada semana volvía a pagarla
+             * entera cada semana sin que nada lo dijera.
+             *
+             * Al reasignar, el invariante vuelve a ser cierto: la huella apunta al documento
+             * cuyos datos están VIVOS. Y el UPDATE solo puede darse en ese caso por
+             * construcción — si el documento apuntado estuviera vivo, `findSeenFingerprints`
+             * habría filtrado la fila y no se llegaría hasta acá.
+             *
+             * Sigue cubriendo lo de antes: dos ejecuciones solapadas del mismo job y una fila
+             * que aparezca en dos hojas con el mismo contenido.
              */
             if (fingerprints.length > 0) {
               await db
@@ -730,7 +753,10 @@ export function startExcelIngestWorker(): Promise<string> {
                     sheetName,
                   })),
                 )
-                .onConflictDoNothing();
+                .onConflictDoUpdate({
+                  target: [ingestedRows.companyId, ingestedRows.fingerprint],
+                  set: { firstSeenDocumentId: documentId, sheetName },
+                });
             }
 
             // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
