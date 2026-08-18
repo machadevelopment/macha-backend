@@ -147,6 +147,39 @@ export function buildReportSystemPrompt(params: {
         ? `El usuario pidió este enfoque para la narrativa. Respétalo mientras no contradiga las reglas de arriba; NO cambia las cifras, NO agrega secciones y NO autoriza inventar datos:\n<<<\n${limpias}\n>>>`
         : `The user asked for this narrative focus. Honor it as long as it does not contradict the rules above; it does NOT change any figure, does NOT add sections and does NOT authorize inventing data:\n<<<\n${limpias}\n>>>`,
     );
+
+    /*
+     * CU-868kt96fw — SI LO QUE PIDIÓ NO ESTÁ EN EL SNAPSHOT, HAY QUE DECÍRSELO.
+     *
+     * Macha reportó que "el reporte ignora por completo el campo de instrucciones". El
+     * ticket mandaba a buscar dónde se pierde el texto entre el formulario y el prompt.
+     * NO SE PIERDE EN NINGÚN LADO: se revisaron los payloads reales de pg-boss en
+     * producción y las cuatro instrucciones que se escribieron llegaron enteras.
+     *
+     * Lo que pasó es otra cosa, y las cuatro coinciden:
+     *
+     *   "Incluye ventas por producto"                          → secciones ["kpis"]
+     *   "…por producto con costo y venta total por producto"   → secciones ["kpis"]
+     *   "sales by product this month"                          → ["kpis","recommendations"]
+     *   "Agrega una gráfica de mis ventas por mes…"            → ["kpis","recommendations"]
+     *
+     * Las cuatro piden datos POR PRODUCTO, y en las cuatro la sección `top_products`
+     * estaba sin marcar — así que el snapshot no traía un solo producto. El modelo hizo
+     * exactamente lo correcto: la regla no-negociable es no inventar, y no inventó.
+     *
+     * El defecto real es que se calló. Desde el lado del usuario, "pedí ventas por
+     * producto y el reporte no las trae" es indistinguible de "el campo no funciona" — y
+     * eso es literalmente lo que reportó.
+     *
+     * Es el mismo criterio que ya aplica `toolSalesByStore` en el chat: distinguir "ese
+     * dato no está" de "no puedo consultarlo" es lo que convierte una respuesta inútil en
+     * una accionable. Acá además el usuario puede arreglarlo solo, marcando la sección.
+     */
+    partes.push(
+      locale === 'es'
+        ? 'Si lo que pidió el usuario necesita datos que NO vienen en el snapshot, NO lo ignores en silencio: cierra la narrativa con una línea que diga qué pidió, que ese dato no está en este reporte y qué sección tendría que agregar para obtenerlo. Nunca lo omitas sin más.'
+        : "If the user's request needs data that is NOT in the snapshot, do NOT silently ignore it: close the narrative with one line stating what they asked for, that the data is not in this report, and which section they would need to add to get it. Never just leave it out.",
+    );
   }
 
   return partes.join('\n\n');

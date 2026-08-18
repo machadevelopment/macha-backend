@@ -88,3 +88,64 @@ describe('el prompt del reporte lleva el nombre de la empresa', () => {
     expect(iEmpresa).toBeLessThan(iUsuario);
   });
 });
+
+/**
+ * CU-868kt96fw — LA INSTRUCCIÓN DEL USUARIO NO SE PIERDE, PERO PUEDE SER IMPOSIBLE.
+ *
+ * El ticket dice que el campo "Algo más que quieras pedirle" se ignora por completo y manda
+ * a buscar dónde se pierde el texto entre el formulario y el prompt. **No se pierde.** Los
+ * payloads reales de pg-boss en producción muestran las cuatro instrucciones que se
+ * escribieron, íntegras, y este test fija que llegan al prompt.
+ *
+ * Lo que fallaba es que las cuatro pedían datos POR PRODUCTO con la sección `top_products`
+ * SIN marcar: el snapshot no traía un solo producto y el modelo, cumpliendo la regla de no
+ * inventar, se callaba. Desde el lado del usuario eso es indistinguible de un campo roto.
+ */
+describe('la instrucción del usuario llega al prompt', () => {
+  const base = { locale: 'es' as const, reportType: 'executive_summary' as const, sections: [] };
+
+  test('el texto viaja íntegro y delimitado', () => {
+    const prompt = buildReportSystemPrompt({
+      ...base,
+      instructions: 'Dame ventas por producto con costo y venta total',
+    });
+    expect(prompt).toContain('Dame ventas por producto con costo y venta total');
+    // Delimitado: sin marcas, una instrucción larga se funde con las reglas de la casa.
+    expect(prompt).toContain('<<<');
+    expect(prompt).toContain('>>>');
+  });
+
+  test('con instrucción, el modelo tiene ORDEN de avisar si el dato no está', () => {
+    const prompt = buildReportSystemPrompt({ ...base, instructions: 'ventas por producto' });
+    expect(prompt).toContain('NO lo ignores en silencio');
+    expect(prompt).toContain('qué sección tendría que agregar');
+  });
+
+  test('sin instrucción, esa regla NO se emite', () => {
+    // No es tacañería de tokens: sin instrucción la regla no tiene sujeto ("lo que pidió
+    // el usuario"), y una regla sin sujeto es ruido que compite con las que sí aplican.
+    const prompt = buildReportSystemPrompt(base);
+    expect(prompt).not.toContain('NO lo ignores en silencio');
+  });
+
+  test('la regla va DESPUÉS de la instrucción, no antes', () => {
+    const prompt = buildReportSystemPrompt({ ...base, instructions: 'ventas por producto' });
+    const iInstruccion = prompt.indexOf('ventas por producto');
+    const iRegla = prompt.indexOf('NO lo ignores en silencio');
+    expect(iInstruccion).toBeGreaterThanOrEqual(0);
+    expect(iRegla).toBeGreaterThanOrEqual(0);
+    // La regla habla SOBRE la instrucción ("si lo que pidió el usuario…"), así que tiene
+    // que leerse después de haberla leído. Al revés queda apuntando a nada.
+    expect(iRegla).toBeGreaterThan(iInstruccion);
+  });
+
+  test('en inglés la regla también está', () => {
+    const prompt = buildReportSystemPrompt({
+      ...base,
+      locale: 'en',
+      instructions: 'sales by product this month',
+    });
+    expect(prompt).toContain('sales by product this month');
+    expect(prompt).toContain('do NOT silently ignore it');
+  });
+});
