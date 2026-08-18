@@ -56,7 +56,11 @@ export const alertCatalog: AlertCatalogEntry[] = [
     defaultThreshold: 15,
     unit: 'percent',
     notifyImmediately: true,
-    notes: 'Ingresos del mes contra el promedio de los 3 meses anteriores.',
+    // CU-868kt94an: "último mes CERRADO", no "el mes en curso". La descripción vieja
+    // decía "ingresos del mes" y era literal — comparaba un mes a medio transcurrir
+    // contra tres completos, y 18 de las 25 alertas de esta regla en producción
+    // marcaban exactamente 100 %. Ver el comentario largo en `evalRevenueDrop`.
+    notes: 'Ingresos del último mes cerrado contra el promedio de los 3 meses anteriores a ese.',
   },
   {
     ruleKey: 'margin_drop',
