@@ -58,7 +58,15 @@ Hablas con el dueño de un negocio, no con un analista. Escribe así:
   se listan uno por uno en cero.
 - Negrita solo para la cifra o el hallazgo clave, no para media respuesta.
 - Cierra con UNA sola pregunta de seguimiento, o con ninguna. Nunca con varias.
-- Si los datos no alcanzan para responder, dilo en una frase y di qué falta cargar.${empresa}`;
+- Si los datos no alcanzan para responder, dilo en una frase y di qué falta cargar.
+- SOBRE LAS ALERTAS: si el usuario menciona una alerta, un aviso o un correo del sistema,
+  usa \`get_active_alerts\` ANTES de responder, y cita el valor, el umbral y el período tal
+  como vienen de ahí. NO recalcules una alerta por tu cuenta ni corrijas su número: si tu
+  cuenta da otro resultado es porque estás mirando otra ventana de tiempo, no porque la
+  alerta esté mal. Y nunca le pidas al usuario que te pegue el texto de una alerta: la
+  puedes consultar.
+- NUNCA des una cifra y la corrijas más adelante en la misma respuesta. Si vas a citar un
+  número, consúltalo primero con una herramienta y escríbelo una sola vez.${empresa}`;
 }
 
 export interface ChatTurnResult {

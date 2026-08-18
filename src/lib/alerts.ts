@@ -1,4 +1,4 @@
-import { and, eq, gte, isNull, sql as rawSql } from 'drizzle-orm';
+import { and, eq, gte, isNull, lte, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import {
   alertRules,
@@ -27,7 +27,35 @@ function monthStart(monthsAgo: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function evalArOverdue(db: DB, companyId: string, threshold: number): Promise<number | null> {
+/** Último día del mes que empieza en `inicio` (YYYY-MM-DD). */
+function monthEnd(inicio: string): string {
+  const [y, m] = inicio.split('-').map(Number);
+  // Día 0 del mes SIGUIENTE = último día de éste, y `Date.UTC` ya normaliza el desborde de
+  // diciembre a enero del año siguiente sin que haya que tratarlo aparte.
+  return new Date(Date.UTC(y!, m!, 0)).toISOString().slice(0, 10);
+}
+
+/**
+ * Lo que devuelve un evaluador: el valor que disparó y, cuando la regla mira un período
+ * concreto, CUÁL fue y contra qué se comparó.
+ *
+ * CU-868kt94an: antes era un `number` pelado y esa era media causa del problema. Una
+ * alerta sin período no se puede verificar ("¿52 % de qué contra qué?"), y cuando el
+ * usuario le preguntó al asesor, el asesor calculó su propia ventana y salió otro número.
+ * Ninguno de los dos estaba mal; ninguno de los dos decía de qué mes hablaba.
+ */
+export interface ResultadoDeRegla {
+  value: number;
+  periodStart?: string;
+  periodEnd?: string;
+  baseline?: number;
+}
+
+async function evalArOverdue(
+  db: DB,
+  companyId: string,
+  threshold: number,
+): Promise<ResultadoDeRegla | null> {
   const today = new Date().toISOString().slice(0, 10);
   const rows = await db
     .select({ dueDate: invoices.dueDate })
@@ -46,14 +74,14 @@ async function evalArOverdue(db: DB, companyId: string, threshold: number): Prom
     const days = Math.floor((Date.parse(today) - Date.parse(row.dueDate)) / 86_400_000);
     maxDaysOverdue = Math.max(maxDaysOverdue, days);
   }
-  return maxDaysOverdue >= threshold ? maxDaysOverdue : null;
+  return maxDaysOverdue >= threshold ? { value: maxDaysOverdue } : null;
 }
 
 async function evalPortfolioConcentration(
   db: DB,
   companyId: string,
   threshold: number,
-): Promise<number | null> {
+): Promise<ResultadoDeRegla | null> {
   const rows = await db
     .select({
       counterparty: invoices.counterparty,
@@ -72,29 +100,100 @@ async function evalPortfolioConcentration(
   const grandTotal = rows.reduce((acc, r) => acc + Number(r.total), 0);
   if (grandTotal === 0) return null;
   const maxShare = Math.max(...rows.map((r) => (Number(r.total) / grandTotal) * 100));
-  return maxShare >= threshold ? maxShare : null;
+  return maxShare >= threshold ? { value: maxShare } : null;
 }
 
+/**
+ * "Caída de ingresos" — CU-868kt94an, reescrita. Antes producía falsas alarmas por
+ * construcción, y no de a poco: **18 de las 25 alertas de esta regla en producción marcaban
+ * exactamente 100,0000 %.**
+ *
+ * ═══ QUÉ HACÍA ═══
+ *
+ * Comparaba el MES EN CURSO contra el promedio de los 3 anteriores. El mes en curso está a
+ * medio transcurrir y los otros tres están completos, así que la comparación está sesgada
+ * SIEMPRE — y el sesgo es máximo justo donde más ruido hace:
+ *
+ *   · el día 1 de cada mes, todas las empresas "cayeron ~100 %";
+ *   · en la primera carga de un cliente, que sube su histórico hasta el mes pasado, el mes
+ *     en curso vale 0 y la primera alerta que recibe en su vida es "tus ingresos cayeron
+ *     100 %". De ahí salen las 18.
+ *
+ * Y el caso sutil, que es el que llegó como reporte: Candelas, el 17 de agosto, disparó
+ * 52,3 %. La cuenta era correcta —promedio may/jun/jul = 2.217,69 contra 1.058,17 de
+ * agosto— pero comparaba DIECISIETE DÍAS contra tres meses enteros. A ese ritmo la empresa
+ * iba a cerrar agosto en ~1.930, o sea plana. No había caída.
+ *
+ * ═══ QUÉ HACE AHORA ═══
+ *
+ * Compara MESES COMPLETOS: el último mes cerrado contra los 3 anteriores a él. Se pierde
+ * inmediatez —la caída de agosto se avisa en septiembre— y se gana que el número sea
+ * verificable: el dueño puede abrir su dashboard, filtrar ese mes y llegar al mismo dato.
+ * Una alerta que no se puede reproducir a mano no es un aviso, es un rumor; y una que grita
+ * todos los días 1 se aprende a ignorar, que es la peor falla posible en un sistema de
+ * alertas.
+ *
+ * Con la regla nueva, Candelas SIGUE disparando: julio (1.638,41) contra el promedio de
+ * abr/may/jun (2.191,90) es una caída del 25,2 %, por encima de su umbral del 15 %. O sea
+ * que esto no silencia señales reales — quita el ruido del calendario.
+ *
+ * ═══ "SIN DATOS" NO ES "CERO VENTAS" ═══
+ *
+ * Si el mes evaluado no tiene NINGÚN movimiento —de ningún tipo— es que no se ha cargado,
+ * no que la empresa dejó de vender. Se devuelve `null`. La distinción importa: un mes con
+ * gastos y sin ingresos SÍ es una caída del 100 % que hay que avisar, y ese caso sigue
+ * disparando.
+ */
 async function evalRevenueDrop(
   db: DB,
   companyId: string,
   threshold: number,
-): Promise<number | null> {
-  const current = await getOrComputeMonthlyAmount(db, companyId, monthStart(0), 'revenue');
+): Promise<ResultadoDeRegla | null> {
+  const evaluado = monthStart(1);
+  const current = await getOrComputeMonthlyAmount(db, companyId, evaluado, 'revenue');
   const priors = await Promise.all(
-    [1, 2, 3].map((i) => getOrComputeMonthlyAmount(db, companyId, monthStart(i), 'revenue')),
+    [2, 3, 4].map((i) => getOrComputeMonthlyAmount(db, companyId, monthStart(i), 'revenue')),
   );
   const avgPrior = priors.reduce((a, b) => a + b, 0) / priors.length;
   if (avgPrior === 0) return null;
+
+  if (current === 0 && !(await tuvoMovimiento(db, companyId, evaluado))) return null;
+
   const dropPct = ((avgPrior - current) / avgPrior) * 100;
-  return dropPct >= threshold ? dropPct : null;
+  if (dropPct < threshold) return null;
+  return {
+    value: dropPct,
+    periodStart: evaluado,
+    periodEnd: monthEnd(evaluado),
+    baseline: avgPrior,
+  };
+}
+
+/**
+ * ¿La empresa tiene algún movimiento cargado en ese mes? Cualquier tipo sirve: la pregunta
+ * es si HAY DATOS, no si hubo ventas.
+ */
+async function tuvoMovimiento(db: DB, companyId: string, mes: string): Promise<boolean> {
+  const [fila] = await db
+    .select({ hay: rawSql<number>`1` })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.companyId, companyId),
+        isNull(transactions.deletedAt),
+        gte(transactions.date, mes),
+        lte(transactions.date, monthEnd(mes)),
+      ),
+    )
+    .limit(1);
+  return Boolean(fila);
 }
 
 async function evalMarginDrop(
   db: DB,
   companyId: string,
   threshold: number,
-): Promise<number | null> {
+): Promise<ResultadoDeRegla | null> {
   const period = monthStart(0);
   const revenue = await getOrComputeMonthlyAmount(db, companyId, period, 'revenue');
   const cogs = await getOrComputeMonthlyAmount(db, companyId, period, 'cogs');
@@ -102,7 +201,11 @@ async function evalMarginDrop(
   // ventas — un mes sin facturar no dispara "margen bajo" (ver lib/margin.ts).
   const marginPct = grossMarginPct(revenue, cogs);
   if (marginPct === null) return null;
-  return marginPct < threshold ? marginPct : null;
+  // Sí lleva período: el margen se mide sobre un mes concreto, y sin decir cuál pasa lo
+  // mismo que con la caída de ingresos (CU-868kt94an).
+  return marginPct < threshold
+    ? { value: marginPct, periodStart: period, periodEnd: monthEnd(period) }
+    : null;
 }
 
 /**
@@ -116,7 +219,7 @@ async function evalSpendOutOfRange(
   db: DB,
   companyId: string,
   threshold: number,
-): Promise<number | null> {
+): Promise<ResultadoDeRegla | null> {
   const periods = [0, 1, 2, 3].map(monthStart);
   const rows = await db
     .select({
@@ -159,14 +262,16 @@ async function evalSpendOutOfRange(
       maxDeviation = deviationPct;
     }
   }
-  return maxDeviation;
+  // Las reglas que no comparan contra un período fijo devuelven solo el valor. No se les
+  // inventa un rango: un `period` falso es peor que la ausencia, porque parece verificable.
+  return maxDeviation === null ? null : { value: maxDeviation };
 }
 
 async function evalLowCreditBalance(
   db: DB,
   companyId: string,
   threshold: number,
-): Promise<number | null> {
+): Promise<ResultadoDeRegla | null> {
   const balance = await getCreditBalance(db, companyId);
   // CU-868kfvafy criterio 1: configurable desde el panel (platform_settings), nunca
   // en código — creditsConfig.monthlyAllotment queda solo como fallback si el admin
@@ -188,12 +293,12 @@ async function evalLowCreditBalance(
   if (!Number.isFinite(monthlyAllotment) || monthlyAllotment <= 0) return null;
 
   const pctRemaining = (balance / monthlyAllotment) * 100;
-  return pctRemaining < threshold ? pctRemaining : null;
+  return pctRemaining < threshold ? { value: pctRemaining } : null;
 }
 
 const EVALUATORS: Record<
   string,
-  (db: DB, companyId: string, threshold: number) => Promise<number | null>
+  (db: DB, companyId: string, threshold: number) => Promise<ResultadoDeRegla | null>
 > = {
   ar_overdue: evalArOverdue,
   portfolio_concentration: evalPortfolioConcentration,
@@ -229,8 +334,8 @@ export async function evaluateAlerts(
     const evaluator = EVALUATORS[rule.ruleKey];
     if (!evaluator) continue;
 
-    const triggeredValue = await evaluator(db, companyId, Number(rule.threshold));
-    if (triggeredValue === null) continue;
+    const resultado = await evaluator(db, companyId, Number(rule.threshold));
+    if (resultado === null) continue;
 
     const sevenDaysAgo = new Date(Date.now() - NO_REPEAT_DAYS * 86_400_000);
     const [recent] = await db
@@ -250,7 +355,13 @@ export async function evaluateAlerts(
       .values({
         companyId,
         alertRuleId: rule.id,
-        triggeredValue: String(triggeredValue),
+        triggeredValue: String(resultado.value),
+        // CU-868kt94an: qué mes se evaluó y contra qué. `undefined` en las reglas que no
+        // miran un período (concentración, saldo) — Drizzle lo omite y la columna queda
+        // NULL, que es lo correcto: no hay período que declarar, no se inventa uno.
+        periodStart: resultado.periodStart,
+        periodEnd: resultado.periodEnd,
+        baselineValue: resultado.baseline === undefined ? undefined : String(resultado.baseline),
         documentId,
       })
       .returning();

@@ -97,6 +97,21 @@ export const alertEvents = pgTable(
       .notNull()
       .references(() => alertRules.id),
     triggeredValue: numeric('triggered_value', { precision: 18, scale: 4 }).notNull(),
+    /*
+     * CU-868kt94an: QUÉ MES se evaluó, y contra qué.
+     *
+     * Sin esto una alerta no se puede verificar ni contrastar. El usuario vio dos alertas
+     * de "caída de ingresos" el mismo día (52,3 % y 100 %) y el asesor calculó una tercera
+     * cifra (64,9 %): las tres eran correctas para ventanas de tiempo distintas y ninguna
+     * decía cuál era la suya.
+     *
+     * NULLABLE porque los eventos anteriores a la migración 0032 no tienen forma de
+     * recuperar su período — inventárselo sería fabricar precisión inexistente.
+     */
+    periodStart: date('period_start'),
+    periodEnd: date('period_end'),
+    /** Contra qué se comparó. NULL en las reglas que no comparan (concentración, saldo). */
+    baselineValue: numeric('baseline_value', { precision: 18, scale: 4 }),
     documentId: uuid('document_id'),
     notificationId: uuid('notification_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
