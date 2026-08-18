@@ -1,3 +1,4 @@
+import { directivaDeEmpresa } from '@/lib/insight-directives';
 import type Anthropic from '@anthropic-ai/sdk';
 import { anthropicModel, assertZdrModel, getClient } from '@/lib/anthropic';
 import { AiProviderError, runAi } from '@/lib/ai-errors';
@@ -29,7 +30,12 @@ import { insertAiUsageEvent } from '@/lib/ai-usage';
  * El prompt está en español porque es instrucción para el modelo, no texto de usuario;
  * `languageLine` es lo único que decide el idioma de la RESPUESTA.
  */
-function systemPrompt(locale: 'es' | 'en'): string {
+function systemPrompt(locale: 'es' | 'en', companyName?: string | null): string {
+  // CU-868kt984z: el nombre de la empresa del cliente. Sin él, el único nombre propio del
+  // prompt es "Macha Finance" y el modelo lo usa como sujeto ("Macha Finance registró
+  // ingresos por…"). Se anexa al final, como el resto de las reglas de escritura.
+  const directiva = directivaDeEmpresa({ locale, companyName });
+  const empresa = directiva ? `\n- ${directiva}` : '';
   const languageLine =
     locale === 'es'
       ? 'Responde SIEMPRE en español, sin importar el idioma del mensaje del usuario.'
@@ -52,7 +58,7 @@ Hablas con el dueño de un negocio, no con un analista. Escribe así:
   se listan uno por uno en cero.
 - Negrita solo para la cifra o el hallazgo clave, no para media respuesta.
 - Cierra con UNA sola pregunta de seguimiento, o con ninguna. Nunca con varias.
-- Si los datos no alcanzan para responder, dilo en una frase y di qué falta cargar.`;
+- Si los datos no alcanzan para responder, dilo en una frase y di qué falta cargar.${empresa}`;
 }
 
 export interface ChatTurnResult {
@@ -75,6 +81,8 @@ export async function runChatTurn(params: {
   locale: 'es' | 'en';
   history: Anthropic.MessageParam[];
   userMessage: string;
+  /** CU-868kt984z. Opcional: sin él el prompt queda como antes, no se rompe el llamador. */
+  companyName?: string | null;
 }): Promise<ChatTurnResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
@@ -95,7 +103,7 @@ export async function runChatTurn(params: {
       anthropic.messages.create({
         model: anthropicModel,
         max_tokens: 2048,
-        system: systemPrompt(params.locale),
+        system: systemPrompt(params.locale, params.companyName),
         tools: CHAT_TOOLS,
         messages,
       }),

@@ -1,5 +1,5 @@
 import type { ReportSection, ReportType } from '@/lib/report-sections';
-import { directivaDeEscritura } from '@/lib/insight-directives';
+import { directivaDeEmpresa, directivaDeEscritura } from '@/lib/insight-directives';
 
 /**
  * Construcción del prompt de la narrativa de un reporte, en función de las SECCIONES
@@ -106,6 +106,12 @@ export function buildReportSystemPrompt(params: {
    * solo los tests—, y en ese caso el prompt queda como estaba.
    */
   baseCurrency?: string;
+  /**
+   * CU-868kt984z: el nombre de la empresa del cliente. Sin él, el único nombre propio en
+   * todo el contexto era "Macha Finance" y el modelo lo usaba como sujeto de la narrativa.
+   * Opcional para no romper a los llamadores que no lo pasan (hoy solo los tests).
+   */
+  companyName?: string | null;
 }): string {
   const { locale, reportType, sections } = params;
   const partes = [BASE[locale], TYPE_INTRO[reportType][locale]];
@@ -124,6 +130,12 @@ export function buildReportSystemPrompt(params: {
     partes.push(directivaDeEscritura({ locale, baseCurrency: params.baseCurrency }));
   }
 
+  // Quién es el sujeto de la narrativa. Va junto a la directiva de escritura y antes de
+  // las instrucciones del usuario por la misma razón: es regla de la casa. Un usuario
+  // puede pedir en qué poner el acento; no puede renombrar a su propia empresa.
+  const empresa = directivaDeEmpresa({ locale, companyName: params.companyName });
+  if (empresa) partes.push(empresa);
+
   const limpias = params.instructions ? sanitizeInstructions(params.instructions) : '';
   if (limpias) {
     // Delimitado y etiquetado como preferencia de ENFOQUE/TONO: lo que el usuario puede
@@ -134,6 +146,39 @@ export function buildReportSystemPrompt(params: {
       locale === 'es'
         ? `El usuario pidió este enfoque para la narrativa. Respétalo mientras no contradiga las reglas de arriba; NO cambia las cifras, NO agrega secciones y NO autoriza inventar datos:\n<<<\n${limpias}\n>>>`
         : `The user asked for this narrative focus. Honor it as long as it does not contradict the rules above; it does NOT change any figure, does NOT add sections and does NOT authorize inventing data:\n<<<\n${limpias}\n>>>`,
+    );
+
+    /*
+     * CU-868kt96fw — SI LO QUE PIDIÓ NO ESTÁ EN EL SNAPSHOT, HAY QUE DECÍRSELO.
+     *
+     * Macha reportó que "el reporte ignora por completo el campo de instrucciones". El
+     * ticket mandaba a buscar dónde se pierde el texto entre el formulario y el prompt.
+     * NO SE PIERDE EN NINGÚN LADO: se revisaron los payloads reales de pg-boss en
+     * producción y las cuatro instrucciones que se escribieron llegaron enteras.
+     *
+     * Lo que pasó es otra cosa, y las cuatro coinciden:
+     *
+     *   "Incluye ventas por producto"                          → secciones ["kpis"]
+     *   "…por producto con costo y venta total por producto"   → secciones ["kpis"]
+     *   "sales by product this month"                          → ["kpis","recommendations"]
+     *   "Agrega una gráfica de mis ventas por mes…"            → ["kpis","recommendations"]
+     *
+     * Las cuatro piden datos POR PRODUCTO, y en las cuatro la sección `top_products`
+     * estaba sin marcar — así que el snapshot no traía un solo producto. El modelo hizo
+     * exactamente lo correcto: la regla no-negociable es no inventar, y no inventó.
+     *
+     * El defecto real es que se calló. Desde el lado del usuario, "pedí ventas por
+     * producto y el reporte no las trae" es indistinguible de "el campo no funciona" — y
+     * eso es literalmente lo que reportó.
+     *
+     * Es el mismo criterio que ya aplica `toolSalesByStore` en el chat: distinguir "ese
+     * dato no está" de "no puedo consultarlo" es lo que convierte una respuesta inútil en
+     * una accionable. Acá además el usuario puede arreglarlo solo, marcando la sección.
+     */
+    partes.push(
+      locale === 'es'
+        ? 'Si lo que pidió el usuario necesita datos que NO vienen en el snapshot, NO lo ignores en silencio: cierra la narrativa con una línea que diga qué pidió, que ese dato no está en este reporte y qué sección tendría que agregar para obtenerlo. Nunca lo omitas sin más.'
+        : "If the user's request needs data that is NOT in the snapshot, do NOT silently ignore it: close the narrative with one line stating what they asked for, that the data is not in this report, and which section they would need to add to get it. Never just leave it out.",
     );
   }
 
