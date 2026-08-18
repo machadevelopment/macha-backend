@@ -1,5 +1,5 @@
 import type { ReportSection, ReportType } from '@/lib/report-sections';
-import { directivaDeEscritura } from '@/lib/insight-directives';
+import { directivaDeEmpresa, directivaDeEscritura } from '@/lib/insight-directives';
 
 /**
  * Construcción del prompt de la narrativa de un reporte, en función de las SECCIONES
@@ -106,6 +106,12 @@ export function buildReportSystemPrompt(params: {
    * solo los tests—, y en ese caso el prompt queda como estaba.
    */
   baseCurrency?: string;
+  /**
+   * CU-868kt984z: el nombre de la empresa del cliente. Sin él, el único nombre propio en
+   * todo el contexto era "Macha Finance" y el modelo lo usaba como sujeto de la narrativa.
+   * Opcional para no romper a los llamadores que no lo pasan (hoy solo los tests).
+   */
+  companyName?: string | null;
 }): string {
   const { locale, reportType, sections } = params;
   const partes = [BASE[locale], TYPE_INTRO[reportType][locale]];
@@ -123,6 +129,12 @@ export function buildReportSystemPrompt(params: {
   if (params.baseCurrency) {
     partes.push(directivaDeEscritura({ locale, baseCurrency: params.baseCurrency }));
   }
+
+  // Quién es el sujeto de la narrativa. Va junto a la directiva de escritura y antes de
+  // las instrucciones del usuario por la misma razón: es regla de la casa. Un usuario
+  // puede pedir en qué poner el acento; no puede renombrar a su propia empresa.
+  const empresa = directivaDeEmpresa({ locale, companyName: params.companyName });
+  if (empresa) partes.push(empresa);
 
   const limpias = params.instructions ? sanitizeInstructions(params.instructions) : '';
   if (limpias) {

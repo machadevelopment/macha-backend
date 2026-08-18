@@ -120,6 +120,9 @@ export async function generateReport(
       sections,
       instructions: params.instructions,
       baseCurrency: company?.baseCurrency ?? 'GTQ',
+      // CU-868kt984z: `company.name` YA se estaba leyendo acá arriba —lo usa el render
+      // HTML— y no llegaba al prompt. Por eso la narrativa hablaba de "Macha Finance".
+      companyName: company?.name,
     }),
     presupuestoDeNarrativa(sections),
   );

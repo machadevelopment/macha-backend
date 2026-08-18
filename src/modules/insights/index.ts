@@ -12,7 +12,11 @@ import { generateInsightNarrative, DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropi
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { getOrComputeMonthlyAmount, ROLLUP_TYPES } from '@/lib/rollups';
 import { getPlatformSetting, SETTINGS_KEYS } from '@/lib/settings';
-import { directivaDeEscritura, directivaDeIdioma } from '@/lib/insight-directives';
+import {
+  directivaDeEmpresa,
+  directivaDeEscritura,
+  directivaDeIdioma,
+} from '@/lib/insight-directives';
 import { localeDeContenido } from '@/lib/content-locale';
 import { insightRequests, companies } from '@/db/schema';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
@@ -51,7 +55,10 @@ export const insights = new Elysia().use(tenantDerive).post(
     }
 
     const [company] = await db
-      .select({ baseCurrency: companies.baseCurrency })
+      // CU-868kt984z: el NOMBRE viaja junto a la moneda. Sin él, el único nombre propio
+      // del contexto es "Macha Finance" y el modelo lo toma como sujeto (ver el bug en
+      // `directivaDeEmpresa`). Es la misma consulta, una columna más.
+      .select({ baseCurrency: companies.baseCurrency, name: companies.name })
       .from(companies)
       .where(eq(companies.id, companyId));
     const baseCurrency = company?.baseCurrency ?? 'GTQ';
@@ -106,7 +113,12 @@ export const insights = new Elysia().use(tenantDerive).post(
       promptTemplate,
       directivaDeIdioma(locale),
       directivaDeEscritura({ locale, baseCurrency }),
-    ].join('\n\n');
+      directivaDeEmpresa({ locale, companyName: company?.name }),
+    ]
+      // `directivaDeEmpresa` devuelve `null` si la empresa no tiene nombre: mejor sin
+      // directiva que pidiéndole al modelo llamar "" a la empresa.
+      .filter(Boolean)
+      .join('\n\n');
     const result = await generateInsightNarrative(snapshot, localizedPrompt);
 
     const insightRequestId = randomUUID();

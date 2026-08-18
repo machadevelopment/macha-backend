@@ -76,3 +76,59 @@ export function directivaDeEscritura(params: {
 export function directivaDeIdioma(locale: 'es' | 'en'): string {
   return locale === 'en' ? 'Respond in English.' : 'Responde en español.';
 }
+
+/**
+ * CU-868kt984z — CÓMO SE LLAMA LA EMPRESA SOBRE LA QUE SE ESCRIBE.
+ *
+ * ═══ EL BUG ═══
+ *
+ * Macha abrió un reporte y leyó: *"Durante julio, Macha Finance registró ingresos por
+ * 1,638.41…"*. El sujeto de la narrativa era el nombre de LA PLATAFORMA, no el de la
+ * empresa del cliente.
+ *
+ * No es un literal suelto en la plantilla, que es donde el ticket sugería mirar. Es un
+ * hueco: el prompt abre con *"Eres el asistente financiero de Macha Finance"* y el snapshot
+ * que sigue son cifras sin un solo campo que diga de QUIÉN son. El modelo necesita un
+ * sujeto para escribir "X registró ingresos por…", y el único nombre propio en todo el
+ * contexto era "Macha Finance". No alucinó: usó lo único que le dimos.
+ *
+ * Por eso la corrección no puede ser borrar "Macha Finance" del prompt — eso deja al modelo
+ * SIN sujeto y elegirá otro (el genérico "la empresa", o peor, un nombre inventado a partir
+ * de una categoría del snapshot). Hay que darle el nombre correcto y decirle explícitamente
+ * que el otro NO es el negocio del que se habla.
+ *
+ * ═══ POR QUÉ VIVE ACÁ Y NO EN CADA PROMPT ═══
+ *
+ * El mismo hueco existe en los tres textos que el producto genera —reporte, insight y
+ * chat—, y los tres tienen la misma frase de apertura. Escribir la regla tres veces
+ * garantiza que se separen. Además el prompt de insights es EDITABLE por un super_admin
+ * (`platform_settings`): una regla escrita dentro del template no llega a producción, por
+ * el mismo motivo que ya documenta `directivaDeEscritura` arriba.
+ *
+ * ═══ EL NOMBRE VACÍO NO SE FUERZA ═══
+ *
+ * Sin nombre —empresa a medio aprovisionar, o un llamador que no lo pasa— NO se emite la
+ * directiva. Emitirla con la cadena vacía sería peor que el bug: le pediría al modelo
+ * llamar a la empresa `""`, y el resultado más probable es una narrativa que empieza con
+ * comillas vacías donde debería ir un nombre. Sin directiva, se cae al comportamiento
+ * anterior, que es malo pero conocido.
+ */
+export function directivaDeEmpresa(params: {
+  locale: 'es' | 'en';
+  companyName: string | null | undefined;
+}): string | null {
+  const nombre = params.companyName?.trim();
+  if (!nombre) return null;
+
+  if (params.locale === 'en') {
+    return [
+      `The business you are writing about is called "${nombre}". Refer to it by that name, or simply as "the business".`,
+      'NEVER call the client business "Macha Finance": that is the platform generating this text, not its customer.',
+    ].join(' ');
+  }
+
+  return [
+    `La empresa sobre la que escribes se llama "${nombre}". Refiérete a ella por ese nombre, o simplemente como "la empresa".`,
+    'NUNCA llames "Macha Finance" al negocio del cliente: Macha Finance es la plataforma que genera este texto, no su cliente.',
+  ].join(' ');
+}

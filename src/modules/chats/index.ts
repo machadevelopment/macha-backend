@@ -2,7 +2,7 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
-import { chats, chatMessages, reportVersions } from '@/db/schema';
+import { chats, chatMessages, companies, reportVersions } from '@/db/schema';
 import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@/lib/chat-segments';
 import { runChatTurn } from '@/lib/chat-orchestrator';
 import { localeDeContenido } from '@/lib/content-locale';
@@ -132,12 +132,21 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       const segment = await getOrCreateActiveSegment(db, companyId, params.id);
       const history = await buildChatHistory(db, params.id, segment.id);
 
+      // CU-868kt984z: el asesor tenía el mismo hueco que el reporte — el único nombre
+      // propio de su prompt era "Macha Finance", así que al hablar del negocio del
+      // usuario lo llamaba así. Una consulta de una columna, en el mismo turno.
+      const [company] = await db
+        .select({ name: companies.name })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+
       const result = await runChatTurn({
         db,
         companyId,
         locale,
         history,
         userMessage: body.content,
+        companyName: company?.name,
       });
 
       await db.insert(chatMessages).values({
