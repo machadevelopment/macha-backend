@@ -1,9 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { db, sql } from '@/db/client';
-import { creditRules } from '@/db/schema';
+import { creditRules, platformSettings } from '@/db/schema';
+import { SETTINGS_KEYS, setPlatformSetting } from '@/lib/settings';
+import { creditsConfig } from '@/config/credits';
+import { DEFAULT_INSIGHT_PROMPT } from '@/lib/anthropic';
 
 /**
- * Siembra las reglas de crédito v1 en una instalación que no las tiene — CU-868kt44xm.
+ * Siembra los datos de negocio que una instalación necesita y que `scripts/seed.ts` no
+ * puede traer a producción — CU-868kt44xm (reglas de crédito) y CU-868kt470e (parámetros).
  *
  * ═══ EL BUG ═══
  *
@@ -47,6 +51,23 @@ import { creditRules } from '@/db/schema';
  * `credit_rules` es versionada — las correcciones son versiones nuevas, no ediciones—, así
  * que insertar a ciegas crearía una v1 duplicada y rompería el índice único
  * `(action_kind, version)`.
+ *
+ * ═══ Y LOS PARÁMETROS DE NEGOCIO (CU-868kt470e) ═══
+ *
+ * Macha reportó que el tab de "Parámetros de negocio" del admin sale VACÍO. La pantalla no
+ * falta: `components/admin/config-panel.tsx` existe y consume `admin/config`. Lo que falta
+ * son las FILAS — `platform_settings` tiene **0 registros** en producción, verificado.
+ *
+ * Es el mismo patrón que las reglas de crédito, y por la misma causa: los siembra
+ * `scripts/seed.ts`, que no se puede correr contra datos reales.
+ *
+ * Y como `getPlatformSetting` cae a un valor por defecto en código, el producto FUNCIONA
+ * sin las filas — solo que nadie puede cambiar esos números sin desplegar, que es
+ * exactamente lo que la pantalla venía a resolver. De ahí que el tab vacío no rompiera
+ * nada y por eso pasó desapercibido.
+ *
+ * Los valores sembrados son los MISMOS defaults que el código ya usa, así que sembrar no
+ * cambia ningún comportamiento: solo los vuelve visibles y editables.
  *
  * Uso:
  *   DATABASE_URL=<...> bun run scripts/seed-credit-rules.ts
@@ -104,6 +125,56 @@ async function main(): Promise<void> {
     sembradas === 0
       ? '\nNada que sembrar: las cuatro acciones ya tenían regla.'
       : `\n${sembradas} regla(s) sembrada(s). A partir de ahora el consumo DEBITA y el bloqueo por saldo insuficiente vuelve a aplicar.`,
+  );
+
+  await sembrarParametros();
+}
+
+/**
+ * Los parámetros de negocio del panel admin (CU-868kt470e).
+ *
+ * Se siembra el default QUE EL CÓDIGO YA USA, así que esto no cambia ningún
+ * comportamiento: vuelve visible y editable un número que hoy solo se puede tocar
+ * desplegando.
+ *
+ * Idempotente por la misma razón que las reglas: si un operador ya ajustó un parámetro
+ * desde /admin, volver a correr esto NO se lo pisa. `setPlatformSetting` hace upsert, así
+ * que la comprobación de existencia tiene que ser explícita.
+ */
+async function sembrarParametros(): Promise<void> {
+  console.log('\n── Parámetros de negocio ──');
+
+  const defaults: Array<[clave: string, valor: unknown, descripcion: string]> = [
+    [SETTINGS_KEYS.creditToTokensRatio, creditsConfig.creditToTokensRatio, 'tokens por crédito'],
+    [SETTINGS_KEYS.creditMonthlyAllotment, creditsConfig.monthlyAllotment, 'créditos por mes'],
+    [SETTINGS_KEYS.creditInitialGrant, creditsConfig.monthlyAllotment, 'créditos iniciales'],
+    // Provisional y sin confirmar con el dueño del negocio — la pantalla existe justamente
+    // para que ese número se decida sin un deploy.
+    [SETTINGS_KEYS.creditPriceUsdCents, 10, 'precio del crédito (centavos USD)'],
+    [SETTINGS_KEYS.insightPromptTemplate, DEFAULT_INSIGHT_PROMPT, 'prompt de insight'],
+  ];
+
+  let puestos = 0;
+  for (const [clave, valor, descripcion] of defaults) {
+    const [existente] = await db
+      .select({ key: platformSettings.key })
+      .from(platformSettings)
+      .where(eq(platformSettings.key, clave));
+
+    if (existente) {
+      console.log(`· ${clave}: ya está — no se toca`);
+      continue;
+    }
+
+    await setPlatformSetting(db, clave, valor);
+    puestos++;
+    console.log(`✓ ${clave}: sembrado (${descripcion})`);
+  }
+
+  console.log(
+    puestos === 0
+      ? 'Nada que sembrar: los parámetros ya estaban.'
+      : `${puestos} parámetro(s) sembrado(s). El tab "Parámetros de negocio" deja de estar vacío.`,
   );
 }
 
