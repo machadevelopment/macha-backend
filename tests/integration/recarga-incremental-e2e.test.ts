@@ -96,6 +96,7 @@ mock.module('@/lib/anthropic', () => ({
         product: null,
         quantity: null,
         productCategory: null,
+        store: null,
         dueDate: null,
         costTotal: null,
         costUnit: null,

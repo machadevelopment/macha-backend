@@ -23,6 +23,7 @@ const MAPA: ColumnMap = {
   dueDate: null,
   costTotal: 5,
   costUnit: null,
+  store: null,
 };
 
 const HEADER = [

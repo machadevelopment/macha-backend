@@ -46,6 +46,12 @@ export type ColumnMap = {
   product: number | null;
   quantity: number | null;
   productCategory: number | null;
+  /**
+   * CU-868kt8kk9: la TIENDA/sucursal de la fila. `stores` y `transactions.store_id`
+   * existían desde el data model; lo que faltaba era este campo, sin el cual el modelo no
+   * podía mapear la columna aunque la viera.
+   */
+  store: number | null;
   dueDate: number | null;
   /*
    * ═══ EL COSTO DE LA PROPIA FILA DE VENTA ═══
@@ -96,6 +102,7 @@ const COBERTURA_DE_COLUMNAS: Record<keyof ColumnMap, true> = {
   product: true,
   quantity: true,
   productCategory: true,
+  store: true,
   dueDate: true,
   costTotal: true,
   costUnit: true,
@@ -282,6 +289,7 @@ export function assemblePayload(params: {
       product: asText(cell(row, columns.product)),
       quantity: asNumber(cell(row, columns.quantity)),
       productCategory: asText(cell(row, columns.productCategory)),
+      store: asText(cell(row, columns.store)),
     };
   }
 

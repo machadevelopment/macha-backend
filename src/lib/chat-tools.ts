@@ -1,13 +1,13 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lte, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { reports, reportVersions, transactions } from '@/db/schema';
+import { reports, reportVersions, stores, transactions } from '@/db/schema';
 import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
 
 /**
  * CU-868kfvabq: tool-use jerárquico (narrativa → drill-down por rollup → transacciones
  * a nivel hoja), sin RAG ni base vectorial. `companyId` viene SIEMPRE del contexto del
- * servidor (closure), nunca de `input` — ninguna de estas 3 herramientas declara
+ * servidor (closure), nunca de `input` — ninguna de estas herramientas declara
  * company_id en su JSON schema, así que el modelo no tiene forma de proveerlo
  * (regla no negociable del ticket).
  */
@@ -17,6 +17,30 @@ export const CHAT_TOOLS: Anthropic.Tool[] = [
     description:
       'Devuelve la narrativa del reporte ejecutivo más reciente de la empresa (Módulo 5/F6), si existe. Úsala primero para tener contexto general antes de profundizar.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    /*
+     * CU-868kt8kk9. Macha preguntó "¿qué tienda ha vendido más?" y el asesor respondió que
+     * no tenía esa información — con razón: la dimensión no se ingería, y aunque ahora sí,
+     * ninguna herramienta sabía consultarla. Un dato en la base que el asesor no puede leer
+     * es, para el usuario, un dato que no existe.
+     *
+     * Es una herramienta propia y no un parámetro de `query_transactions` porque la
+     * pregunta es de RANKING, no de listado: devolver cien ventas para que el modelo las
+     * sume es gastar tokens en una cuenta que Postgres hace en una consulta — y que el
+     * modelo sume mal es justamente lo que la regla de "narra, nunca calcula" evita.
+     */
+    name: 'get_sales_by_store',
+    description:
+      'Ranking de tiendas/sucursales por ventas en un rango de fechas. Úsala para "qué tienda vendió más", "cómo va la sucursal X" o cualquier comparación entre locales. Devuelve vacío si el archivo del cliente no traía columna de tienda.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dateFrom: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por abajo.' },
+        dateTo: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por arriba.' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'get_monthly_rollup',
@@ -74,6 +98,61 @@ async function toolLatestReportNarrative(ctx: ChatToolContext): Promise<string> 
     .limit(1);
 
   return latest?.narrative ?? 'No hay ningún reporte generado todavía para esta empresa.';
+}
+
+/**
+ * Ventas por tienda, agregadas en SQL — CU-868kt8kk9.
+ *
+ * Postgres agrupa y ordena; el modelo solo narra el resultado. Es la misma división de
+ * trabajo que el resto del producto ("la IA narra, nunca calcula") y acá además ahorra
+ * tokens: la alternativa era devolverle cientos de ventas para que las sumara.
+ *
+ * `store_id IS NOT NULL` deja fuera las filas sin tienda en vez de agruparlas bajo una
+ * etiqueta inventada: mezclar "lo que no sabemos de qué local es" con un local real
+ * produciría un ranking donde el primer puesto podría ser el desconocido.
+ *
+ * El mensaje del caso vacío DICE POR QUÉ está vacío. Si el asesor solo viera una lista sin
+ * filas, volvería a contestar "no tengo esa información" — que es exactamente el reporte
+ * del ticket. Distinguir "tu archivo no traía tiendas" de "no puedo consultarlo" es lo que
+ * convierte una respuesta inútil en una accionable.
+ */
+async function toolSalesByStore(
+  ctx: ChatToolContext,
+  input: { dateFrom?: string; dateTo?: string },
+): Promise<string> {
+  const condiciones = [
+    eq(transactions.companyId, ctx.companyId),
+    isNull(transactions.deletedAt),
+    eq(transactions.type, 'revenue'),
+    isNotNull(transactions.storeId),
+  ];
+  if (input.dateFrom) condiciones.push(gte(transactions.date, input.dateFrom));
+  if (input.dateTo) condiciones.push(lte(transactions.date, input.dateTo));
+
+  const filas = await ctx.db
+    .select({
+      tienda: stores.name,
+      total: rawSql<string>`sum(${transactions.amountBase})`,
+      ventas: rawSql<string>`count(*)`,
+    })
+    .from(transactions)
+    .innerJoin(stores, eq(stores.id, transactions.storeId))
+    .where(and(...condiciones))
+    .groupBy(stores.name)
+    .orderBy(desc(rawSql`sum(${transactions.amountBase})`))
+    .limit(20);
+
+  if (filas.length === 0) {
+    return 'No hay ventas con tienda asociada. El archivo que subió el cliente no traía una columna de tienda o sucursal, así que no se puede comparar por local. Dilo así: el dato no está en su archivo, no es que no se pueda consultar.';
+  }
+
+  return JSON.stringify(
+    filas.map((f) => ({
+      tienda: f.tienda,
+      ventas: Number(f.total),
+      transacciones: Number(f.ventas),
+    })),
+  );
 }
 
 async function toolMonthlyRollup(
@@ -171,6 +250,8 @@ export async function executeChatTool(
     switch (name) {
       case 'get_latest_report_narrative':
         return await toolLatestReportNarrative(ctx);
+      case 'get_sales_by_store':
+        return await toolSalesByStore(ctx, input as { dateFrom?: string; dateTo?: string });
       case 'get_monthly_rollup':
         return await toolMonthlyRollup(ctx, input as { months: number; type?: RollupType });
       case 'query_transactions':

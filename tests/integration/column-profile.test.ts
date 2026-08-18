@@ -33,6 +33,7 @@ describe('perfil de columnas por empresa', () => {
     product: 1,
     quantity: 2,
     productCategory: null,
+    store: null,
     dueDate: null,
     costTotal: null,
     costUnit: null,

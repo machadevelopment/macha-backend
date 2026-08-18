@@ -25,6 +25,7 @@ const BASE: ColumnMap = {
   product: 1,
   quantity: 2,
   productCategory: null,
+  store: null,
   dueDate: null,
   costTotal: 5,
   costUnit: null,

@@ -69,6 +69,7 @@ const MAPA_VENTAS: ColumnMap = {
   dueDate: null,
   costTotal: null,
   costUnit: null,
+  store: null,
 };
 
 const EMPRESA = '11111111-1111-4111-8111-111111111111';
