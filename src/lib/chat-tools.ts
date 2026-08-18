@@ -1,8 +1,16 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { and, desc, eq, gte, isNotNull, isNull, lte, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import { reports, reportVersions, stores, transactions } from '@/db/schema';
+import {
+  alertEvents,
+  alertRules,
+  reports,
+  reportVersions,
+  stores,
+  transactions,
+} from '@/db/schema';
 import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
+import { alertCatalog } from '@/config/alert-catalog';
 
 /**
  * CU-868kfvabq: tool-use jerárquico (narrativa → drill-down por rollup → transacciones
@@ -38,6 +46,32 @@ export const CHAT_TOOLS: Anthropic.Tool[] = [
       properties: {
         dateFrom: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por abajo.' },
         dateTo: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por arriba.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    /*
+     * CU-868kt94an. El usuario le preguntó al asesor por una alerta que estaba viendo en
+     * su panel, y el asesor le contestó que esa alerta "no existe" y le pidió que le
+     * pegara "el texto exacto". Tenía razón desde su lado: no había forma de consultarlas.
+     * Un sistema que manda un correo de alerta y después no puede hablar de ella no es un
+     * asesor, es dos productos distintos con el mismo nombre.
+     *
+     * Devuelve el valor GUARDADO en el evento, no uno recalculado, y por eso importa que
+     * ahora `alert_events` lleve período y línea base (migración 0032): con esos tres
+     * datos el asesor puede explicar la alerta EXACTAMENTE como el panel la muestra, en
+     * vez de rehacer la cuenta con otra ventana y salir con un tercer número — que es
+     * justo lo que hizo (52,3 % en el panel, 64,9 % en el chat, las dos correctas para
+     * ventanas distintas y ninguna diciendo cuál era la suya).
+     */
+    name: 'get_active_alerts',
+    description:
+      'Alertas que el sistema disparó para esta empresa, con su valor, su umbral y el período que se evaluó. Úsala SIEMPRE que el usuario mencione una alerta, un aviso o un correo del sistema — nunca recalcules una alerta por tu cuenta.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Máximo 20.' },
       },
       additionalProperties: false,
     },
@@ -155,6 +189,54 @@ async function toolSalesByStore(
   );
 }
 
+/**
+ * Las alertas de la empresa, tal como se guardaron — CU-868kt94an.
+ *
+ * NO recalcula nada. El valor, el umbral y el período salen de la fila; si el asesor
+ * rehiciera la cuenta volvería a pasar lo del reporte: dos números correctos para dos
+ * ventanas distintas, y el usuario en el medio sin saber a cuál creerle.
+ *
+ * `periodStart` puede venir NULL en los eventos anteriores a la migración 0032, y en ese
+ * caso se dice explícitamente en vez de omitir el campo: que el asesor sepa que ese dato
+ * no está es distinto de que crea que la alerta no tiene período.
+ */
+async function toolActiveAlerts(ctx: ChatToolContext, input: { limit?: number }): Promise<string> {
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const filas = await ctx.db
+    .select({
+      regla: alertRules.ruleKey,
+      umbral: alertRules.threshold,
+      valor: alertEvents.triggeredValue,
+      base: alertEvents.baselineValue,
+      desde: alertEvents.periodStart,
+      hasta: alertEvents.periodEnd,
+      cuando: alertEvents.createdAt,
+    })
+    .from(alertEvents)
+    .innerJoin(alertRules, eq(alertRules.id, alertEvents.alertRuleId))
+    .where(eq(alertEvents.companyId, ctx.companyId))
+    .orderBy(desc(alertEvents.createdAt))
+    .limit(limit);
+
+  if (filas.length === 0) {
+    return 'Esta empresa no tiene ninguna alerta disparada. Dilo así: no hay alertas registradas, no que no puedas consultarlas.';
+  }
+
+  return JSON.stringify(
+    filas.map((f) => ({
+      regla: f.regla,
+      etiqueta: alertCatalog.find((c) => c.ruleKey === f.regla)?.label ?? f.regla,
+      valor: Number(f.valor),
+      umbral: Number(f.umbral),
+      comparadoContra: f.base === null ? null : Number(f.base),
+      periodo: f.desde
+        ? { desde: f.desde, hasta: f.hasta }
+        : 'no registrado (alerta anterior a que se guardara el período)',
+      disparadaEl: f.cuando.toISOString().slice(0, 10),
+    })),
+  );
+}
+
 async function toolMonthlyRollup(
   ctx: ChatToolContext,
   input: { months: number; type?: RollupType },
@@ -250,6 +332,8 @@ export async function executeChatTool(
     switch (name) {
       case 'get_latest_report_narrative':
         return await toolLatestReportNarrative(ctx);
+      case 'get_active_alerts':
+        return await toolActiveAlerts(ctx, input as { limit?: number });
       case 'get_sales_by_store':
         return await toolSalesByStore(ctx, input as { dateFrom?: string; dateTo?: string });
       case 'get_monthly_rollup':
