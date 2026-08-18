@@ -1,4 +1,5 @@
 import type { ReportSection, ReportType } from '@/lib/report-sections';
+import { directivaDeEscritura } from '@/lib/insight-directives';
 
 /**
  * Construcción del prompt de la narrativa de un reporte, en función de las SECCIONES
@@ -92,6 +93,19 @@ export function buildReportSystemPrompt(params: {
   reportType: ReportType;
   sections: ReportSection[];
   instructions?: string | null;
+  /**
+   * CU-868kt4ap8: la moneda de la empresa.
+   *
+   * Macha reportó que "en el resumen ejecutivo no sale el tipo de moneda ni el número bien
+   * formateado". El RENDER sí formatea —`report-render.ts` pasa todo por `formatMoney` con
+   * la moneda base—, pero la NARRATIVA la escribe el modelo, y el snapshot que recibe son
+   * números pelados: ni un campo dice si son quetzales o dólares.
+   *
+   * Es exactamente el mismo hueco que CU-868krvtjw encontró en los insights, y se cierra
+   * con la misma directiva. Opcional para no romper a los llamadores que no la pasan —hoy
+   * solo los tests—, y en ese caso el prompt queda como estaba.
+   */
+  baseCurrency?: string;
 }): string {
   const { locale, reportType, sections } = params;
   const partes = [BASE[locale], TYPE_INTRO[reportType][locale]];
@@ -102,6 +116,13 @@ export function buildReportSystemPrompt(params: {
       ? `Cubre EXACTAMENTE estas secciones, en este orden, y ninguna más:\n${directivas.join('\n')}`
       : `Cover EXACTLY these sections, in this order, and no others:\n${directivas.join('\n')}`,
   );
+
+  // La directiva de escritura va ANTES de las instrucciones del usuario y DESPUÉS de las
+  // secciones: es una regla de formato de la casa, no una preferencia negociable. El
+  // usuario puede pedir en qué poner el acento; no puede pedir cifras sin moneda.
+  if (params.baseCurrency) {
+    partes.push(directivaDeEscritura({ locale, baseCurrency: params.baseCurrency }));
+  }
 
   const limpias = params.instructions ? sanitizeInstructions(params.instructions) : '';
   if (limpias) {
