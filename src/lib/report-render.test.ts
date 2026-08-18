@@ -52,6 +52,7 @@ const DATOS_COMPLETOS: ReportData = {
       revenueSharePct: 64,
       previousRevenue: 70000,
       trend: 'up',
+      costKnown: true,
     },
   ],
   risks: {

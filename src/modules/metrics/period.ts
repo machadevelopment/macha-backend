@@ -139,7 +139,7 @@ async function seriePorDia(
  * índice, no un recorrido. Y va en el mismo `Promise.all` que el resto, así que no agrega
  * latencia de ida y vuelta.
  */
-async function rangoConDatos(
+export async function rangoConDatos(
   db: DB,
   companyId: string,
 ): Promise<{ from: string; to: string } | null> {

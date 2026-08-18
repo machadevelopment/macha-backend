@@ -56,7 +56,28 @@ export interface ProductPerformance {
   /** Ingreso del mismo producto en la ventana anterior de igual duración. */
   previousRevenue: number;
   trend: 'up' | 'down' | 'flat';
+  /**
+   * ¿Este producto tiene costo cargado en el rango? — CU-868ktm9gw.
+   *
+   * `cogs` se agrega con `coalesce(..., 0)`, así que un producto al que nunca se le
+   * cargó una fila de costo es indistinguible, en el número, de uno que costó cero: los
+   * dos salen con `grossMarginPct === 100`. Para la pantalla eso nunca importó porque
+   * ordena por INGRESO y el 100 % queda perdido entre otras columnas; para cualquier
+   * pregunta de la forma "¿cuál deja más margen?" es determinante, porque ese 100 %
+   * gana el ranking siempre y la respuesta pasa a ser el producto peor documentado.
+   *
+   * No se filtra aquí: se DECLARA, y quien ordene por margen decide. Descartarlos en
+   * silencio escondería justo lo que hay que decirle al dueño — que a ese producto le
+   * falta el costo.
+   */
+  costKnown: boolean;
 }
+
+/**
+ * Criterio de orden. `revenue` es el de siempre y sigue siendo el de la pantalla; los
+ * otros dos existen porque el asesor recibe preguntas que no son "cuál vendió más".
+ */
+export type ProductOrderBy = 'revenue' | 'margin' | 'units';
 
 /** Suma agregada por producto en un rango, sin post-proceso. */
 async function agregarPorProducto(
@@ -142,12 +163,46 @@ function tendencia(actual: number, previo: number): 'up' | 'down' | 'flat' {
   return cambio > 0 ? 'up' : 'down';
 }
 
+/**
+ * Ordena la lista completa antes de recortarla — CU-868ktm9gw.
+ *
+ * EL RECORTE ES LO QUE HACE QUE EL ORDEN IMPORTE. Con `limit` sobre una lista ordenada
+ * por ingreso, preguntar "¿cuál deja más margen?" se responde sobre los diez que más
+ * VENDIERON, no sobre el catálogo. Eso fue el reporte: el asesor contestó 20,2 % y
+ * existía un producto al 42,6 % — ninguno de los dos números estaba mal calculado, la
+ * pregunta se había respondido sobre el conjunto equivocado.
+ *
+ * Por margen, los productos SIN COSTO CARGADO van al final aunque su porcentaje sea el
+ * más alto: su 100 % es un dato que falta, no una ganancia. Y los de `grossMarginPct`
+ * nulo (comprados pero no vendidos en el rango) también, por lo mismo — no tienen
+ * margen, no tienen margen del 0 %.
+ */
+function ordenar(items: ProductPerformance[], orderBy: ProductOrderBy): ProductPerformance[] {
+  if (orderBy === 'revenue') return items.sort((a, b) => b.revenue - a.revenue);
+
+  if (orderBy === 'units') {
+    // `units` nulo significa "el archivo no dice unidades", no "vendió cero": al final,
+    // porque no se pueden comparar contra un número.
+    return items.sort((a, b) => (b.units ?? -1) - (a.units ?? -1));
+  }
+
+  return items.sort((a, b) => {
+    const rankeable = (p: ProductPerformance): boolean => p.costKnown && p.grossMarginPct !== null;
+    if (rankeable(a) !== rankeable(b)) return rankeable(a) ? -1 : 1;
+    // Entre los no rankeables el orden es por ingreso, para que la cola quede en algún
+    // orden útil en vez de en el que vino de la base.
+    if (!rankeable(a)) return b.revenue - a.revenue;
+    return b.grossMarginPct! - a.grossMarginPct!;
+  });
+}
+
 export async function productPerformance(
   db: DB,
   companyId: string,
   from: string,
   to: string,
   limit = 10,
+  orderBy: ProductOrderBy = 'revenue',
 ): Promise<ProductPerformance[]> {
   const previa = ventanaAnterior(from, to);
   const [actual, anterior] = await Promise.all([
@@ -160,25 +215,25 @@ export async function productPerformance(
   // sumarían 100% y dirían que el top 5 es el negocio entero.
   const ingresoTotal = [...actual.values()].reduce((s, p) => s + p.revenue, 0);
 
-  return [...actual.entries()]
-    .map(([productId, p]) => {
-      const previousRevenue = anterior.get(productId)?.revenue ?? 0;
-      return {
-        productId,
-        name: p.name,
-        category: p.category,
-        revenue: p.revenue,
-        cogs: p.cogs,
-        grossProfit: grossProfit(p.revenue, p.cogs),
-        grossMarginPct: grossMarginPct(p.revenue, p.cogs),
-        units: p.units,
-        revenueWithUnits: p.revenueWithUnits,
-        transactionCount: p.transactionCount,
-        revenueSharePct: ingresoTotal === 0 ? 0 : (p.revenue / ingresoTotal) * 100,
-        previousRevenue,
-        trend: tendencia(p.revenue, previousRevenue),
-      };
-    })
-    .sort((a, b) => b.revenue - a.revenue)
-    .slice(0, limit);
+  const items = [...actual.entries()].map(([productId, p]) => {
+    const previousRevenue = anterior.get(productId)?.revenue ?? 0;
+    return {
+      productId,
+      name: p.name,
+      category: p.category,
+      revenue: p.revenue,
+      cogs: p.cogs,
+      grossProfit: grossProfit(p.revenue, p.cogs),
+      grossMarginPct: grossMarginPct(p.revenue, p.cogs),
+      units: p.units,
+      revenueWithUnits: p.revenueWithUnits,
+      transactionCount: p.transactionCount,
+      revenueSharePct: ingresoTotal === 0 ? 0 : (p.revenue / ingresoTotal) * 100,
+      previousRevenue,
+      trend: tendencia(p.revenue, previousRevenue),
+      costKnown: p.cogs > 0,
+    };
+  });
+
+  return ordenar(items, orderBy).slice(0, limit);
 }
