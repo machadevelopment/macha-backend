@@ -214,7 +214,18 @@ export async function generateReport(
     })
     .returning();
 
-  await db.update(reports).set({ currentVersionId: version!.id }).where(eq(reports.id, report!.id));
+  /*
+   * CU-868ktkuq0: `failedAt` se limpia junto con la versión, en el MISMO update.
+   *
+   * Un job puede fallar y reintentarse: sin esto, la marca del intento fallido sobreviviría
+   * al intento bueno y el reporte se quedaría en rojo para siempre teniendo su contenido.
+   * Va en el mismo `set` y no en una segunda sentencia por eso mismo — dos updates admiten
+   * que el segundo no ocurra.
+   */
+  await db
+    .update(reports)
+    .set({ currentVersionId: version!.id, failedAt: null })
+    .where(eq(reports.id, report!.id));
 
   // Débito de créditos — MISMO patrón que insight y que la carga de Excel: el valor sale
   // del motor de reglas (`credit_rules`, versionadas y editables desde /admin), nunca de
