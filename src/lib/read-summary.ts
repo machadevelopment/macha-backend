@@ -107,6 +107,7 @@ const NOMBRE_DE_CAMPO: Record<keyof ColumnMap, string> = {
   product: 'producto',
   quantity: 'cantidad',
   productCategory: 'categoría del producto',
+  store: 'tienda',
   dueDate: 'fecha de vencimiento',
   costTotal: 'costo de la línea',
   costUnit: 'costo por unidad',

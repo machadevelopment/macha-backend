@@ -12,6 +12,7 @@ import {
 } from '@/db/schema';
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 import { ProductResolver } from '@/lib/product-dimension';
+import { StoreResolver } from '@/lib/store-dimension';
 
 export type PromotionResult =
   | {
@@ -60,6 +61,11 @@ type TransactionPayload = {
   quantity?: number | null;
   /** Familia comercial del producto; distinta de `category`, que clasifica el movimiento. */
   productCategory?: string | null;
+  /**
+   * CU-868kt8kk9: la tienda/sucursal donde ocurrió la fila. `null` cuando el archivo no
+   * trae esa columna, que es la mayoría de los libros de un solo local.
+   */
+  store?: string | null;
 };
 
 type InvoiceLikePayload = {
@@ -241,16 +247,21 @@ export async function promoteDocument(
   // Un resolvedor por promoción: su caché evita repetir consultas para el mismo
   // producto, que en un libro de ventas se repite en cientos de filas.
   const productos = new ProductResolver(db, companyId);
+  // CU-868kt8kk9: lo mismo para la TIENDA. Un libro de una cadena repite la misma sucursal
+  // en casi todas sus filas, así que sin caché sería un SELECT por venta.
+  const tiendas = new StoreResolver(db, companyId);
 
   for (const row of reclamadas) {
     if (row.targetEntity === 'transaction') {
       const p = row.payload as unknown as TransactionPayload;
       const fx = await resolveFxRate(db, companyId, p.originalCurrency, p.date);
       const productId = await productos.resolve(p.product, p.productCategory);
+      const storeId = await tiendas.resolve(p.store);
       await db.insert(transactions).values({
         companyId,
         documentId,
         productId,
+        storeId,
         quantity: normalizeQuantity(p.quantity),
         date: p.date,
         type: p.type,

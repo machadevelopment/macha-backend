@@ -361,6 +361,7 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
 10. La columna "quantity" del mapa se señala solo si la hoja trae unidades explícitas. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
 11. "costTotal" y "costUnit" son las columnas de COSTO de la propia fila, y solo una de las dos (o ninguna). Muchos libros de PYME traen el ingreso y el costo en la misma línea ("Ingreso Total" junto a "Costo Total", o "PrecioUnitario" junto a "CostoUnitario"). Señala "costTotal" cuando la columna ya es el costo de la línea completa, y "costUnit" cuando es el costo de UNA unidad. NUNCA señales como costo una columna de precio de venta, de utilidad, de margen ni de descuento: el costo es lo que le costó al negocio, no lo que cobró ni lo que ganó. Si la hoja no trae costo, las dos van en null — inventarlo produciría un margen falso.
+13. "store" es la columna que dice EN QUÉ TIENDA, sucursal o local ocurrió la fila ("TDA-001", "Sucursal Centro", "Tienda Zona 10"). Señálala solo si la hoja trae una columna de tienda o sucursal; devolver null si no la trae. NO confundir con el CANAL de venta ("En Línea", "En Tienda"), que dice cómo se vendió y no dónde, ni con el vendedor: una columna de canal señalada como tienda produciría un ranking de sucursales con dos filas llamadas "En Línea" y "En Tienda" que no corresponden a ningún local del cliente.
 12. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
 /**
@@ -400,6 +401,17 @@ export const CLASSIFY_ROWS_SCHEMA = {
         product: { type: ['integer', 'null'] },
         quantity: { type: ['integer', 'null'] },
         productCategory: { type: ['integer', 'null'] },
+        /*
+         * CU-868kt8kk9. La columna de TIENDA/SUCURSAL. Existía la tabla `stores` y la
+         * referencia `transactions.store_id`, pero el mapa no tenía dónde ponerla: la
+         * columna se leía y se tiraba en cada carga. Medido en producción antes del
+         * arreglo: 0 tiendas y 0 de 12 558 transacciones con `store_id`.
+         */
+        store: {
+          type: ['integer', 'null'],
+          description:
+            'Columna con la TIENDA, sucursal o local de la fila. No el canal de venta ni el vendedor.',
+        },
         dueDate: { type: ['integer', 'null'] },
         /*
          * El COSTO de la propia fila de venta. Sin esto, una hoja que trae "Ingreso Total"
@@ -428,6 +440,7 @@ export const CLASSIFY_ROWS_SCHEMA = {
         'product',
         'quantity',
         'productCategory',
+        'store',
         'dueDate',
         'costTotal',
         'costUnit',
