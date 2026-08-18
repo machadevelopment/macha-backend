@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
+import { reportStatus } from '@/lib/report-status';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import {
@@ -344,6 +345,7 @@ export const reports_ = new Elysia({ prefix: '/reports' })
           periodEnd: reports.periodEnd,
           frequency: reports.frequency,
           currentVersionId: reports.currentVersionId,
+          failedAt: reports.failedAt,
           updatedAt: reports.updatedAt,
         })
         .from(reports)
@@ -367,9 +369,27 @@ export const reports_ = new Elysia({ prefix: '/reports' })
        * (fue exactamente el error de CU-868kh8uau, mandar un `reports.id` donde iba un
        * `report_versions.id`).
        */
-      const conEstado = rows.slice(0, limit).map(({ currentVersionId, ...r }) => ({
+      /*
+       * TRES estados, no dos — CU-868ktkuq0.
+       *
+       * `ready` solo se preguntaba si había versión, y su ausencia significaba a la vez
+       * "todavía se está generando" y "ya no se va a generar". La lista tenía que elegir
+       * uno de los dos para pintar ese caso, elegía "falló", y como la fila de `reports`
+       * se crea ANTES de encolar el job, TODO reporte recién pedido aparecía en rojo
+       * diciendo que no se generó — durante todo el rato que la IA tardaba en escribirlo.
+       *
+       * El orden de lectura no admite contradicción: la versión manda (es la prueba de que
+       * hay contenido), la marca de fallo solo se mira si no hay versión, y lo que no es ni
+       * lo uno ni lo otro se está generando.
+       *
+       * `ready` SE CONSERVA junto a `status`: lo lee el frontend ya desplegado, y quitarlo
+       * en el mismo despliegue que agrega `status` rompería la lista en la ventana en que
+       * el backend va adelante del frontend.
+       */
+      const conEstado = rows.slice(0, limit).map(({ currentVersionId, failedAt, ...r }) => ({
         ...r,
         ready: currentVersionId !== null,
+        status: reportStatus({ currentVersionId, failedAt }),
       }));
       return { reports: conEstado, hasMore: rows.length > limit };
     },
