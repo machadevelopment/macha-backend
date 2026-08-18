@@ -28,6 +28,18 @@ export const reports = pgTable(
     // como una versión más del reporte automático del mismo período.
     frequency: text('frequency').$type<'daily' | 'weekly' | 'on_demand'>().notNull(),
     currentVersionId: uuid('current_version_id'),
+    /*
+     * CU-868ktkuq0: cuándo falló la generación, si falló.
+     *
+     * Existe para separar tres estados que antes eran dos. `current_version_id` dice si el
+     * reporte TIENE contenido, pero su ausencia significaba a la vez "todavía se está
+     * generando" y "ya no se va a generar" — y la lista pintaba las dos en rojo, así que un
+     * reporte que iba bien se le mostraba al cliente como fallido mientras la IA escribía.
+     *
+     * Se lee en orden y por eso no puede contradecirse con la versión: si hay versión está
+     * listo; si no y hay marca, falló; si no hay ninguna, se está generando.
+     */
+    failedAt: timestamp('failed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
