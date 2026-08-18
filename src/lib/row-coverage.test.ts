@@ -150,6 +150,7 @@ describe('el mapa de columnas de la hoja', () => {
     product: 6,
     quantity: 7,
     productCategory: 12,
+    store: null,
     dueDate: null,
     costTotal: null,
     costUnit: null,
@@ -163,6 +164,7 @@ describe('el mapa de columnas de la hoja', () => {
     product: null,
     quantity: null,
     productCategory: null,
+    store: null,
     dueDate: null,
     costTotal: null,
     costUnit: null,
@@ -262,7 +264,7 @@ describe('una venta que trae su costo produce DOS transacciones', () => {
   const CAFETERIA: ColumnMap = {
     date: 0, product: 2, productCategory: 3, quantity: 4,
     amount: 6, costTotal: 7, costUnit: null,
-    currency: null, description: null, counterparty: null, dueDate: null,
+    currency: null, description: null, counterparty: null, dueDate: null, store: null,
   }; // prettier-ignore
   const FILA = [46174, 'P01', 'Café Americano', 'Bebidas Calientes', 6, 18, 108, 27, 81]; // prettier-ignore
 

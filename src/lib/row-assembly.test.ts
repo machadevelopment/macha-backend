@@ -28,6 +28,7 @@ const VENTAS_MAP: ColumnMap = {
   product: 6,
   quantity: 7,
   productCategory: 12,
+  store: null,
   dueDate: null,
   costTotal: null,
   costUnit: null,
@@ -151,11 +152,19 @@ describe('payload de transacción, con la fila real', () => {
     baseCurrency: 'GTQ',
   });
 
-  test('arma los nueve campos que espera aguas abajo', () => {
-    // La forma NO cambia: `staging-rules.ts`, la promoción y la pantalla de revisión
-    // siguen viendo exactamente lo mismo que antes. Cambia de dónde salen los valores.
+  test('arma los DIEZ campos que espera aguas abajo', () => {
+    /*
+     * La lista es exhaustiva a propósito: `staging-rules.ts`, la promoción y la pantalla de
+     * revisión leen este objeto, y un campo que aparece o desaparece sin que nadie lo note
+     * es como se pierde un dato del cliente en silencio.
+     *
+     * `store` se suma en CU-868kt8kk9. La tabla `stores` y `transactions.store_id` existían
+     * desde el data model, pero el payload no traía la tienda, así que la columna del Excel
+     * se leía y se tiraba: 0 tiendas y 0 de 12 558 transacciones con `store_id` en
+     * producción antes del arreglo.
+     */
     expect(Object.keys(payload).sort()).toEqual([
-      'category','date','description','originalAmount','originalCurrency','product','productCategory','quantity','type',
+      'category','date','description','originalAmount','originalCurrency','product','productCategory','quantity','store','type',
     ]); // prettier-ignore
   });
 
@@ -267,6 +276,7 @@ describe('payload de factura', () => {
         dueDate: 3,
         costTotal: null,
         costUnit: null,
+        store: null,
         amount: 4,
         counterparty: 1,
         currency: null,
@@ -309,7 +319,7 @@ describe('el costo que venía en la misma fila y se perdía', () => {
   const CAFETERIA: ColumnMap = {
     date: 0, product: 2, productCategory: 3, quantity: 4,
     amount: 6, costTotal: 7, costUnit: null,
-    currency: null, description: null, counterparty: null, dueDate: null,
+    currency: null, description: null, counterparty: null, dueDate: null, store: null,
   }; // prettier-ignore
   const FILA_CAFE = [46174, 'P01', 'Café Americano', 'Bebidas Calientes', 6, 18, 108, 27, 81]; // prettier-ignore
 
