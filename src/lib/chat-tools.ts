@@ -11,6 +11,8 @@ import {
 } from '@/db/schema';
 import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
 import { alertCatalog } from '@/config/alert-catalog';
+import { productPerformance, type ProductOrderBy } from '@/modules/metrics/products';
+import { rangoConDatos } from '@/modules/metrics/period';
 
 /**
  * CU-868kfvabq: tool-use jerárquico (narrativa → drill-down por rollup → transacciones
@@ -46,6 +48,40 @@ export const CHAT_TOOLS: Anthropic.Tool[] = [
       properties: {
         dateFrom: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por abajo.' },
         dateTo: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por arriba.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    /*
+     * CU-868ktm9gw. "¿Qué producto deja más margen?" → el asesor contestó 20,2 %, y en el
+     * catálogo había uno al 42,6 %.
+     *
+     * No sabía calcular mal: no tenía cómo preguntar. Sin esta herramienta la única vía
+     * era `query_transactions`, o sea sumar filas sueltas y dividir a mano — y ahí el
+     * margen deja de ser LA definición cerrada de `lib/margin.ts` (la misma del KPI, el
+     * reporte y la alerta) para ser lo que el modelo improvise en esa respuesta. Dos
+     * definiciones de margen en el mismo producto es exactamente el bug que CU-868kh8y58
+     * vino a cerrar.
+     *
+     * `orderBy` existe por el otro filo del mismo reporte: la lista se recorta con
+     * `limit`, así que ordenada por INGRESO la pregunta se responde sobre los que más
+     * vendieron, no sobre el catálogo. El 20,2 % era el mejor margen del top de ventas.
+     */
+    name: 'get_product_performance',
+    description:
+      'Desempeño por producto en un rango: ingreso, costo, utilidad y margen bruto, unidades y tendencia. Úsala SIEMPRE para preguntas sobre productos —cuál vende más, cuál deja más margen, cuál cayó— y NUNCA calcules un margen sumando transacciones a mano. Ordena por `margin` cuando la pregunta sea de rentabilidad y por `revenue` cuando sea de volumen: la lista se recorta, así que el orden decide sobre qué conjunto se responde. Los productos sin costo cargado vienen con `costoConocido: false` y su margen NO es comparable — dilo en vez de rankearlos.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dateFrom: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por abajo.' },
+        dateTo: { type: 'string', description: 'YYYY-MM-DD. Omite para no acotar por arriba.' },
+        orderBy: {
+          type: 'string',
+          enum: ['revenue', 'margin', 'units'],
+          description: 'Criterio de orden. Por defecto `revenue`.',
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Máximo 50.' },
       },
       additionalProperties: false,
     },
@@ -237,6 +273,77 @@ async function toolActiveAlerts(ctx: ChatToolContext, input: { limit?: number })
   );
 }
 
+/**
+ * Desempeño por producto para el asesor — CU-868ktm9gw.
+ *
+ * Delega en `productPerformance`, la MISMA función que alimentan la pantalla de Ventas
+ * por producto y el reporte. Que sea la misma es el punto: si el asesor calculara su
+ * propio margen, el dueño podría abrir la pantalla y ver otro número para el mismo
+ * producto, que es el bug que `lib/margin.ts` documenta y cierra.
+ *
+ * SIN FECHAS, EL RANGO ES TODO LO QUE HAY CARGADO, no "los últimos N meses". Un default
+ * de ventana móvil respondería "cuál deja más margen" sobre un recorte que el usuario no
+ * pidió ni ve, y ese es precisamente el error que este ticket viene a arreglar: no una
+ * cuenta mal hecha, una pregunta respondida sobre el conjunto equivocado.
+ */
+async function toolProductPerformance(
+  ctx: ChatToolContext,
+  input: { dateFrom?: string; dateTo?: string; orderBy?: ProductOrderBy; limit?: number },
+): Promise<string> {
+  let { dateFrom, dateTo } = input;
+  if (!dateFrom || !dateTo) {
+    const rango = await rangoConDatos(ctx.db, ctx.companyId);
+    if (!rango) {
+      return 'Esta empresa no tiene movimientos cargados, así que no hay desempeño por producto que calcular. Dilo así: todavía no hay datos, no que no se pueda consultar.';
+    }
+    dateFrom ??= rango.from;
+    dateTo ??= rango.to;
+  }
+
+  const orderBy = input.orderBy ?? 'revenue';
+  const items = await productPerformance(
+    ctx.db,
+    ctx.companyId,
+    dateFrom,
+    dateTo,
+    Math.min(Math.max(input.limit ?? 10, 1), 50),
+    orderBy,
+  );
+
+  if (items.length === 0) {
+    return 'Hay movimientos en el rango pero ninguno tiene producto asociado. El archivo del cliente no traía columna de producto, o la ingesta no la pudo identificar. Dilo así: el dato no está en su archivo.';
+  }
+
+  const sinCosto = items.filter((p) => !p.costKnown).length;
+
+  return JSON.stringify({
+    rango: { desde: dateFrom, hasta: dateTo },
+    ordenadoPor: orderBy,
+    // Se dice cuántos productos hay en total: si `limit` recortó la lista, el asesor tiene
+    // que saber que está viendo una parte antes de decir "el que más margen deja".
+    productosDevueltos: items.length,
+    // El aviso va en el payload, no solo en la descripción de la herramienta: una regla
+    // que el modelo leyó hace veinte turnos pesa menos que un campo en el dato de ahora.
+    avisoCosto:
+      sinCosto === 0
+        ? undefined
+        : `${sinCosto} de estos productos NO tienen costo cargado: su margen aparece como 100 % porque falta el costo, no porque sean rentables. No los presentes como los más rentables — di que les falta el costo.`,
+    productos: items.map((p) => ({
+      producto: p.name,
+      categoria: p.category,
+      ingreso: p.revenue,
+      costo: p.cogs,
+      utilidadBruta: p.grossProfit,
+      margenPct: p.grossMarginPct,
+      costoConocido: p.costKnown,
+      unidades: p.units,
+      participacionIngresoPct: p.revenueSharePct,
+      ingresoVentanaAnterior: p.previousRevenue,
+      tendencia: p.trend,
+    })),
+  });
+}
+
 async function toolMonthlyRollup(
   ctx: ChatToolContext,
   input: { months: number; type?: RollupType },
@@ -334,6 +441,16 @@ export async function executeChatTool(
         return await toolLatestReportNarrative(ctx);
       case 'get_active_alerts':
         return await toolActiveAlerts(ctx, input as { limit?: number });
+      case 'get_product_performance':
+        return await toolProductPerformance(
+          ctx,
+          input as {
+            dateFrom?: string;
+            dateTo?: string;
+            orderBy?: ProductOrderBy;
+            limit?: number;
+          },
+        );
       case 'get_sales_by_store':
         return await toolSalesByStore(ctx, input as { dateFrom?: string; dateTo?: string });
       case 'get_monthly_rollup':
