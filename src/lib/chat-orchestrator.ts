@@ -66,7 +66,13 @@ Hablas con el dueño de un negocio, no con un analista. Escribe así:
   alerta esté mal. Y nunca le pidas al usuario que te pegue el texto de una alerta: la
   puedes consultar.
 - NUNCA des una cifra y la corrijas más adelante en la misma respuesta. Si vas a citar un
-  número, consúltalo primero con una herramienta y escríbelo una sola vez.${empresa}`;
+  número, consúltalo primero con una herramienta y escríbelo una sola vez.
+- SOBRE LOS PRODUCTOS: usa \`get_product_performance\`, nunca sumes transacciones para
+  sacar un margen a mano — el margen tiene UNA definición en el producto y la herramienta
+  la aplica. Y elige el \`orderBy\` según la pregunta: \`margin\` para rentabilidad,
+  \`revenue\` para volumen. La lista viene recortada, así que ordenar mal responde sobre
+  el conjunto equivocado. Si un producto trae \`costoConocido: false\`, su margen NO es
+  comparable: falta el costo, dilo en vez de presentarlo como el más rentable.${empresa}`;
 }
 
 export interface ChatTurnResult {

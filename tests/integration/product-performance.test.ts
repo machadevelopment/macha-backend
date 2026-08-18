@@ -136,3 +136,113 @@ describe('desempeño por producto', () => {
     }
   });
 });
+
+/**
+ * CU-868ktm9gw — "¿cuál deja más margen?" respondido sobre el conjunto equivocado.
+ *
+ * Macha le preguntó al asesor por márgenes y le contestó que el mejor era 20,2 %,
+ * existiendo un producto al 42,6 %. La cuenta del 20,2 % estaba BIEN: era el mejor margen
+ * de los diez productos que más vendieron, porque la lista se ordena por ingreso y se
+ * recorta con `limit`. El producto al 42,6 % vendía poco y nunca entraba en la ventana.
+ *
+ * Empresa aparte del bloque de arriba: estos casos dependen de qué productos existen y en
+ * qué orden salen, y compartir la empresa con los tests anteriores los volvería frágiles.
+ */
+describe('orden por margen para el asesor (CU-868ktm9gw)', () => {
+  let owner: ReturnType<typeof ownerConnection>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  const empresa = randomUUID();
+  const documento = randomUUID();
+  const RANGO = { from: '2026-03-01', to: '2026-03-31' };
+
+  const sembrar = async (nombre: string, ingreso: number, costo: number | null): Promise<void> => {
+    const [fila] = await owner`
+      insert into products (company_id, name, category)
+      values (${empresa}, ${nombre}, 'general') returning id
+    `;
+    const id = fila!.id as string;
+    const mov = async (tipo: 'revenue' | 'cogs', monto: number) => {
+      await owner`
+        insert into transactions (
+          company_id, document_id, product_id, date, type, category,
+          original_amount, original_currency, amount_base, fx_rate, fx_rate_date
+        ) values (
+          ${empresa}, ${documento}, ${id}, '2026-03-10', ${tipo}, 'ventas',
+          ${monto}, 'GTQ', ${monto}, 1, '2026-03-10'
+        )
+      `;
+    };
+    await mov('revenue', ingreso);
+    // `costo === null` = producto al que NUNCA se le cargó una fila de costo. Distinto de
+    // costo cero, y esa distinción es la mitad de este ticket.
+    if (costo !== null) await mov('cogs', costo);
+  };
+
+  beforeAll(async () => {
+    await setupTestDatabase();
+    owner = ownerConnection();
+    db = drizzle(owner, { schema });
+    await owner`
+      insert into companies (id, workos_org_id, name, industry, base_currency, locale)
+      values (${empresa}, ${'org_' + empresa}, ${'Margenes ' + empresa}, 'retail', 'GTQ', 'es')
+    `;
+    await provisionTenantPartitions(empresa);
+    await owner`
+      insert into documents (
+        id, company_id, uploaded_by, s3_key, original_filename,
+        file_size_bytes, mime_type, status
+      ) values (
+        ${documento}, ${empresa}, ${randomUUID()}, ${empresa + '/m.xlsx'}, 'm.xlsx',
+        1024, 'text/csv', 'promoted'
+      )
+    `;
+
+    // Doce productos que venden mucho con margen mediocre, y uno que vende poco con el
+    // mejor margen del catálogo. Es la forma del reporte, no un caso inventado.
+    for (let i = 0; i < 12; i++) {
+      await sembrar(`Volumen ${i}`, 100_000 - i * 1000, (100_000 - i * 1000) * 0.798);
+    }
+    await sembrar('Joya de margen', 1_000, 574); // 42,6 %
+  });
+
+  afterAll(async () => {
+    await owner?.end();
+  });
+
+  test('ordenado por ingreso, el mejor margen del top-10 NO es el mejor del catálogo', async () => {
+    // Este test documenta el comportamiento que causó el bug. No es una regresión a
+    // arreglar: ordenar por ingreso es correcto para la pantalla. Lo que estaba mal era
+    // responder una pregunta de RENTABILIDAD sobre esta lista.
+    const porIngreso = await productPerformance(db, empresa, RANGO.from, RANGO.to, 10, 'revenue');
+    const mejorDelTop = Math.max(...porIngreso.map((p) => p.grossMarginPct ?? -1));
+
+    expect(porIngreso.some((p) => p.name === 'Joya de margen')).toBe(false);
+    expect(mejorDelTop).toBeCloseTo(20.2, 1);
+  });
+
+  test('ordenado por margen, el primero es el mejor del catálogo aunque venda poco', async () => {
+    const porMargen = await productPerformance(db, empresa, RANGO.from, RANGO.to, 10, 'margin');
+
+    expect(porMargen[0]!.name).toBe('Joya de margen');
+    expect(porMargen[0]!.grossMarginPct).toBeCloseTo(42.6, 1);
+  });
+
+  test('un producto sin costo cargado no gana el ranking de margen con un 100 % falso', async () => {
+    // El otro filo: `cogs` se agrega con coalesce a 0, así que "nunca se cargó el costo" y
+    // "costó cero" dan el mismo número. Si el 100 % ganara, arreglar el bug habría
+    // cambiado una respuesta equivocada por otra — y peor, señalando el producto peor
+    // documentado como el más rentable.
+    await sembrar('Sin costo cargado', 5_000, null);
+
+    const porMargen = await productPerformance(db, empresa, RANGO.from, RANGO.to, 20, 'margin');
+    const sinCosto = porMargen.find((p) => p.name === 'Sin costo cargado')!;
+
+    expect(sinCosto.grossMarginPct).toBe(100);
+    expect(sinCosto.costKnown).toBe(false);
+    expect(porMargen[0]!.name).toBe('Joya de margen');
+
+    // Y no se descarta en silencio: sigue en la lista para que el asesor pueda decir que
+    // a ese producto le falta el costo.
+    expect(porMargen.some((p) => p.name === 'Sin costo cargado')).toBe(true);
+  });
+});
