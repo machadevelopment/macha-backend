@@ -114,7 +114,13 @@ export async function generateReport(
   const result = await generateReportNarrative(
     data,
     locale,
-    buildReportSystemPrompt({ locale, reportType, sections, instructions: params.instructions }),
+    buildReportSystemPrompt({
+      locale,
+      reportType,
+      sections,
+      instructions: params.instructions,
+      baseCurrency: company?.baseCurrency ?? 'GTQ',
+    }),
     presupuestoDeNarrativa(sections),
   );
 
