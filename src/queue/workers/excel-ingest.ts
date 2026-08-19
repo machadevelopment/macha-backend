@@ -6,10 +6,22 @@ import { downloadObject } from '@/lib/s3';
 import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
-import { classifySheetRows, fusionarMapaDeColumnas } from '@/lib/anthropic';
+import {
+  classifySheetRows,
+  construirFilas,
+  fusionarMapaDeColumnas,
+  type VeredictoCrudo,
+} from '@/lib/anthropic';
 import type { ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
+import {
+  CanonizadorDeCategorias,
+  ConsensoDeHoja,
+  elegirSonda,
+  filaAptaParaCortocircuito,
+  type VeredictoDominante,
+} from '@/lib/sheet-consensus';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
@@ -253,6 +265,32 @@ export function startExcelIngestWorker(): Promise<string> {
          */
         const hojasDeInventario: { sheetName: string; headerRow: unknown[]; filas: unknown[][] }[] =
           [];
+
+        /**
+         * El consenso de cada hoja: qué veredicto dio el modelo en sus lotes de sonda.
+         *
+         * Es lo que decide si el resto de los lotes de esa hoja puede resolverse sin llamar a
+         * Claude. Ver `lib/sheet-consensus.ts` para el recibo que lo motiva — 205 de 216
+         * llamadas de un archivo real fueron una sola hoja contestando siempre lo mismo.
+         */
+        const consensos = new Map<string, ConsensoDeHoja>();
+
+        /**
+         * Unifica el NOMBRE de las categorías dentro de cada hoja.
+         *
+         * Uno para todo el documento y no uno por hoja: la clave que usa ya incluye la hoja, y
+         * un solo objeto deja el contador de reescrituras del archivo completo en un lugar.
+         */
+        const canonizador = new CanonizadorDeCategorias();
+
+        /** Lotes resueltos sin llamar al modelo, y filas que eso cubrió. Para el log. */
+        let lotesCortocircuitados = 0;
+        let filasCortocircuitadas = 0;
+        /**
+         * Filas que el cortocircuito NO se atrevió a clasificar (no parecen movimientos: sin
+         * fecha o sin monto legible) y mandó a revisión interna en vez de adivinar.
+         */
+        let filasAptasFallidas = 0;
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -612,78 +650,39 @@ export function startExcelIngestWorker(): Promise<string> {
           return d?.status === 'cancelled';
         }
 
-        /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
-        async function procesarLote({
+        /**
+         * Los cuatro efectos de un lote, en UNA transacción: la marca de progreso, el uso de
+         * IA (si hubo llamada), las filas de staging y las huellas.
+         *
+         * Está extraída de `procesarLote` porque ahora hay DOS caminos que llegan al mismo
+         * final —el lote que va a Claude y el que se resuelve por consenso de la hoja— y la
+         * atomicidad de los cuatro efectos no puede depender de cuál de los dos fue. Duplicar
+         * este bloque habría sido duplicar la reanudación, el ledger append-only y el débito
+         * de créditos, que es exactamente donde una divergencia no se nota hasta que cobra
+         * dos veces.
+         */
+        async function confirmarLote({
           sheetName,
-          headerRow,
           batchIndex,
           batch,
           fingerprints,
-        }: Pendiente): Promise<void> {
-          /*
-           * El chequeo va acá y no al principio del job: un archivo grande son minutos, y lo
-           * que hay que evitar es la PRÓXIMA llamada, no la primera. Los lotes ya confirmados
-           * se quedan — se pagaron, y sus huellas hacen que volver a subir el archivo cobre
-           * solo lo que falta.
-           */
-          if (await cancelado()) return;
-
-          const result = await classifySheetRows({
-            templateVersion,
-            sheetName,
-            rows: batch,
-            headerRow,
-            baseCurrency,
-            /*
-             * Lo que la hoja ya sabe, para que este lote arme sus valores con eso y no con
-             * sus propios nulos. Sin esto, un lote que no distinguió la columna de monto
-             * dejaba TODAS sus filas sin monto — se marcaban `invalid_amount` y se iban a
-             * revisión manual, con el dato ahí al lado en la celda.
-             */
-            /*
-             * CU-868krmrcj: si esta hoja todavía no fijó su mapa —o sea, este ES el primer
-             * lote— se le pasa el PERFIL de la empresa. Sin él, el primer lote de cada hoja
-             * es el único que trabaja a ciegas, y si no distingue la columna de monto, todas
-             * sus filas entran sin monto.
-             *
-             * Es una pista, no una orden: el modelo puede devolver un mapa distinto y ese es
-             * el que manda (y el que dispara la advertencia al final). El perfil nunca aborta
-             * una carga.
-             */
-            columnsCanonicas:
-              mapasPorHoja.get(sheetName) ?? perfilesPorHoja.get(sheetName)?.columnMap,
-          });
-
-          // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
-          // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
-          // terminal es si el documento COMPLETO no produjo ninguna fila (abajo).
-          if (!result.sheetUsable && result.unusableReason) {
-            unusableReasons.add(result.unusableReason);
-          }
-
-          /*
-           * ANTES de la transacción, a propósito: si dos lotes de la misma hoja leyeron
-           * columnas distintas, aplicarlos dejaría media hoja con los valores de otra columna
-           * —montos plausibles, ningún error— y comprobarlo después ya sería tarde, porque las
-           * filas estarían insertadas.
-           *
-           * El primer lote de la hoja fija el mapa canónico. Que gane el primero y no la
-           * mayoría es deliberado: la mayoría exigiría esperar a que terminen todos los lotes,
-           * que es exactamente el momento en que ya no se puede evitar el daño.
-           */
-          const canonico = mapasPorHoja.get(sheetName);
-          if (canonico) {
-            // Lanza SOLO si dos lotes ponen la misma columna en posiciones distintas. Un
-            // `valor vs null` no es contradicción: es un lote que no pudo verla, y el
-            // fusionado se queda con el que sí. Ver `fusionarMapaDeColumnas`.
-            mapasPorHoja.set(
-              sheetName,
-              fusionarMapaDeColumnas(sheetName, canonico, result.columns),
-            );
-          } else {
-            mapasPorHoja.set(sheetName, result.columns);
-          }
-
+          rows,
+          uso,
+        }: {
+          sheetName: string;
+          batchIndex: number;
+          batch: unknown[][];
+          fingerprints: string[];
+          rows: Awaited<ReturnType<typeof classifySheetRows>>['rows'];
+          /** `null` = este lote no llamó a Claude (cortocircuito). */
+          uso: {
+            model: string;
+            inputTokens: number;
+            outputTokens: number;
+            cacheReadTokens: number;
+            cacheCreationTokens: number;
+          } | null;
+        }): Promise<void> {
           await withCompanyScope(companyId, async (db) => {
             // La marca va en la MISMA transacción que los tres efectos de abajo: o se
             // confirma todo el lote (y el reintento lo salta) o no queda nada (y el
@@ -696,18 +695,28 @@ export function startExcelIngestWorker(): Promise<string> {
               .returning({ id: documentIngestBatches.id });
             if (!claimed) return;
 
-            await insertAiUsageEvent(db, {
-              companyId,
-              kind: 'excel',
-              refId: documentId,
-              model: result.model,
-              inputTokens: result.inputTokens,
-              outputTokens: result.outputTokens,
-              cacheReadTokens: result.cacheReadTokens,
-              cacheCreationTokens: result.cacheCreationTokens,
-              billableUnits: batch.length,
-            });
-            await insertStagingRows(db, companyId, documentId, result.rows);
+            /*
+             * SOLO si hubo llamada. Un lote resuelto por cortocircuito (ver
+             * `lib/sheet-consensus.ts`) no habló con Anthropic, así que no le corresponde una
+             * fila acá: `ai_usage_events` es el registro de las llamadas a Claude —una por
+             * llamada, dice CLAUDE.md— y no un contador de lotes. Inventarle una fila con cero
+             * tokens haría que el panel de costos mostrara llamadas que nunca existieron, y es
+             * justo en ese panel donde se mide si el ahorro funcionó.
+             */
+            if (uso) {
+              await insertAiUsageEvent(db, {
+                companyId,
+                kind: 'excel',
+                refId: documentId,
+                model: uso.model,
+                inputTokens: uso.inputTokens,
+                outputTokens: uso.outputTokens,
+                cacheReadTokens: uso.cacheReadTokens,
+                cacheCreationTokens: uso.cacheCreationTokens,
+                billableUnits: batch.length,
+              });
+            }
+            await insertStagingRows(db, companyId, documentId, rows);
 
             /*
              * Las huellas se registran en la MISMA transacción que el resto del lote. Si
@@ -763,6 +772,13 @@ export function startExcelIngestWorker(): Promise<string> {
             // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
             // (no bloquea ni descuenta) — mismo comportamiento que antes de F0.
             //
+            // SE DEBITA IGUAL AUNQUE EL LOTE NO HAYA IDO AL MODELO, y es deliberado. Los
+            // créditos miden el trabajo hecho PARA el cliente (filas procesadas), no nuestro
+            // costo con el proveedor, y el cortocircuito no cambia cuántos lotes tiene su
+            // archivo. Cobrar distinto según por dónde se resolvió el lote movería el precio
+            // del producto sin que nadie lo haya decidido — y eso es de Jose, no de este
+            // worker. Si algún día se quiere pasar el ahorro al cliente, se cambia acá.
+            //
             // Concurrente sin riesgo: `credit_transactions` es append-only y `debitCredits`
             // es un INSERT sin lectura de saldo previa, así que dos débitos en vuelo no se
             // pisan ni pueden leer un saldo obsoleto.
@@ -780,23 +796,347 @@ export function startExcelIngestWorker(): Promise<string> {
           totalRowsProcessed += batch.length;
         }
 
+        /** Un lote: la llamada a Claude y la transacción que confirma sus cuatro efectos. */
+        async function procesarLote({
+          sheetName,
+          headerRow,
+          batchIndex,
+          batch,
+          fingerprints,
+        }: Pendiente): Promise<void> {
+          /*
+           * El chequeo va acá y no al principio del job: un archivo grande son minutos, y lo
+           * que hay que evitar es la PRÓXIMA llamada, no la primera. Los lotes ya confirmados
+           * se quedan — se pagaron, y sus huellas hacen que volver a subir el archivo cobre
+           * solo lo que falta.
+           */
+          if (await cancelado()) return;
+
+          const result = await classifySheetRows({
+            templateVersion,
+            sheetName,
+            rows: batch,
+            headerRow,
+            baseCurrency,
+            /*
+             * Lo que la hoja ya sabe, para que este lote arme sus valores con eso y no con
+             * sus propios nulos. Sin esto, un lote que no distinguió la columna de monto
+             * dejaba TODAS sus filas sin monto — se marcaban `invalid_amount` y se iban a
+             * revisión manual, con el dato ahí al lado en la celda.
+             */
+            /*
+             * CU-868krmrcj: si esta hoja todavía no fijó su mapa —o sea, este ES el primer
+             * lote— se le pasa el PERFIL de la empresa. Sin él, el primer lote de cada hoja
+             * es el único que trabaja a ciegas, y si no distingue la columna de monto, todas
+             * sus filas entran sin monto.
+             *
+             * Es una pista, no una orden: el modelo puede devolver un mapa distinto y ese es
+             * el que manda (y el que dispara la advertencia al final). El perfil nunca aborta
+             * una carga.
+             */
+            columnsCanonicas:
+              mapasPorHoja.get(sheetName) ?? perfilesPorHoja.get(sheetName)?.columnMap,
+            /*
+             * Que este lote use el nombre de categoría que ya usó su hoja. Sin esto, dos lotes
+             * de `Ventas` devolvieron `sales`, `ventas` y `product_sales` para el mismo
+             * concepto y el cliente terminó con tres rubros donde hay uno.
+             */
+            canonizarCategoria: (entity, type, category) =>
+              canonizador.canonizar(sheetName, entity, type, category),
+          });
+
+          // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
+          // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
+          // terminal es si el documento COMPLETO no produjo ninguna fila (abajo).
+          if (!result.sheetUsable && result.unusableReason) {
+            unusableReasons.add(result.unusableReason);
+          }
+
+          /*
+           * La evidencia para decidir si esta hoja es homogénea. Se acumula acá —dentro del
+           * lote que YA pagó— y se lee al terminar la sonda: es el único punto donde se sabe
+           * qué contestó el modelo sin haber gastado nada extra por preguntarlo.
+           */
+          let consenso = consensos.get(sheetName);
+          if (!consenso) {
+            consenso = new ConsensoDeHoja();
+            consensos.set(sheetName, consenso);
+          }
+          consenso.registrarLote(result.veredictos);
+
+          /*
+           * ANTES de la transacción, a propósito: si dos lotes de la misma hoja leyeron
+           * columnas distintas, aplicarlos dejaría media hoja con los valores de otra columna
+           * —montos plausibles, ningún error— y comprobarlo después ya sería tarde, porque las
+           * filas estarían insertadas.
+           *
+           * El primer lote de la hoja fija el mapa canónico. Que gane el primero y no la
+           * mayoría es deliberado: la mayoría exigiría esperar a que terminen todos los lotes,
+           * que es exactamente el momento en que ya no se puede evitar el daño.
+           */
+          const canonico = mapasPorHoja.get(sheetName);
+          if (canonico) {
+            // Lanza SOLO si dos lotes ponen la misma columna en posiciones distintas. Un
+            // `valor vs null` no es contradicción: es un lote que no pudo verla, y el
+            // fusionado se queda con el que sí. Ver `fusionarMapaDeColumnas`.
+            mapasPorHoja.set(
+              sheetName,
+              fusionarMapaDeColumnas(sheetName, canonico, result.columns),
+            );
+          } else {
+            mapasPorHoja.set(sheetName, result.columns);
+          }
+
+          await confirmarLote({
+            sheetName,
+            batchIndex,
+            batch,
+            fingerprints,
+            rows: result.rows,
+            uso: {
+              model: result.model,
+              inputTokens: result.inputTokens,
+              outputTokens: result.outputTokens,
+              cacheReadTokens: result.cacheReadTokens,
+              cacheCreationTokens: result.cacheCreationTokens,
+            },
+          });
+        }
+
         /**
-         * SEGUNDA PASADA: los lotes van a Claude en paralelo, de a
-         * `intakeConfig.batchConcurrency`.
+         * Un lote resuelto SIN llamar al modelo, aplicando el veredicto que su hoja ya
+         * estableció en la sonda.
          *
-         * Que un lote falle siga tumbando el job es deliberado: el documento va a `failed`,
-         * pg-boss reintenta, y la reanudación por lote (CU-868kkgypv) salta lo ya confirmado.
-         * Lo que `runWithConcurrency` garantiza —y por eso no se usa un `Promise.all`— es que
-         * antes de lanzar se espera a que TODO lo que está en vuelo confirme su transacción:
-         * cada una de esas tareas es una llamada a Claude ya pagada, y cortarlas a mitad de
-         * camino obligaría a pagarlas otra vez en el reintento.
+         * ═══ POR QUÉ ESTO NO ES "ADIVINAR" ═══
+         *
+         * El veredicto no lo inventa el código: lo dijo el modelo, sobre filas de esta misma
+         * hoja, leídas con este mismo mapa de columnas, en al menos `SONDA_LOTES` llamadas
+         * separadas que coincidieron entre sí en más del 98 %. Lo único que hace acá el código
+         * es dejar de pagar por la repetición — la misma jugada que ya se hizo con los VALORES
+         * de la fila (`lib/row-assembly.ts`: "eso no es criterio, es indexar").
+         *
+         * Y las filas no entran a ciegas: cada una tiene que parecerse a las que el modelo
+         * bendijo (`filaAptaParaCortocircuito`). La que no se parece va a revisión interna con
+         * confianza 0, igual que hace `classifySheetRows` con la fila que no logró clasificar.
+         * Nunca se descarta ninguna.
          */
-        const { errors } = await runWithConcurrency(
-          pendientes,
+        async function procesarLoteLocal({
+          pendiente: { sheetName, batchIndex, batch, fingerprints },
+          veredicto,
+          columnas,
+        }: {
+          pendiente: Pendiente;
+          veredicto: VeredictoDominante;
+          columnas: ColumnMap;
+        }): Promise<void> {
+          // Mismo chequeo que el camino con modelo. Acá no evita un gasto con Anthropic, pero
+          // sí evita seguir escribiendo filas de un documento que el cliente ya canceló.
+          if (await cancelado()) return;
+
+          const porIndice = new Map<number, VeredictoCrudo>();
+          let noAptas = 0;
+          for (let i = 0; i < batch.length; i++) {
+            if (filaAptaParaCortocircuito(batch[i]!, columnas)) {
+              porIndice.set(i, {
+                i,
+                e: veredicto.targetEntity,
+                t: veredicto.type,
+                c: veredicto.category,
+                cf: veredicto.confidence,
+              });
+              continue;
+            }
+            /*
+             * No se parece a un movimiento (le falta la fecha o el monto en las columnas que el
+             * mapa señala): un título de sección, un subtotal, una fila de cierre. Se arma
+             * igual, con lo que el mapa permita leer y `confidence: 0`, así que `staging-rules`
+             * la marca y cae en revisión interna.
+             *
+             * Es exactamente lo que hace `classifySheetRows` con la fila que el modelo no
+             * cubrió, y por el mismo motivo: un humano mirando una fila de más es un costo
+             * visible y acotado; una fila perdida es un error silencioso en los números de un
+             * cliente.
+             */
+            porIndice.set(i, { i, e: 'transaction', t: null, c: null, cf: 0 });
+            noAptas++;
+          }
+
+          const rows = construirFilas(porIndice, { rows: batch, baseCurrency }, columnas);
+          await confirmarLote({
+            sheetName,
+            batchIndex,
+            batch,
+            fingerprints,
+            rows,
+            // Sin llamada a Claude: no hay uso de IA que registrar. Eso ES el ahorro.
+            uso: null,
+          });
+
+          lotesCortocircuitados++;
+          filasCortocircuitadas += batch.length - noAptas;
+          filasAptasFallidas += noAptas;
+        }
+
+        /*
+         * ═══ SEGUNDA PASADA, EN DOS FASES: SONDA, DECISIÓN, RESTO ═══
+         *
+         * Antes esto era una sola tanda concurrente con TODOS los lotes. El problema no era la
+         * concurrencia —esa parte funciona— sino que no había ningún momento en el que el
+         * código pudiera mirar lo que el modelo ya había contestado y sacar una conclusión. Con
+         * todo lanzado a la vez, la llamada 205 no sabe que las 204 anteriores dijeron lo mismo.
+         *
+         * Medido sobre el archivo real (House Products, 2026-08-18): 216 llamadas, USD 15,82,
+         * 14 minutos — y 205 de esas llamadas fueron `Ventas` devolviendo `transaction/revenue`
+         * en las 18.034 filas, sin una excepción.
+         *
+         * Así que ahora hay un punto de decisión:
+         *
+         *   FASE 1 (sonda)     `SONDA_LOTES` lotes de cada hoja, repartidos a lo largo de
+         *                      ella, van al modelo.
+         *   DECISIÓN           ¿coincidieron entre sí? (`ConsensoDeHoja.decidir`)
+         *   FASE 2 (resto)     los que quedan van al modelo, o se resuelven con el veredicto
+         *                      de la hoja si hubo consenso.
+         *
+         * Las dos fases son concurrentes por dentro; lo único serializado es la decisión, que
+         * no hace E/S. El costo de partirlo en dos es una barrera de sincronización por
+         * documento: la fase 2 arranca cuando termina el último lote de la sonda, o sea que se
+         * pierde el solapamiento entre esos dos grupos. Con hojas grandes eso son segundos
+         * contra los minutos que ahorra; con hojas chicas la sonda ES todo el trabajo y no hay
+         * nada que solapar.
+         *
+         * LO QUE NO CAMBIA, y sigue valiendo para las dos fases: que un lote falle tumba el
+         * job, deliberadamente — el documento va a `failed`, pg-boss reintenta, y la
+         * reanudación por lote (CU-868kkgypv) salta lo ya confirmado. Y `runWithConcurrency`
+         * —en vez de un `Promise.all`— garantiza que antes de propagar un error se espera a que
+         * TODO lo que está en vuelo confirme su transacción: cada una de esas tareas es una
+         * llamada a Claude ya pagada, y cortarlas a media confirmación obligaría a pagarlas
+         * otra vez en el reintento.
+         */
+        const sonda: Pendiente[] = [];
+        const resto: Pendiente[] = [];
+        {
+          /*
+           * Cuenta sobre los lotes PENDIENTES, no sobre todos los de la hoja. En una
+           * reanudación (CU-868kkgypv) los ya confirmados no están en `pendientes`, así que la
+           * sonda se rearma con tres lotes nuevos. Es a propósito: el consenso vive en memoria
+           * y una ejecución que se reanuda no lo hereda — reconstruirlo cuesta tres llamadas, y
+           * dar por bueno un consenso que este proceso nunca vio no cuesta nada hasta que
+           * clasifica mal media hoja.
+           */
+          const porHoja = new Map<string, Pendiente[]>();
+          for (const p of pendientes) {
+            const lista = porHoja.get(p.sheetName);
+            if (lista) lista.push(p);
+            else porHoja.set(p.sheetName, [p]);
+          }
+          for (const lista of porHoja.values()) {
+            // REPARTIDA a lo largo de la hoja, no los primeros: el cierre de tabla y los
+            // subtotales viven al final, y una sonda que solo mira el arranque no los ve nunca.
+            // Ver `elegirSonda`.
+            const enSonda = new Set(elegirSonda(lista.length));
+            lista.forEach((p, i) => (enSonda.has(i) ? sonda : resto).push(p));
+          }
+        }
+
+        const { errors: erroresSonda } = await runWithConcurrency(
+          sonda,
           procesarLote,
           intakeConfig.batchConcurrency,
         );
-        if (errors.length > 0) throw errors[0];
+        if (erroresSonda.length > 0) throw erroresSonda[0];
+
+        /*
+         * LA DECISIÓN. Solo se pregunta por las hojas que TIENEN lotes restantes: en una hoja
+         * que cupo entera en la sonda no hay nada que ahorrar, y registrar su motivo llenaría
+         * el log de líneas sobre hojas de catorce filas.
+         */
+        const restantesPorHoja = new Map<string, number>();
+        for (const p of resto) {
+          restantesPorHoja.set(p.sheetName, (restantesPorHoja.get(p.sheetName) ?? 0) + 1);
+        }
+
+        const veredictoPorHoja = new Map<string, VeredictoDominante>();
+        for (const [sheetName, restantes] of restantesPorHoja) {
+          const columnas = mapasPorHoja.get(sheetName);
+          const consenso = consensos.get(sheetName);
+          if (!columnas || !consenso) continue;
+
+          const decision = consenso.decidir(columnas);
+          if (decision.homogenea) {
+            veredictoPorHoja.set(sheetName, decision.veredicto);
+            const v = decision.veredicto;
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}": consenso tras ` +
+                `${consenso.lotesObservados} lote(s) — ${v.targetEntity}/${v.type ?? '-'}/` +
+                `${v.category ?? '-'} (confianza ${v.confidence.toFixed(2)}). Sus ${restantes} ` +
+                `lote(s) restantes se resuelven sin llamar al modelo.`,
+            );
+          } else {
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}": sin consenso ` +
+                `(${decision.motivo}). Sus ${restantes} lote(s) restantes van al modelo.`,
+            );
+          }
+        }
+
+        /*
+         * FASE 2. Los lotes de una hoja con consenso NO llaman a Claude; el resto sí, con la
+         * misma ventana de concurrencia de siempre.
+         *
+         * Los dos grupos se corren por separado y no en una sola lista mixta porque comparten
+         * el límite de concurrencia y no deberían: la ventana de 10 está dimensionada contra
+         * los límites de tasa de Anthropic (ver config/intake.ts), y un lote local no consume
+         * nada de eso. Mezclarlos dejaría cupos de red ocupados por trabajo que solo usa CPU y
+         * una transacción corta.
+         */
+        const alModelo: Pendiente[] = [];
+        const locales: {
+          pendiente: Pendiente;
+          veredicto: VeredictoDominante;
+          columnas: ColumnMap;
+        }[] = [];
+        for (const p of resto) {
+          const veredicto = veredictoPorHoja.get(p.sheetName);
+          const columnas = mapasPorHoja.get(p.sheetName);
+          if (veredicto && columnas) {
+            locales.push({ pendiente: p, veredicto, columnas });
+          } else {
+            alModelo.push(p);
+          }
+        }
+
+        const { errors: erroresResto } = await runWithConcurrency(
+          alModelo,
+          procesarLote,
+          intakeConfig.batchConcurrency,
+        );
+        const { errors: erroresLocales } = await runWithConcurrency(
+          locales,
+          procesarLoteLocal,
+          intakeConfig.batchConcurrency,
+        );
+        const errores = [...erroresResto, ...erroresLocales];
+        if (errores.length > 0) throw errores[0];
+
+        if (lotesCortocircuitados > 0) {
+          const llamadas = sonda.length + alModelo.length;
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} cortocircuito: ` +
+              `${lotesCortocircuitados} lote(s) y ${filasCortocircuitadas} fila(s) resueltas ` +
+              `por consenso de hoja, sin llamar al modelo. Llamadas a Claude: ${llamadas} ` +
+              `en vez de ${llamadas + lotesCortocircuitados}.` +
+              (filasAptasFallidas > 0
+                ? ` ${filasAptasFallidas} fila(s) no parecían movimientos y fueron a revisión.`
+                : ''),
+          );
+        }
+        if (canonizador.nombresUnificados > 0) {
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} ` +
+              `${canonizador.nombresUnificados} categoría(s) renombradas al nombre que ya usaba ` +
+              `su hoja (lotes distintos bautizaron el mismo concepto de formas distintas).`,
+          );
+        }
 
         /*
          * ═══ APRENDER Y ADVERTIR (CU-868krmrcj) ═══

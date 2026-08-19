@@ -101,8 +101,15 @@ Conventions & gotchas:
   **positivo** (la dirección la lleva `type`, y `staging-rules` exige positivo) y las fechas
   son **seriales de Excel** con época 1899-12-30, acotados a un rango de plausibilidad de
   negocio para que un MONTO en la columna equivocada no se convierta en una fecha creíble.
-  **`INTAKE_OUTPUT_TOKEN_BUDGET` es el reloj, no solo el tope de corte**: subirlo agranda los
-  lotes y vuelve a alargar la espera, aunque el costo total no cambie.
+  **`INTAKE_OUTPUT_TOKEN_BUDGET` NO es el reloj** (corregido 2026-08-19, medido). Versiones
+  anteriores de este archivo decían que subirlo "vuelve a alargar la espera": es falso. El total
+  de tokens de salida de una hoja no depende del tamaño del lote, así que
+  `tandas × s_por_llamada ≈ filas × tokens_por_fila / (rendimiento × concurrencia)` — el lote se
+  cancela. Medido sobre `Ventas` (18.034 filas, ~115 tok/s, concurrencia 10): lotes de 57 filas
+  → 16,1 min; de 88 → 16,3 min; de 90 → 16,7 min. Su trabajo real es **mantener suficientes
+  lotes para llenar la ventana de concurrencia** (con lotes de 888 filas son 21 llamadas en 3
+  tandas de ~471 s = 23,6 min, porque ya no hay con qué llenar los 10 cupos) y quedar debajo de
+  `max_tokens`. El 40.000 → 4.000 de agosto fue una mejora real, pero por ese motivo.
   **Promotion is PARTIAL (Keneth's call, 2026-08-07 — migration `0020`)**: clean rows promote on their own, only
   flagged rows are held back for internal review, and each one promotes incrementally as staff resolves it. A
   `promoted` document with `flagged_count > 0` is the normal state, not a contradiction. The SQL atomicity still
@@ -111,6 +118,48 @@ Conventions & gotchas:
   the mandatory path for every upload: 0 rows in production against 3,195 in staging, measured 2026-08-06.
   Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
   lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
+- **Consenso de hoja: se deja de preguntar lo ya contestado** (`lib/sheet-consensus.ts`,
+  2026-08-19). Los seis pasos de arriba deciden qué NO mandar al modelo; este decide **cuándo
+  dejar de mandarle una hoja que ya se entendió**, y es el ahorro más grande medido hasta ahora.
+  El recibo que lo motiva (`CasaViva_Registro_Operaciones_2025-2026.xlsx`, House Products,
+  documento `055d9a75-64b4-49f8-a391-3834346a4d67`): 216 llamadas, USD 15,82, 14 minutos — y
+  **205 de esas llamadas fueron UNA hoja** (`Ventas`, 18.034 filas) devolviendo
+  `transaction/revenue` en todas las filas, sin una excepción. Se pagó por que un modelo dijera
+  "esto es una venta" dieciocho mil veces.
+  - **Sonda → decisión → resto.** `SONDA_LOTES` (3) lotes de cada hoja van al modelo
+    **repartidos a lo largo de ella** (primero/medio/último, `elegirSonda`) y NO los primeros:
+    las hojas vienen ordenadas por fecha y el renglón de TOTAL vive al final, que es justo lo
+    que una sonda del arranque nunca ve. Si los tres coinciden, los lotes restantes se resuelven
+    en código con el veredicto que el modelo ya dio.
+  - **Los umbrales están del lado caro** y son producto, no ajuste (hay un test que los fija):
+    ≥3 lotes, ≥120 filas, el veredicto dominante ≥98 % de las filas, ≤2 % de `skip`, y mapa con
+    fecha **y** monto. Medido: `Ventas` da 100 % y cortocircuita; `Gastos_Operativos` —13
+    categorías, la más frecuente cubre 11 %— no se acerca y sigue yendo entera al modelo, que es
+    lo correcto porque ahí cada fila sí requiere criterio.
+  - **Candado por fila** (`filaAptaParaCortocircuito`): la fila tiene que traer fecha y monto
+    legibles en las columnas del mapa. Un renglón de TOTAL o un título no pasa y va a revisión
+    interna con confianza 0 — igual que la fila que el modelo no logró clasificar. Nunca se
+    descarta ninguna.
+  - **El lote local NO escribe `ai_usage_events`** (no hubo llamada) pero **sí debita crédito**:
+    los créditos miden el trabajo hecho para el cliente, no nuestro costo con el proveedor, y
+    cambiar eso movería el precio del producto — es decisión de Jose, no del worker.
+  - **La reanudación reconstruye la sonda** (3 llamadas): el consenso vive en memoria y dar por
+    bueno uno que este proceso nunca vio sale gratis hasta que clasifica mal media hoja.
+  - Simulado contra el archivo real con el pipeline nuevo: **213 → 15 llamadas, USD 15,56 →
+    1,10, ~17,5 → ~1,6 min, 0 filas a revisión.**
+- **La categoría se unifica por hoja** (`CanonizadorDeCategorias`, mismo archivo). No es ahorro,
+  es un bug de datos: cada lote pide su clasificación por separado y nada obligaba a que dos
+  lotes de la misma hoja bautizaran igual el mismo concepto. En producción no lo hicieron —
+  sobre filas indistinguibles de `Ventas`: `sales` (17.763), `ventas` (88), `product_sales` (88).
+  Los dos 88 son exactamente el tamaño de lote de esa corrida, o sea que fueron LOTES, no filas.
+  House Products tiene hoy tres rubros en su dashboard donde hay uno. Es el mismo modo de fallo
+  que `assertMismoMapa` ya cubre para el mapa de columnas, sobre el otro campo que el modelo
+  decide por lote. Se colapsa por **sinonimia** (ES/EN + plurales + palabras genéricas), nunca
+  por (entidad, tipo): las 13 categorías de `Gastos_Operativos` son todas `opex` y colapsarlas
+  dejaría al cliente sin su pantalla de gastos. **El canonizador nunca inventa un nombre** —solo
+  mapea sobre uno que ya apareció en esa hoja—, así que si la tabla de sinónimos se queda corta
+  el peor caso es no unificar, no unificar mal. Y **habilita el cortocircuito**: sin unificar,
+  los tres lotes de `Ventas` contaban como tres veredictos y ninguno llegaba al 98 %.
 - **Ninguna fila desaparece en silencio** (auditoría 2026-08-12). Tres garantías que el código
   hace cumplir, cada una por un fallo que ya se observó o que no dejaría rastro:
   1. **Cobertura**: se compara lo devuelto contra lo enviado. `skip` es un veredicto EXPLÍCITO
@@ -156,9 +205,15 @@ Conventions & gotchas:
 - **El panel admin es bilingüe ES/EN** (CU-868kh8zvt, decisión de Jose 2026-07-28). La razón **no es operativa** — el equipo de Macha trabaja en español — sino de negocio: el backoffice es donde se demuestra la maquinaria del producto ante inversionistas de habla inglesa en una ronda, y mostrarlo a medias resta en el peor momento posible. **Toda pantalla nueva de `/admin/*` nace con sus textos en el diccionario**, nunca quemados: agregarlos a medida que se construye es casi gratis, y retrofitear el panel entero después no lo es (fue exactamente este ticket).
 - **Design tokens are the source of truth** (see `design guide.md`): two-layer CSS variables with **full light + dark** themes; never hardcode hex. `darkMode: 'class'`.
 - **Two densities**: `data-density="compact"` (dashboards/tables) vs `"comfortable"` (forms/onboarding). Paddings read from density tokens.
-- **Regla de los DOS VERDES** (CU-868knx0vh, aprobada por Jose 2026-08-11). El color sigue sin decorar, pero ahora hay dos verdes con roles que no se pisan. **Verde de marca** (salvia `#A0AF9A` + gradiente, token `brand`): dice "esto es Macha" — Insight Point, acentos, pantallas de vitrina, cabecera de reportes. **Verde funcional** (`#16A34A`, token `success`): dice "este dato va bien" — deltas, chips, series. Rojo funcional para lo negativo. **Prueba de fuego: si el color dice "va bien o mal" es funcional; si dice "esto es Macha" es salvia.** Nunca el mismo tono para ambos, y el salvia **nunca sobre un dato**. El color de estado sigue apareciendo siempre como texto+fondo+borde juntos, nunca solo texto de color.
+- **La escala del DATO DE APOYO estaba fuera de la alineación al prototipo, y ahí estaba el "todo se ve muy grande"** (CU-868ktknbq, 2026-08-19). `styles/tokens-prototipo.test.ts` fija los COLORES contra `juanrodriguezbz/mvp-macha` y dice explícitamente que los tokens de densidad quedan fuera; por ese hueco entró el reporte de QA. Medido contra el prototipo, la tipografía titular NO era el problema: etiqueta (11px/500), cifra de KPI (24px/600) y relleno de tarjeta (16px) **ya coincidían**. Lo que no coincidía:
+  - **El breakpoint del grid de KPIs**: pasábamos a 5 columnas en `2xl` (1536px), el prototipo en `lg` (1024px). Una MacBook de 14" da **1512px** — 24px por debajo del corte —, así que en la máquina donde se demuestra el producto caían a 3 columnas, los KPIs ocupaban dos filas y la gráfica de tendencia quedaba abajo del pliegue. Ese solo carácter era el cambio de mayor efecto visible de todo el ticket.
+  - **El dato de apoyo de la tarjeta**: cifra exacta, frase de ayuda y "vs mes anterior" iban en `body` (14px/1.5) donde el prototipo usa 10px con interlínea apretada. Tres líneas de 21px contra 13px, más el chip del delta en su propia fila, dejaban la tarjeta en ~258px contra ~152px. Tokens nuevos: `micro` (10px) y `delta` (12px).
+  - **El título de pantalla**: el panel seguía en `text-h1 font-normal` (27px/400) — más grande Y más delgado que el prototipo (24px/600), o sea que ocupaba más y mandaba menos. `pagetitle` (20px/600) se había creado cinco semanas antes en CU-868kt8bg0 **con la nota escrita de que el dashboard ya no usa `h1`**, y el dashboard siguió usándolo. Por eso ahora hay test (`styles/densidad-prototipo.test.ts`) y no solo un comentario: el comentario ya falló una vez.
+  Pendiente y NO hecho acá: el rail derecho del panel. En el prototipo trae tres consejos con contenido real (una cobranza vencida con monto y días de mora, una oportunidad de venta con su valor, el net burn del mes); en el nuestro es un texto que explica lo que el producto *haría* más dos alertas del mismo tipo repetidas. Eso no es escala, es contenido, y probablemente pesa más en la sensación de "no se asimilan" que cualquier píxel.
+- **Regla de los DOS VERDES** (CU-868knx0vh, aprobada por Jose 2026-08-11). El color sigue sin decorar, pero ahora hay dos verdes con roles que no se pisan. **Verde de marca** (salvia `#A0AF9A` + gradiente, token `brand`): dice "esto es Macha" — Insight Point, acentos, pantallas de vitrina, cabecera de reportes. **Verde funcional** (`#16A34A`, token `success`): dice "este dato va bien" — deltas, chips, series. Rojo funcional para lo negativo. **Prueba de fuego: si el color dice "va bien o mal" es funcional; si dice "esto es Macha" es salvia.** Nunca el mismo tono para ambos, y el salvia **nunca sobre un dato**. El color de estado nunca aparece SOLO. **Matizado en CU-868ktknbq (2026-08-19): texto+fondo+borde era UNA forma de cumplirlo, no la única.** Lo que la regla protege es que el estado no dependa únicamente del color —quien no distingue verde de rojo tiene que poder leerlo igual—, así que basta cualquier canal redundante. El delta de una tarjeta de KPI lo cumple con la FLECHA (↗ ↘) y por eso ya va sin caja (`DeltaBadge presentation="inline"`): el chip se llevaba una fila entera de cada tarjeta. **El chip sigue siendo el default y sigue siendo obligatorio donde no hay flecha** — un rótulo de estado a secas (`key-alerts-card`) no tiene otro canal que el fondo y el borde. Hay test que lo fija (`styles/densidad-prototipo.test.ts`): si alguien quita la flecha del delta en línea, falla.
 - **Tipografía: SF Pro Display AUTO-HOSPEDADA** (`next/font/local`, cuatro pesos desde `app/fonts/`, 1.3 MB). Inter salió del bundle; la SF del sistema queda de respaldo en `--font-ui-stack` por si el `.otf` no carga. ⚠️ **Riesgo de licencia asumido por el dueño:** SF Pro es de Apple y su licencia **no cubre servirla desde web** — solo diseñar con ella para plataformas Apple. Está documentado en `lib/fonts.ts`; revertir es editar ese archivo y borrar `app/fonts/`, porque ningún componente conoce el nombre de la fuente.
 - **Regla mono, revisada**: las **cifras salieron** de `JetBrains Mono` (era el cambio de mayor impacto visual del rediseño: la monoespaciada hacía leer el producto como herramienta de desarrollador). Los números van en la tipografía de interfaz con `tabular-nums` — que es lo que de verdad los alinea en tablas, un ajuste independiente de la familia. `font-mono` **sigue siendo obligatorio** para eyebrows y labels en mayúscula con tracking, que son rasgo de identidad y no dato.
+  **Acotada, no deshecha (CU-868ktknbq, 2026-08-19):** lo que hacía leer el producto como herramienta de desarrollador era la CIFRA GRANDE en monoespaciada, y esa sigue en la tipografía de interfaz — hay test que lo fija. Pero el prototipo (fuente de verdad visual) sí usa mono en el **dato de apoyo pequeño**: la cifra exacta bajo el KPI y el delta, a 10-12px. Ahí el ancho fijo ayuda a leer una columna de dígitos en vez de disfrazar el producto, así que vuelve. La frase de ayuda (`hint`) es prosa y no lo lleva.
 - **Formatting is locale-aware and centralized**: use `formatMoney/formatDate/formatPct` helpers over `Intl.*` (`es-GT`/`en-US`); always show explicit currency code (GTQ/USD). Never format inline.
 - **Component split**: Tremor Raw for charts + KPI/indicator cards; shadcn/ui for everything else. Don't use two libs for the same role. **Known deviation**: F1 actually installed `@tremor/react` (the classic npm package), not real Tremor Raw (copy-paste source) — decided 2026-07-27 to avoid a mid-epic chart-library migration; restyled on our own tokens. Revisit only if `@tremor/react` becomes a real blocker.
 - Auth UI is WorkOS AuthKit (hosted); the app verifies session, it does not implement login/password/email-verification.

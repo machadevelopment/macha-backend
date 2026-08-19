@@ -144,7 +144,7 @@ function asText(value: unknown): string | null {
  * limpiar no queda un número, devuelve `null` y la fila se marca por `invalid_amount`. Eso
  * es correcto — la alternativa sería inventar un monto.
  */
-function asNumber(value: unknown): number | null {
+export function asNumber(value: unknown): number | null {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
 
