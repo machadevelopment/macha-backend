@@ -444,7 +444,36 @@ async function compensarInventario(
   }
 }
 
-export async function revertDocument(db: DB, companyId: string, documentId: string): Promise<void> {
+/**
+ * Deshace las filas de una carga: soft-delete en los tres ledgers + compensación de
+ * inventario, y deja el documento en `estadoFinal`.
+ *
+ * ═══ POR QUÉ ESTO SE COMPARTE ENTRE REVERTIR Y CANCELAR (CU-868kttzb1) ═══
+ *
+ * `revert` y `cancel` son la misma operación sobre distinto momento: deshacer una carga que
+ * ya terminó, y deshacer una que va a medias. Hasta este ticket solo `revert` deshacía
+ * filas, y `cancel` se limitaba a cambiar el estado — dejando VIVAS las que la promoción
+ * parcial (migración 0020) ya había escrito.
+ *
+ * Eso rompía la deduplicación por un camino que no se ve: `findSeenFingerprints` excluye
+ * `cancelled` de los estados con datos vivos, con el argumento de que "ninguno deja filas
+ * vivas en producción". Era cierto para `unsupported`, y falso para `cancelled` desde que la
+ * promoción es incremental. Resultado: las filas quedaban en el ledger pero sus huellas
+ * dejaban de bloquear, así que resubir el MISMO archivo las metía otra vez.
+ *
+ * Reproducido con los dos .xlsx del reporte, que resultaron ser IDÉNTICOS byte a byte —
+ * mismo MD5. O sea que no era un archivo distinto ni un mapa de columnas cambiado: era el
+ * estado `cancelled` mintiendo sobre si tenía datos.
+ *
+ * Con el soft-delete acá, la afirmación de `row-fingerprint.ts` vuelve a ser verdad y no
+ * hace falta tocarla.
+ */
+async function deshacerFilas(
+  db: DB,
+  companyId: string,
+  documentId: string,
+  estadoFinal: 'reverted' | 'cancelled',
+): Promise<void> {
   const now = new Date();
   const match = and(eq(transactions.companyId, companyId), eq(transactions.documentId, documentId));
 
@@ -463,6 +492,33 @@ export async function revertDocument(db: DB, companyId: string, documentId: stri
     .where(and(eq(bills.companyId, companyId), eq(bills.documentId, documentId)));
   await db
     .update(documents)
-    .set({ status: 'reverted', revertedAt: now })
+    // `revertedAt` se sella también al cancelar: es la marca de CUÁNDO se deshicieron las
+    // filas, y sin ella una carga cancelada a medias no tendría cómo decir que sus datos ya
+    // no cuentan. El estado distingue quién lo pidió y en qué momento.
+    .set({ status: estadoFinal, revertedAt: now })
     .where(eq(documents.id, documentId));
+}
+
+export async function revertDocument(db: DB, companyId: string, documentId: string): Promise<void> {
+  await deshacerFilas(db, companyId, documentId, 'reverted');
+}
+
+/**
+ * Cancelar una carga en curso deshace lo que alcanzó a promoverse — CU-868kttzb1.
+ *
+ * La promoción es PARCIAL e incremental desde la migración 0020: cuando alguien cancela, lo
+ * limpio de los lotes ya procesados YA está en su dashboard. Dejarlo ahí es lo que duplicaba
+ * los números al resubir el archivo.
+ *
+ * Se deshace en vez de conservarse porque es lo que el usuario cree que hizo: apretó
+ * "cancelar" sobre una carga que no quería. Conservar la mitad de un archivo que alguien
+ * decidió no cargar es un estado que nadie pidió y que además nadie ve — no hay pantalla que
+ * diga "de esta carga cancelada entraron 300 filas".
+ */
+export async function cancelDocumentRows(
+  db: DB,
+  companyId: string,
+  documentId: string,
+): Promise<void> {
+  await deshacerFilas(db, companyId, documentId, 'cancelled');
 }
