@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
+import { svgBarrasDeCosto, svgTendencia } from '@/lib/report-charts';
 import * as XLSX from 'xlsx';
 import type { ReportData, ReportSection } from '@/lib/report-sections';
 
@@ -149,8 +150,25 @@ export function renderReportHtml(input: RenderInput): string {
 
   if (data.revenueTrend) {
     const t = data.revenueTrend;
+    /*
+     * CU-868kt4ap8: la gráfica va ANTES de la tabla, no después.
+     *
+     * La tabla da las cifras exactas y la gráfica da la forma. Quien abre un reporte quiere
+     * primero saber si subió o cayó —eso se ve en un segundo— y solo después el número. Al
+     * revés, la figura queda de adorno al final de una sección que el lector ya cerró.
+     *
+     * Cadena vacía cuando la serie no da para dibujar (menos de dos puntos): se omite en
+     * lugar de dejar un hueco, y la tabla sigue estando.
+     */
+    const grafica = svgTendencia(t.series, {
+      entradas: L({ es: 'Entradas', en: 'Money in' }),
+      salidas: L({ es: 'Salidas', en: 'Money out' }),
+    });
+    const leyenda = grafica
+      ? `<p class="leyenda"><span class="k k-in"></span>${escapeHtml(L({ es: 'Entradas', en: 'Money in' }))} <span class="k k-out"></span>${escapeHtml(L({ es: 'Salidas (costo directo + operativo)', en: 'Money out (direct + operating)' }))}</p>`
+      : '';
     bloques.push(
-      `<section><h2>${escapeHtml(L(SECTION_LABELS.revenue_trend))}</h2>${htmlTable(
+      `<section><h2>${escapeHtml(L(SECTION_LABELS.revenue_trend))}</h2>${grafica}${leyenda}${htmlTable(
         [
           L({ es: 'Ventana', en: 'Window' }),
           L({ es: 'Ingresos', en: 'Revenue' }),
@@ -180,7 +198,8 @@ export function renderReportHtml(input: RenderInput): string {
       `<section><h2>${escapeHtml(L(SECTION_LABELS.cost_breakdown))}</h2>${
         data.costBreakdown.length === 0
           ? `<p>${escapeHtml(L({ es: 'Sin costos registrados en el período.', en: 'No costs recorded in the period.' }))}</p>`
-          : htmlTable(
+          : svgBarrasDeCosto(data.costBreakdown) +
+            htmlTable(
               [
                 L({ es: 'Categoría', en: 'Category' }),
                 L({ es: 'Tipo', en: 'Type' }),
@@ -277,6 +296,16 @@ th{color:#6b6b6b;font-weight:600}
 td:not(:first-child){text-align:right}
 .nota{font-size:12px;color:#6b6b6b}
 .narrativa{white-space:pre-wrap;margin-top:28px}
+/* CU-868kt4ap8 — leyenda de la gráfica de tendencia. Va DEBAJO de la figura y en 12px:
+   la gráfica muestra la forma, la leyenda solo dice qué es cada línea, y la cifra exacta
+   la da la tabla de al lado. Las llaves de color son cuadraditos y no solo texto teñido,
+   porque el color de estado nunca aparece solo (design guide §1 regla 3). */
+.leyenda{font-size:12px;color:#6b6b6b;margin:6px 0 14px}
+.k{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 5px 0 12px;vertical-align:middle}
+.leyenda .k:first-child{margin-left:0}
+.k-in{background:#16A34A}
+.k-out{background:#DC2626}
+svg{margin:4px 0 2px}
 </style></head>
 <body>
   <header>
@@ -392,6 +421,15 @@ const CONTENT_WIDTH = PAGE.width - PAGE.margin * 2;
 const SALVIA = rgb(0.627, 0.686, 0.604); // #A0AF9A — verde de MARCA, nunca sobre un dato.
 const TINTA = rgb(0.11, 0.11, 0.11);
 const GRIS = rgb(0.42, 0.42, 0.42);
+/*
+ * CU-868kt4ap8 — verde y rojo FUNCIONALES para las series de la gráfica.
+ *
+ * NO se reusa `SALVIA`: el verde de marca dice "esto es Macha" y la regla de los dos verdes
+ * le prohíbe expresamente ir sobre un dato. Estos dos dicen "entra" y "sale", que es
+ * justamente el rol que la regla reserva al color funcional.
+ */
+const VERDE_FUNCIONAL = rgb(0.086, 0.639, 0.29); // #16A34A
+const ROJO_FUNCIONAL = rgb(0.863, 0.149, 0.149); // #DC2626
 
 export async function renderReportPdf(input: RenderInput): Promise<Uint8Array> {
   const { data, locale, baseCurrency } = input;
@@ -520,9 +558,75 @@ export async function renderReportPdf(input: RenderInput): Promise<Uint8Array> {
     );
   }
 
+  /**
+   * La misma tendencia del HTML, dibujada con primitivas — CU-868kt4ap8.
+   *
+   * `pdf-lib` no interpreta SVG, así que la figura se traza con rectángulos. Se eligen
+   * BARRAS y no una línea por una razón práctica: una polilínea en pdf-lib son N llamadas a
+   * `drawLine` con sus uniones a mano, y a 366 puntos eso es un PDF pesado y una curva
+   * dentada. Las barras agregan bien, se leen impresas y no mienten sobre la forma.
+   *
+   * Los colores son los FUNCIONALES (verde entra / rojo sale), nunca el salvia de marca:
+   * el salvia dice "esto es Macha" y no puede ir sobre un dato.
+   */
+  const graficaTendencia = (serie: { revenue: number; cogs: number; opex: number }[]) => {
+    if (serie.length < 2) return;
+    // Como mucho 24 barras: más que eso, en el ancho de una hoja carta, son rayas de menos
+    // de 2pt que no se distinguen entre sí. Se agrega por bloques iguales.
+    const MAX_BARRAS = 24;
+    const porBloque = Math.ceil(serie.length / MAX_BARRAS);
+    const bloques: { entra: number; sale: number }[] = [];
+    for (let i = 0; i < serie.length; i += porBloque) {
+      const trozo = serie.slice(i, i + porBloque);
+      bloques.push({
+        entra: trozo.reduce((a, p) => a + p.revenue, 0),
+        sale: trozo.reduce((a, p) => a + p.cogs + p.opex, 0),
+      });
+    }
+    const maximo = Math.max(...bloques.map((b) => Math.max(b.entra, b.sale)));
+    if (maximo <= 0) return;
+
+    const alto = 90;
+    espacio(alto + 12);
+    const base = y - alto;
+    const anchoBloque = CONTENT_WIDTH / bloques.length;
+    // Dos barras por bloque, con un pelo de aire entre bloques.
+    const anchoBarra = Math.max(1.2, (anchoBloque - 2) / 2);
+
+    for (const [i, b] of bloques.entries()) {
+      const x = PAGE.margin + anchoBloque * i;
+      page.drawRectangle({
+        x,
+        y: base,
+        width: anchoBarra,
+        height: (b.entra / maximo) * alto,
+        color: VERDE_FUNCIONAL,
+      });
+      page.drawRectangle({
+        x: x + anchoBarra,
+        y: base,
+        width: anchoBarra,
+        height: (b.sale / maximo) * alto,
+        color: ROJO_FUNCIONAL,
+      });
+    }
+    // Línea de base: sin ella las barras flotan y no se lee de dónde arrancan.
+    page.drawRectangle({ x: PAGE.margin, y: base, width: CONTENT_WIDTH, height: 0.6, color: GRIS });
+    y = base - 10;
+    texto(
+      L({
+        es: 'Barras verdes: entradas. Barras rojas: salidas (costo directo + operativo).',
+        en: 'Green bars: money in. Red bars: money out (direct + operating).',
+      }),
+      { size: 8, color: GRIS },
+    );
+    y -= 6;
+  };
+
   if (data.revenueTrend) {
     const t = data.revenueTrend;
     titulo2(L(SECTION_LABELS.revenue_trend));
+    graficaTendencia(t.series);
     tabla(
       [
         L({ es: 'Ventana', en: 'Window' }),
