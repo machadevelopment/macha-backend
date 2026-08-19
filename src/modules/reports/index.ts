@@ -193,7 +193,7 @@ export const reports_ = new Elysia({ prefix: '/reports' })
    */
   .post(
     '/generate',
-    async ({ companyId, userId, role, body, set, db }) => {
+    async ({ companyId, userId, role, body, set, db, headers }) => {
       // `edit_send_reports` (owner/admin) y no `view_dashboard_reports`: esto GASTA
       // créditos de la empresa. Ver es de todos; gastar el saldo con el que se paga el
       // resto de la IA no.
@@ -283,7 +283,7 @@ export const reports_ = new Elysia({ prefix: '/reports' })
         // acá y viaja en el payload porque el worker corre sin usuario — para él este job
         // es anónimo. El tick diario no manda nada y se queda con el de la empresa, que es
         // lo correcto: ese reporte no lo pidió nadie. Ver `lib/content-locale.ts`.
-        locale: await localeDeContenido(db, companyId, userId),
+        locale: await localeDeContenido(db, companyId, userId, headers['x-content-locale']),
       });
 
       set.status = 202;

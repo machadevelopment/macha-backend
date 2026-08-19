@@ -3,6 +3,7 @@ import { and, asc, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { plans, subscriptions } from '@/db/schema';
+import { startSubscriptionCheckout, appBaseUrl } from '@/lib/billing/provider';
 
 /**
  * Planes del lado CLIENTE (ticket B3, ronda de QA 2026-08-11).
@@ -16,17 +17,30 @@ import { plans, subscriptions } from '@/db/schema';
  * esconderla al `member` solo lo obliga a preguntar. Cambiar de plan va con `billing`, que
  * ya era `['owner']` en la matriz aprobada por Jose — no se inventa una capacidad nueva.
  *
- * ═══ EL UPGRADE NO COBRA, Y ESO ES UNA DECISIÓN, NO UN PENDIENTE ═══
+ * ═══ EL UPGRADE A UN PLAN PAGADO SÍ COBRA (CU-868ku66du, 2026-08-19) ═══
  *
- * Para el demo el cambio de plan actualiza la suscripción sin pasar por Recurrente. Es la
- * recomendación que el propio ticket traía, y hay una razón concreta más allá del demo:
- * los precios de la tabla son PROVISIONALES ("los montos exactos se definen después"), y
- * cobrar de verdad contra un precio provisional es un cargo real que después hay que
- * reembolsar de verdad.
+ * Hasta hoy el cambio de plan actualizaba la suscripción sin pasar por Recurrente. Era una
+ * decisión explícita del demo, con un motivo real: los precios de la tabla son PROVISIONALES,
+ * y cobrar contra un precio provisional es un cargo real que después hay que reembolsar de
+ * verdad. Jose reportó el comportamiento como bug —"se puede pasar a un plan pagado sin que se
+ * exija el pago"— y con eso el criterio de producto cambia.
  *
- * La infraestructura de cobro ya existe (`startSubscriptionCheckout`, los webhooks, la
- * tabla `payments` con su idempotencia por evento), así que conectarla cuando haya precios
- * cerrados es enchufar el checkout en este handler, no construirlo.
+ * Ahora: **plan con `amountUsdCents > 0` → checkout de Recurrente; gratuito o el mismo plan →
+ * al instante, como antes.** El patrón es el mismo que ya usaba la recarga de créditos
+ * (`credits-topup.ts`): se devuelve `checkoutUrl`, el frontend redirige, y la suscripción NO se
+ * toca hasta que el webhook confirma el pago.
+ *
+ * LA SUSCRIPCIÓN VIGENTE QUEDA INTACTA MIENTRAS EL PAGO NO SE CONFIRMA. Nada de estados
+ * intermedios: si el cliente abandona el checkout, sigue en su plan de antes con su acceso
+ * completo, y el único rastro es un `provider_checkout_id` que nunca se cobró. La alternativa
+ * —marcar la suscripción como "cambiando"— le habría quitado acceso a alguien que todavía está
+ * pagando su plan actual.
+ *
+ * ⚠️ Recurrente corre con `sk_test_` a propósito (ver CLAUDE.md): esto abre checkouts de PRUEBA
+ * hasta que un operador promueva la clave `sk_live_` junto con su `RECURRENTE_WEBHOOK_SECRET`.
+ * O sea que el flujo completo se puede probar hoy sin cobrarle a nadie de verdad — y por eso
+ * mismo, el día que se promueva la clave, esto empieza a cobrar sin ningún otro cambio. Los
+ * precios del catálogo tienen que estar cerrados ANTES de ese día.
  *
  * ═══ EL UPGRADE NO ACREDITA CRÉDITOS, Y ESO TAMPOCO ES UN OLVIDO ═══
  *
@@ -125,6 +139,49 @@ export const clientPlans = new Elysia({ prefix: '/plans' })
         return { planCode: actual.planCode, changed: false };
       }
 
+      /*
+       * ═══ PLAN PAGADO: PRIMERO SE COBRA (CU-868ku66du) ═══
+       *
+       * Se decide por `amountUsdCents > 0` y no por el nombre ni por un `isFree` que no existe:
+       * el precio ES la definición de plan pagado, y así un plan nuevo en el catálogo entra por
+       * el camino correcto sin que nadie tenga que acordarse de etiquetarlo.
+       *
+       * NO se escribe nada en `subscriptions` todavía —solo el `provider_checkout_id`, que es
+       * lo que el webhook usa para encontrar esta fila cuando el pago llegue. `planCode` y
+       * `amountUsdCents` los aplica el webhook, así que hasta entonces el cliente sigue en su
+       * plan de antes con su acceso intacto.
+       */
+      if (destino.amountUsdCents > 0) {
+        const checkout = await startSubscriptionCheckout({
+          amountUsdCents: destino.amountUsdCents,
+          companyId,
+          planName: destino.name,
+          targetPlanCode: destino.code,
+          successUrl: `${appBaseUrl}/credits?planChanged=1`,
+          cancelUrl: `${appBaseUrl}/credits?cancelled=1`,
+        });
+
+        /*
+         * El `provider_checkout_id` se guarda SOBRE la fila vigente, no en una nueva.
+         *
+         * Tanto este módulo como `webhooks.ts` encuentran la suscripción con
+         * `orderBy(desc(createdAt)).limit(1)`. Insertar una fila auxiliar la convertiría en "la
+         * vigente" para las dos consultas, y el cliente aparecería de golpe en un plan que
+         * todavía no pagó — exactamente el estado a medias que este ticket viene a evitar.
+         *
+         * `status` tampoco se toca: sigue `active` porque su plan actual sigue activo.
+         */
+        await db
+          .update(subscriptions)
+          .set({ providerCheckoutId: checkout.providerCheckoutId, updatedAt: new Date() })
+          .where(and(eq(subscriptions.id, actual.id), eq(subscriptions.companyId, companyId)));
+
+        return { checkoutUrl: checkout.checkoutUrl, planCode: destino.code, changed: false };
+      }
+
+      // Plan gratuito (o bajar de plan): se aplica al instante. No hay nada que cobrar, y
+      // mandar a alguien a una pantalla de pago por un plan de USD 0 sería absurdo.
+      //
       // `company_id` explícito además del id de la suscripción: RLS es el backstop, no el
       // filtro (CLAUDE.md). El id solo bastaría, pero dejar la condición de tenant escrita
       // es lo que hace que un error en la resolución del id no se convierta en una

@@ -26,7 +26,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
   })
   .post(
     '/',
-    async ({ companyId, userId, role, body, set, db }) => {
+    async ({ companyId, userId, role, body, set, db, headers }) => {
       assertClientCapability(role, 'chat', set);
       // CU-868kfvacr criterio 3 (deep-link a chat): reportVersionId opcional origina
       // el hilo desde un reporte específico (chats.report_version_id, US-14).
@@ -58,7 +58,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       // CU-868krvuct: ese idioma pasa a ser el del USUARIO y no el de la empresa. El chat
       // es suyo y aparece en su lista; dos socios que leen en idiomas distintos deben ver
       // cada uno su marcador.
-      const locale = await localeDeContenido(db, companyId, userId);
+      const locale = await localeDeContenido(db, companyId, userId, headers['x-content-locale']);
 
       const [chat] = await db
         .insert(chats)
@@ -103,7 +103,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
   })
   .post(
     '/:id/messages',
-    async ({ companyId, userId, role, params, body, set, db, request }) => {
+    async ({ companyId, userId, role, params, body, set, db, request, headers }) => {
       assertClientCapability(role, 'chat', set);
 
       // CU-868kfvaah: 'ai' token-bucket (chat/insight) — se descubrió en una auditoría
@@ -127,7 +127,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
 
       // CU-868krvuct: el idioma de la RESPUESTA es el de quien pregunta, no el que la
       // empresa eligió el día del registro. Ver `lib/content-locale.ts`.
-      const locale = await localeDeContenido(db, companyId, userId);
+      const locale = await localeDeContenido(db, companyId, userId, headers['x-content-locale']);
 
       const segment = await getOrCreateActiveSegment(db, companyId, params.id);
       const history = await buildChatHistory(db, params.id, segment.id);

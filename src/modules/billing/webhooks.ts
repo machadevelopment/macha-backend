@@ -102,9 +102,43 @@ export const billingWebhooks = new Elysia({ prefix: '/webhooks/recurrente' }).po
           // de Recurrente no traen objeto `payment`, solo el checkout.
           const checkoutRef = event.providerCheckoutId;
           if (checkoutRef) {
+            /*
+             * ═══ UN CAMBIO DE PLAN SE APLICA ACÁ, NO AL PEDIRLO (CU-868ku66du) ═══
+             *
+             * `POST /plans/change` con un plan pagado ya no escribe `planCode`: abre el
+             * checkout, guarda su id sobre la suscripción vigente y devuelve la URL. Este es el
+             * único punto donde el plan nuevo se hace efectivo, y es correcto que sea así —
+             * significa que el plan solo cambia cuando Recurrente confirma que le pagaron.
+             *
+             * El plan destino viaja en el `metadata` del checkout porque es lo único que
+             * sobrevive el viaje ida y vuelta por el proveedor. Y el MONTO viaja con él: leerlo
+             * del catálogo en este momento daría el precio de hoy, no el que el cliente aceptó
+             * pagar cuando abrió el checkout, y los precios del catálogo son provisionales.
+             *
+             * Un `kind: 'subscription'` (el alta de empresa) sigue haciendo exactamente lo de
+             * antes: solo activar. Esa rama no cambia de comportamiento.
+             */
+            const esCambioDePlan = event.metadata?.kind === 'plan_change';
+            const planDestino = esCambioDePlan ? event.metadata?.targetPlanCode : undefined;
+            const montoDestino = esCambioDePlan
+              ? Number(event.metadata?.targetAmountUsdCents)
+              : undefined;
+
             await db
               .update(subscriptions)
-              .set({ status: 'active' })
+              .set({
+                status: 'active',
+                // Solo si de verdad vino un plan destino legible. Un metadata truncado o
+                // manipulado no debe convertirse en un `planCode` vacío ni en un monto `NaN`
+                // sobre una suscripción que hoy está bien.
+                ...(planDestino && Number.isFinite(montoDestino)
+                  ? {
+                      planCode: planDestino,
+                      amountUsdCents: montoDestino,
+                      updatedAt: new Date(),
+                    }
+                  : {}),
+              })
               .where(
                 and(
                   eq(subscriptions.companyId, companyId),

@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf
 import { svgBarrasDeCosto, svgTendencia } from '@/lib/report-charts';
 import * as XLSX from 'xlsx';
 import type { ReportData, ReportSection } from '@/lib/report-sections';
+import { isotipoPngBytes, ISOTIPO_ASPECTO } from '@/lib/brand-asset';
 
 /**
  * RENDERIZADO DE UN REPORTE A SUS TRES FORMATOS (CU-B2-QA-20260811).
@@ -439,6 +440,18 @@ export async function renderReportPdf(input: RenderInput): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  /*
+   * ═══ EL ISOTIPO EN LA CABECERA (CU-868ku6pax) ═══
+   *
+   * El mismo PNG que llevan los correos (`lib/brand-asset.ts`), no una segunda copia: dos
+   * binarios del mismo logo se desincronizan el día que la marca cambie, y el que quede viejo
+   * no falla — solo se ve mal.
+   *
+   * Se embebe UNA vez para todo el documento. `pdf-lib` reusa el objeto embebido en cada
+   * `drawImage`, así que dibujarlo en varias páginas no volvería a pesar; hoy va solo en la
+   * primera (ver la cabecera más abajo).
+   */
+  const isotipo = await doc.embedPng(isotipoPngBytes());
 
   let page: PDFPage = doc.addPage([PAGE.width, PAGE.height]);
   let y = PAGE.height - PAGE.margin;
@@ -523,15 +536,37 @@ export async function renderReportPdf(input: RenderInput): Promise<Uint8Array> {
     color: SALVIA,
   });
   y -= 26;
+
+  /*
+   * El logo a la IZQUIERDA del título, y el texto corrido para que no se encimen.
+   *
+   * Alto fijo (28 pt, la altura de las dos líneas de texto que lleva al lado) y ancho DERIVADO
+   * de la proporción nativa del PNG — nunca los dos a mano: fijar ambos es exactamente cómo se
+   * deforma un logo sin que nada falle. Solo en la primera página: es la portada del
+   * entregable, y repetirlo en cada salto lo convertiría en marca de agua.
+   */
+  const LOGO_ALTO = 28;
+  const LOGO_ANCHO = LOGO_ALTO * ISOTIPO_ASPECTO;
+  const LOGO_SEPARACION = 10;
+  page.drawImage(isotipo, {
+    x: PAGE.margin,
+    // El logo cuelga de la línea del título y baja hasta la del subtítulo (16 pt más abajo),
+    // así queda óptimamente centrado contra el bloque de texto en vez de contra una sola línea.
+    y: y - 16,
+    width: LOGO_ANCHO,
+    height: LOGO_ALTO,
+  });
+
+  const xTexto = PAGE.margin + LOGO_ANCHO + LOGO_SEPARACION;
   page.drawText(
     sanitizeWinAnsi(
       `${L({ es: 'Reporte ejecutivo', en: 'Executive report' })} — ${input.companyName}`,
     ),
-    { x: PAGE.margin, y, size: 16, font: bold, color: TINTA },
+    { x: xTexto, y, size: 16, font: bold, color: TINTA },
   );
   y -= 16;
   page.drawText(sanitizeWinAnsi(`${data.periodStart} — ${data.periodEnd} · ${baseCurrency}`), {
-    x: PAGE.margin,
+    x: xTexto,
     y,
     size: 10,
     font: regular,
