@@ -46,6 +46,42 @@ function libro(): Buffer {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
+/**
+ * Los veredictos crudos que acompañan a las filas clasificadas.
+ *
+ * `classifySheetRows` los devuelve para que el worker mida si la hoja es HOMOGÉNEA y pueda
+ * dejar de llamar al modelo (`lib/sheet-consensus.ts`). Se derivan de las filas que este
+ * doble ya produce en vez de ponerse a mano: un `[]` fijo compilaría igual y haría creer al
+ * consenso que el lote no trajo filas, o sea que probaría el camino equivocado el día que
+ * este test crezca a tres lotes.
+ */
+type FilaClasificada = {
+  targetEntity: 'transaction' | 'invoice' | 'bill';
+  payload: Record<string, unknown>;
+  confidence: number;
+};
+const veredictosDe = (filas: FilaClasificada[]) =>
+  filas.map((f) => ({
+    e: f.targetEntity,
+    t: (f.payload.type ?? null) as 'revenue' | 'cogs' | 'opex' | 'other' | null,
+    c: (f.payload.category ?? null) as string | null,
+    cf: f.confidence,
+  }));
+
+const FILAS_DEL_DOBLE = [
+  {
+    targetEntity: 'transaction' as const,
+    payload: {
+      type: 'revenue',
+      category: 'ventas',
+      date: FECHA,
+      originalAmount: MONTO,
+      originalCurrency: 'GTQ',
+    },
+    confidence: 0.95,
+  },
+];
+
 const anthropicReal = await import('@/lib/anthropic');
 
 mock.module('@/lib/anthropic', () => ({
@@ -73,19 +109,8 @@ mock.module('@/lib/anthropic', () => ({
     unclassifiedRows: [],
     sheetUsable: true,
     unusableReason: null,
-    rows: [
-      {
-        targetEntity: 'transaction' as const,
-        payload: {
-          type: 'revenue',
-          category: 'ventas',
-          date: FECHA,
-          originalAmount: MONTO,
-          originalCurrency: 'GTQ',
-        },
-        confidence: 0.95,
-      },
-    ],
+    rows: FILAS_DEL_DOBLE,
+    veredictos: veredictosDe(FILAS_DEL_DOBLE),
   }),
   estimateCostUsd: () => 0.001,
   DEFAULT_INSIGHT_PROMPT: '',

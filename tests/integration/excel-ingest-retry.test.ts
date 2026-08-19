@@ -53,6 +53,28 @@ const filaLimpia = (fecha: string, monto: number) => ({
   confidence: 0.95,
 });
 
+/**
+ * Los veredictos crudos que acompañan a las filas clasificadas.
+ *
+ * `classifySheetRows` los devuelve para que el worker mida si la hoja es HOMOGÉNEA y pueda
+ * dejar de llamar al modelo (`lib/sheet-consensus.ts`). Se derivan de las filas que este
+ * doble ya produce en vez de ponerse a mano: un `[]` fijo compilaría igual y haría creer al
+ * consenso que el lote no trajo filas, o sea que probaría el camino equivocado el día que
+ * este test crezca a tres lotes.
+ */
+type FilaClasificada = {
+  targetEntity: 'transaction' | 'invoice' | 'bill';
+  payload: Record<string, unknown>;
+  confidence: number;
+};
+const veredictosDe = (filas: FilaClasificada[]) =>
+  filas.map((f) => ({
+    e: f.targetEntity,
+    t: (f.payload.type ?? null) as 'revenue' | 'cogs' | 'opex' | 'other' | null,
+    c: (f.payload.category ?? null) as string | null,
+    cf: f.confidence,
+  }));
+
 /** El mapa que "devuelve" el modelo. Igual para las dos hojas: el caso normal. */
 const MAPA_DE_COLUMNAS = {
   date: 0,
@@ -89,6 +111,9 @@ mock.module('@/lib/anthropic', () => ({
       // El fallo realista: Anthropic devuelve 529 / se agota el rate limit.
       throw new Error('Anthropic 529 overloaded');
     }
+    const filas = [
+      sheetName === HOJA_A ? filaLimpia('2019-05-01', 100) : filaLimpia('2019-05-02', 200),
+    ];
     return {
       model: 'claude-sonnet-5',
       inputTokens: 100,
@@ -101,7 +126,8 @@ mock.module('@/lib/anthropic', () => ({
       unclassifiedRows: [],
       sheetUsable: true,
       unusableReason: null,
-      rows: [sheetName === HOJA_A ? filaLimpia('2019-05-01', 100) : filaLimpia('2019-05-02', 200)],
+      rows: filas,
+      veredictos: veredictosDe(filas),
     };
   },
   estimateCostUsd: () => 0.001,

@@ -101,8 +101,15 @@ Conventions & gotchas:
   **positivo** (la dirección la lleva `type`, y `staging-rules` exige positivo) y las fechas
   son **seriales de Excel** con época 1899-12-30, acotados a un rango de plausibilidad de
   negocio para que un MONTO en la columna equivocada no se convierta en una fecha creíble.
-  **`INTAKE_OUTPUT_TOKEN_BUDGET` es el reloj, no solo el tope de corte**: subirlo agranda los
-  lotes y vuelve a alargar la espera, aunque el costo total no cambie.
+  **`INTAKE_OUTPUT_TOKEN_BUDGET` NO es el reloj** (corregido 2026-08-19, medido). Versiones
+  anteriores de este archivo decían que subirlo "vuelve a alargar la espera": es falso. El total
+  de tokens de salida de una hoja no depende del tamaño del lote, así que
+  `tandas × s_por_llamada ≈ filas × tokens_por_fila / (rendimiento × concurrencia)` — el lote se
+  cancela. Medido sobre `Ventas` (18.034 filas, ~115 tok/s, concurrencia 10): lotes de 57 filas
+  → 16,1 min; de 88 → 16,3 min; de 90 → 16,7 min. Su trabajo real es **mantener suficientes
+  lotes para llenar la ventana de concurrencia** (con lotes de 888 filas son 21 llamadas en 3
+  tandas de ~471 s = 23,6 min, porque ya no hay con qué llenar los 10 cupos) y quedar debajo de
+  `max_tokens`. El 40.000 → 4.000 de agosto fue una mejora real, pero por ese motivo.
   **Promotion is PARTIAL (Keneth's call, 2026-08-07 — migration `0020`)**: clean rows promote on their own, only
   flagged rows are held back for internal review, and each one promotes incrementally as staff resolves it. A
   `promoted` document with `flagged_count > 0` is the normal state, not a contradiction. The SQL atomicity still
@@ -111,6 +118,48 @@ Conventions & gotchas:
   the mandatory path for every upload: 0 rows in production against 3,195 in staging, measured 2026-08-06.
   Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
   lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
+- **Consenso de hoja: se deja de preguntar lo ya contestado** (`lib/sheet-consensus.ts`,
+  2026-08-19). Los seis pasos de arriba deciden qué NO mandar al modelo; este decide **cuándo
+  dejar de mandarle una hoja que ya se entendió**, y es el ahorro más grande medido hasta ahora.
+  El recibo que lo motiva (`CasaViva_Registro_Operaciones_2025-2026.xlsx`, House Products,
+  documento `055d9a75-64b4-49f8-a391-3834346a4d67`): 216 llamadas, USD 15,82, 14 minutos — y
+  **205 de esas llamadas fueron UNA hoja** (`Ventas`, 18.034 filas) devolviendo
+  `transaction/revenue` en todas las filas, sin una excepción. Se pagó por que un modelo dijera
+  "esto es una venta" dieciocho mil veces.
+  - **Sonda → decisión → resto.** `SONDA_LOTES` (3) lotes de cada hoja van al modelo
+    **repartidos a lo largo de ella** (primero/medio/último, `elegirSonda`) y NO los primeros:
+    las hojas vienen ordenadas por fecha y el renglón de TOTAL vive al final, que es justo lo
+    que una sonda del arranque nunca ve. Si los tres coinciden, los lotes restantes se resuelven
+    en código con el veredicto que el modelo ya dio.
+  - **Los umbrales están del lado caro** y son producto, no ajuste (hay un test que los fija):
+    ≥3 lotes, ≥120 filas, el veredicto dominante ≥98 % de las filas, ≤2 % de `skip`, y mapa con
+    fecha **y** monto. Medido: `Ventas` da 100 % y cortocircuita; `Gastos_Operativos` —13
+    categorías, la más frecuente cubre 11 %— no se acerca y sigue yendo entera al modelo, que es
+    lo correcto porque ahí cada fila sí requiere criterio.
+  - **Candado por fila** (`filaAptaParaCortocircuito`): la fila tiene que traer fecha y monto
+    legibles en las columnas del mapa. Un renglón de TOTAL o un título no pasa y va a revisión
+    interna con confianza 0 — igual que la fila que el modelo no logró clasificar. Nunca se
+    descarta ninguna.
+  - **El lote local NO escribe `ai_usage_events`** (no hubo llamada) pero **sí debita crédito**:
+    los créditos miden el trabajo hecho para el cliente, no nuestro costo con el proveedor, y
+    cambiar eso movería el precio del producto — es decisión de Jose, no del worker.
+  - **La reanudación reconstruye la sonda** (3 llamadas): el consenso vive en memoria y dar por
+    bueno uno que este proceso nunca vio sale gratis hasta que clasifica mal media hoja.
+  - Simulado contra el archivo real con el pipeline nuevo: **213 → 15 llamadas, USD 15,56 →
+    1,10, ~17,5 → ~1,6 min, 0 filas a revisión.**
+- **La categoría se unifica por hoja** (`CanonizadorDeCategorias`, mismo archivo). No es ahorro,
+  es un bug de datos: cada lote pide su clasificación por separado y nada obligaba a que dos
+  lotes de la misma hoja bautizaran igual el mismo concepto. En producción no lo hicieron —
+  sobre filas indistinguibles de `Ventas`: `sales` (17.763), `ventas` (88), `product_sales` (88).
+  Los dos 88 son exactamente el tamaño de lote de esa corrida, o sea que fueron LOTES, no filas.
+  House Products tiene hoy tres rubros en su dashboard donde hay uno. Es el mismo modo de fallo
+  que `assertMismoMapa` ya cubre para el mapa de columnas, sobre el otro campo que el modelo
+  decide por lote. Se colapsa por **sinonimia** (ES/EN + plurales + palabras genéricas), nunca
+  por (entidad, tipo): las 13 categorías de `Gastos_Operativos` son todas `opex` y colapsarlas
+  dejaría al cliente sin su pantalla de gastos. **El canonizador nunca inventa un nombre** —solo
+  mapea sobre uno que ya apareció en esa hoja—, así que si la tabla de sinónimos se queda corta
+  el peor caso es no unificar, no unificar mal. Y **habilita el cortocircuito**: sin unificar,
+  los tres lotes de `Ventas` contaban como tres veredictos y ninguno llegaba al 98 %.
 - **Ninguna fila desaparece en silencio** (auditoría 2026-08-12). Tres garantías que el código
   hace cumplir, cada una por un fallo que ya se observó o que no dejaría rastro:
   1. **Cobertura**: se compara lo devuelto contra lo enviado. `skip` es un veredicto EXPLÍCITO

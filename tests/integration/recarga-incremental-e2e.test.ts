@@ -75,12 +75,45 @@ function libro(): Buffer {
  */
 let filasAlModelo = 0;
 
+/**
+ * Los veredictos crudos que acompañan a las filas clasificadas.
+ *
+ * `classifySheetRows` los devuelve para que el worker mida si la hoja es HOMOGÉNEA y pueda
+ * dejar de llamar al modelo (`lib/sheet-consensus.ts`). Se derivan de las filas que este
+ * doble ya produce en vez de ponerse a mano: un `[]` fijo compilaría igual y haría creer al
+ * consenso que el lote no trajo filas, o sea que probaría el camino equivocado el día que
+ * este test crezca a tres lotes.
+ */
+type FilaClasificada = {
+  targetEntity: 'transaction' | 'invoice' | 'bill';
+  payload: Record<string, unknown>;
+  confidence: number;
+};
+const veredictosDe = (filas: FilaClasificada[]) =>
+  filas.map((f) => ({
+    e: f.targetEntity,
+    t: (f.payload.type ?? null) as 'revenue' | 'cogs' | 'opex' | 'other' | null,
+    c: (f.payload.category ?? null) as string | null,
+    cf: f.confidence,
+  }));
+
 const anthropicReal = await import('@/lib/anthropic');
 
 mock.module('@/lib/anthropic', () => ({
   ...anthropicReal,
   classifySheetRows: async (params: { rows: unknown[][] }) => {
     filasAlModelo += params.rows.filter((r) => typeof r[1] === 'number').length;
+    const filas = params.rows.map((row) => ({
+      targetEntity: 'transaction' as const,
+      payload: {
+        type: 'revenue',
+        category: 'ventas',
+        date: String(row[0]),
+        originalAmount: Number(row[1]),
+        originalCurrency: 'GTQ',
+      },
+      confidence: 0.95,
+    }));
     return {
       model: 'claude-sonnet-5',
       inputTokens: 100,
@@ -112,17 +145,8 @@ mock.module('@/lib/anthropic', () => ({
        * total del dashboard depende de qué filas pasaron el filtro, que es exactamente lo
        * que este test mide. Con un monto fijo, duplicar y no duplicar darían lo mismo.
        */
-      rows: params.rows.map((row) => ({
-        targetEntity: 'transaction' as const,
-        payload: {
-          type: 'revenue',
-          category: 'ventas',
-          date: String(row[0]),
-          originalAmount: Number(row[1]),
-          originalCurrency: 'GTQ',
-        },
-        confidence: 0.95,
-      })),
+      rows: filas,
+      veredictos: veredictosDe(filas),
     };
   },
   estimateCostUsd: () => 0.001,
