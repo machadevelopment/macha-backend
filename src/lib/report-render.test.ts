@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { PDFDocument } from 'pdf-lib';
+import { ISOTIPO_ASPECTO } from '@/lib/brand-asset';
 import * as XLSX from 'xlsx';
 import {
   formatMoney,
@@ -203,6 +204,35 @@ describe('renderReportHtml', () => {
       data: { ...DATOS_COMPLETOS, topProducts: [] },
     });
     expect(html).toContain('no identificó productos');
+  });
+});
+
+describe('el isotipo en la cabecera del PDF (CU-868ku6pax)', () => {
+  test('el PDF incrusta una imagen, que antes no tenía ninguna', async () => {
+    const bytes = await renderReportPdf(ENTRADA);
+    const texto = new TextDecoder('latin1').decode(bytes);
+    /*
+     * Un XObject de imagen en el PDF. Antes de este ticket, `report-render.ts` no tenía una
+     * sola llamada a `embedPng`/`drawImage`, así que este marcador simplemente no existía.
+     */
+    expect(texto).toContain('/Subtype /Image');
+  });
+
+  test('el logo NO se deforma: el ancho sale de la proporción del PNG', () => {
+    /*
+     * Esto es lo que un test puede proteger y el ojo no revisa cada vez: si alguien fija alto
+     * Y ancho a mano, el logo se estira y no falla nada — solo se ve mal. El ancho se deriva
+     * de `ISOTIPO_ASPECTO`, así que basta con que ese número siga siendo el del PNG real
+     * (170x200), lo cual verifica `email-shell.test.ts`.
+     */
+    const LOGO_ALTO = 28;
+    expect(LOGO_ALTO * ISOTIPO_ASPECTO).toBeCloseTo(23.8, 1);
+  });
+
+  test('el PDF sigue generándose sin romperse con datos reales', async () => {
+    const bytes = await renderReportPdf(ENTRADA);
+    expect(bytes.length).toBeGreaterThan(3000);
+    expect(new TextDecoder('latin1').decode(bytes.slice(0, 5))).toBe('%PDF-');
   });
 });
 

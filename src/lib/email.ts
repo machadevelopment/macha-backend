@@ -4,6 +4,7 @@ import { env } from './env';
 import { type DB } from '@/db/client';
 import { notifications } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
+import { renderBrandedEmail, destacado } from '@/lib/email-shell';
 
 /**
  * CU-868kfvad9: Resend, plantillas ES/EN, idioma según companies.locale. "Seam" de
@@ -14,36 +15,102 @@ import { enqueue, QUEUES } from '@/queue';
  * transitorias de Resend se reintenten con el backoff de RETRY_POLICY del queue,
  * no con la lógica propia de Resend.
  */
+/**
+ * ═══ LOS TRES CORREOS, SOBRE EL SHELL DE MARCA (CU-868ku6jn1) ═══
+ *
+ * Antes cada entrada devolvía su propio HTML plano —`<p><strong>...</strong> te invitó</p>`—
+ * y Jose lo reportó con la captura de un correo real: sin logo, sin marca, indistinguible de
+ * spam. Ahora cada una aporta solo lo suyo (título, cuerpo, botón) y el maquetado vive
+ * completo en `lib/email-shell.ts`, extraído de la plantilla que él aprobó.
+ *
+ * Lo que NO cambió: la firma de estas funciones, el `{ subject, html }` que devuelven, el
+ * corte ES/EN, `deliverEmail()`, la cola `email.send` y la tabla `notifications`. El shell se
+ * insertó por debajo a propósito — así el arreglo no toca el camino de entrega, que ya
+ * funciona y tiene su propio reporte de fallos a Sentry.
+ *
+ * El asunto sigue en TEXTO PLANO y sin escapar, y eso es correcto: no es HTML. Escaparlo
+ * mostraría `&amp;` literal en la bandeja de entrada de una empresa que se llame "Pérez & Co".
+ */
 export const TEMPLATES = {
   es: {
     reportReady: (viewUrl: string) => ({
       subject: 'Tu reporte financiero está listo',
-      html: `<p>Tu reporte ejecutivo ya está disponible.</p><p><a href="${viewUrl}">Ver reporte</a></p>`,
+      html: renderBrandedEmail({
+        locale: 'es',
+        title: 'Tu reporte financiero está listo',
+        bodyHtml:
+          'Tu reporte ejecutivo ya está disponible con el análisis del período. ' +
+          'Ábrelo para ver tus cifras, la tendencia y lo que Macha encontró en ellas.',
+        ctaLabel: 'Ver reporte',
+        ctaUrl: viewUrl,
+      }),
     }),
     alertTriggered: (label: string, viewUrl: string) => ({
       subject: `Alerta: ${label}`,
-      html: `<p>Se disparó la alerta <strong>${label}</strong> en tu empresa.</p><p><a href="${viewUrl}">Ver detalle</a></p>`,
+      html: renderBrandedEmail({
+        locale: 'es',
+        // El nombre de la regla va en el título porque es LO QUE PASÓ: un asunto que solo
+        // dijera "Alerta" obliga a abrir el correo para saber si urge.
+        title: label,
+        bodyHtml: `Se disparó la alerta ${destacado(label)} en tu empresa. Revisa el detalle para ver qué la activó y con qué cifras.`,
+        ctaLabel: 'Ver detalle',
+        ctaUrl: viewUrl,
+      }),
     }),
     // CU-868kh8pwv. El nombre de la empresa va en el asunto porque quien recibe esto
     // puede no esperar el correo: sin él, "Te invitaron a Macha Finance" es
     // indistinguible de spam. El enlace lleva el token y caduca en 7 días.
     invitation: (companyName: string, acceptUrl: string, invitedByEmail: string) => ({
       subject: `Te invitaron a ${companyName} en Macha Finance`,
-      html: `<p><strong>${invitedByEmail}</strong> te invitó a unirte a <strong>${companyName}</strong> en Macha Finance.</p><p><a href="${acceptUrl}">Aceptar invitación</a></p><p>El enlace vence en 7 días. Si no esperabas esta invitación, ignora este correo.</p>`,
+      html: renderBrandedEmail({
+        locale: 'es',
+        title: `Te invitaron a ${companyName}`,
+        bodyHtml: `${destacado(invitedByEmail)} te invitó a unirte a ${destacado(companyName)} en Macha Finance. Acepta la invitación para crear tu cuenta y empezar a ver el negocio con claridad.`,
+        ctaLabel: 'Aceptar invitación',
+        ctaUrl: acceptUrl,
+        footnote:
+          'El enlace vence en 7 días. Si no esperabas esta invitación, puedes ignorar este correo sin problema.',
+        // Único de los tres que lo lleva: quien lo recibe puede no tener cuenta y estar
+        // leyendo desde un cliente que no deja apretar botones.
+        showPlainLink: true,
+      }),
     }),
   },
   en: {
     reportReady: (viewUrl: string) => ({
       subject: 'Your financial report is ready',
-      html: `<p>Your executive report is now available.</p><p><a href="${viewUrl}">View report</a></p>`,
+      html: renderBrandedEmail({
+        locale: 'en',
+        title: 'Your financial report is ready',
+        bodyHtml:
+          'Your executive report is now available with the analysis for the period. ' +
+          'Open it to see your figures, the trend, and what Macha found in them.',
+        ctaLabel: 'View report',
+        ctaUrl: viewUrl,
+      }),
     }),
     alertTriggered: (label: string, viewUrl: string) => ({
       subject: `Alert: ${label}`,
-      html: `<p>The <strong>${label}</strong> alert was triggered for your company.</p><p><a href="${viewUrl}">View detail</a></p>`,
+      html: renderBrandedEmail({
+        locale: 'en',
+        title: label,
+        bodyHtml: `The ${destacado(label)} alert was triggered for your company. Check the detail to see what set it off and with which figures.`,
+        ctaLabel: 'View detail',
+        ctaUrl: viewUrl,
+      }),
     }),
     invitation: (companyName: string, acceptUrl: string, invitedByEmail: string) => ({
       subject: `You've been invited to ${companyName} on Macha Finance`,
-      html: `<p><strong>${invitedByEmail}</strong> invited you to join <strong>${companyName}</strong> on Macha Finance.</p><p><a href="${acceptUrl}">Accept invitation</a></p><p>The link expires in 7 days. If you weren't expecting this invitation, ignore this email.</p>`,
+      html: renderBrandedEmail({
+        locale: 'en',
+        title: `You've been invited to ${companyName}`,
+        bodyHtml: `${destacado(invitedByEmail)} invited you to join ${destacado(companyName)} on Macha Finance. Accept the invitation to create your account and start seeing your business clearly.`,
+        ctaLabel: 'Accept invitation',
+        ctaUrl: acceptUrl,
+        footnote:
+          "The link expires in 7 days. If you weren't expecting this invitation, you can safely ignore this email.",
+        showPlainLink: true,
+      }),
     }),
   },
 } as const;
