@@ -154,6 +154,49 @@ describe('renderReportHtml', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 
+  /**
+   * CU-868kt4ap8 — "incluir gráficas". El reporte era solo texto y tablas.
+   */
+  test('la tendencia trae su gráfica, y va ANTES de la tabla', () => {
+    const html = renderReportHtml({
+      ...ENTRADA,
+      data: {
+        ...DATOS_COMPLETOS,
+        revenueTrend: {
+          ...DATOS_COMPLETOS.revenueTrend!,
+          series: [
+            { date: '2026-07-01', revenue: 5000, cogs: 2000, opex: 800, other: 0 },
+            { date: '2026-07-02', revenue: 3000, cogs: 1000, opex: 400, other: 0 },
+          ],
+        },
+      },
+    });
+    expect(html).toContain('<polyline');
+    /*
+     * Se compara DENTRO de su sección, no contra el documento entero: la primera `<table>`
+     * del reporte es la de indicadores, que va antes por diseño. Comparar índices globales
+     * probaría el orden de las secciones, no el de la figura y su tabla.
+     *
+     * Quien abre un reporte quiere primero saber si subió o cayó, y después el número; con
+     * la figura al final, la sección ya se cerró cuando aparece.
+     */
+    const seccion = html.slice(html.indexOf('Evolución de ingresos'));
+    expect(seccion.indexOf('<svg')).toBeLessThan(seccion.indexOf('<table'));
+  });
+
+  test('una serie de un solo punto NO deja un hueco donde iría la gráfica', () => {
+    // El fixture completo tiene un único punto: con menos de dos no hay tendencia que
+    // mostrar, así que se omite en vez de dibujar una mancha.
+    const html = renderReportHtml(ENTRADA);
+    expect(html).toContain('Evolución de ingresos');
+    expect(html).not.toContain('<polyline');
+  });
+
+  test('el desglose de costos trae sus barras', () => {
+    const html = renderReportHtml(ENTRADA);
+    expect(html).toContain('<rect');
+  });
+
   test('dice explícitamente cuándo una sección vino vacía en vez de callarla', () => {
     const html = renderReportHtml({
       ...ENTRADA,
@@ -192,6 +235,25 @@ describe('renderReportPdf', () => {
         reportType: 'executive_summary',
         sections: ['kpis'],
         kpis: DATOS_COMPLETOS.kpis,
+      },
+    });
+    expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe('%PDF-');
+  });
+
+  /** CU-868kt4ap8: la gráfica se dibuja con primitivas, y una serie larga se agrega. */
+  test('dibuja la tendencia sin reventar con una serie de un año', async () => {
+    const serie = Array.from({ length: 366 }, (_, i) => ({
+      date: `2026-01-01`,
+      revenue: 1000 + i,
+      cogs: 400,
+      opex: 100,
+      other: 0,
+    }));
+    const bytes = await renderReportPdf({
+      ...ENTRADA,
+      data: {
+        ...DATOS_COMPLETOS,
+        revenueTrend: { ...DATOS_COMPLETOS.revenueTrend!, series: serie },
       },
     });
     expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe('%PDF-');
