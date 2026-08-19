@@ -1071,6 +1071,16 @@ cobrar/pagar) de una PYME. Da 2-3 insights accionables y concretos para el dueñ
 empresa, en un tono directo y profesional. No inventes cifras que no estén en el
 snapshot. Responde en texto plano, sin markdown.`;
 
+/**
+ * Presupuesto de salida del insight — CU-868ktm2m2.
+ *
+ * Antes era un `1024` suelto en la llamada. El número no era el problema (cinco insights de
+ * dos frases caben de sobra); el problema era que NADIE COMPROBABA si se agotaba, así que
+ * si alguna vez se agotaba el fallo no dejaba rastro. Con nombre y con la comprobación de
+ * abajo, el día que un prompt editado desde /admin pida más de la cuenta, el error lo dice.
+ */
+const INSIGHT_MAX_TOKENS = 1024;
+
 /** On-demand insight narrative (CU-868kfvabk) — the AI narrates, never calculates (CLAUDE.md/PRD). */
 export async function generateInsightNarrative(
   metricsSnapshot: unknown,
@@ -1081,7 +1091,7 @@ export async function generateInsightNarrative(
 
   const stream = anthropic.messages.stream({
     model: anthropicModel,
-    max_tokens: 1024,
+    max_tokens: INSIGHT_MAX_TOKENS,
     system: systemPrompt,
     messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
     tools: [EMIT_INSIGHTS_TOOL],
@@ -1108,8 +1118,38 @@ export async function generateInsightNarrative(
     ? insights.map((i) => i.text).join('\n\n')
     : (textBlock?.text ?? '');
 
-  // Sin insights Y sin texto no hay nada que mostrar: es un fallo, no un insight vacío.
-  if (!narrative) throw new Error('Claude response had neither insights nor text');
+  /*
+   * ═══ EL INSIGHT ERA LA CUARTA SUPERFICIE, Y SE QUEDÓ SIN GUARDA (CU-868ktm2m2) ═══
+   *
+   * `2d802a9` arregló el mismo fallo en tres lugares —reporte, asesor e ingesta— bajo una
+   * sola idea: la llamada a Claude sale BIEN, 200 y sin excepción, y aun así no produce
+   * texto usable; el único indicio es `stop_reason`, y nadie lo miraba. Este camino no
+   * entró en ese arreglo.
+   *
+   * Acá el riesgo es mayor que en el reporte, no menor, porque la herramienta va FORZADA
+   * (`tool_choice`): el modelo no puede contestar en prosa, así que si el JSON de la
+   * herramienta se corta a la mitad no queda bloque de texto al que degradar. Se pierden
+   * las dos salidas a la vez.
+   *
+   * Y el `Error` pelado que había era la otra mitad del problema: salía como 500 sin texto,
+   * el frontend mostraba "No pudimos generar el consejo" y NO QUEDABA NADA que dijera por
+   * qué — ni en la respuesta, ni en el log, ni en Sentry (que hoy no corre en producción).
+   * Un `AiProviderError` sí se traduce a un mensaje que se le puede enseñar a un cliente
+   * (`aiFailureMessage`) y lleva la causa técnica adjunta para el que investigue.
+   *
+   * `stop_reason` se comprueba junto con la ausencia de contenido y no aparte: los dos son
+   * el mismo hecho —la llamada respondió y no hay consejo utilizable— y separarlos daría
+   * dos errores distintos para una sola cosa.
+   */
+  if (message.stop_reason === 'max_tokens' || !narrative) {
+    throw new AiProviderError('incomplete', 'insight_narrative', {
+      cause: new Error(
+        `stop_reason=${message.stop_reason} max_tokens=${INSIGHT_MAX_TOKENS} ` +
+          `output_tokens=${message.usage.output_tokens} insights=${insights.length} ` +
+          `texto=${textBlock?.text.length ?? 0} chars`,
+      ),
+    });
+  }
 
   return {
     insights,
