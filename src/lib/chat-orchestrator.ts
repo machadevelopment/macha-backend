@@ -97,6 +97,16 @@ export async function runChatTurn(params: {
   userMessage: string;
   /** CU-868kt984z. Opcional: sin él el prompt queda como antes, no se rompe el llamador. */
   companyName?: string | null;
+  /**
+   * CU-868ktvqjm: la señal de la petición HTTP, para que cerrar la pestaña o apretar
+   * "Cancelar" detenga DE VERDAD la llamada a Claude en vuelo.
+   *
+   * Hasta acá el turno corría entero pasara lo que pasara del lado del cliente: abortar el
+   * `fetch` soltaba al usuario de la espera pero el modelo seguía escribiendo y los tokens
+   * se gastaban igual. Opcional porque los llamadores que no son una request HTTP —hoy
+   * ninguno, mañana un job— no tienen señal que pasar.
+   */
+  signal?: AbortSignal;
 }): Promise<ChatTurnResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
@@ -113,14 +123,29 @@ export async function runChatTurn(params: {
 
   // Bounded loop: a runaway tool-use cycle should never hang a request indefinitely.
   for (let round = 0; round < 8; round++) {
+    /*
+     * CU-868ktvqjm: la señal va como opción de PETICIÓN (segundo argumento), no dentro del
+     * cuerpo. El SDK la traslada al `fetch` subyacente, así que abortar corta la conexión
+     * con Anthropic en vez de solo dejar de escuchar.
+     *
+     * Se comprueba además ANTES de cada ronda: un turno con herramientas hace varias
+     * llamadas, y sin esto una cancelación que llega entre dos rondas no se notaría hasta
+     * terminar la siguiente — o sea que se pagaría una llamada entera después de que el
+     * usuario ya se fue.
+     */
+    params.signal?.throwIfAborted();
+
     const response = await runAi('chat_turn', () =>
-      anthropic.messages.create({
-        model: anthropicModel,
-        max_tokens: 2048,
-        system: systemPrompt(params.locale, params.companyName),
-        tools: CHAT_TOOLS,
-        messages,
-      }),
+      anthropic.messages.create(
+        {
+          model: anthropicModel,
+          max_tokens: 2048,
+          system: systemPrompt(params.locale, params.companyName),
+          tools: CHAT_TOOLS,
+          messages,
+        },
+        params.signal ? { signal: params.signal } : undefined,
+      ),
     );
 
     callCount++;

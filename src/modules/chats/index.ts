@@ -103,7 +103,7 @@ export const chats_ = new Elysia({ prefix: '/chats' })
   })
   .post(
     '/:id/messages',
-    async ({ companyId, userId, role, params, body, set, db }) => {
+    async ({ companyId, userId, role, params, body, set, db, request }) => {
       assertClientCapability(role, 'chat', set);
 
       // CU-868kfvaah: 'ai' token-bucket (chat/insight) — se descubrió en una auditoría
@@ -140,14 +140,59 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         .from(companies)
         .where(eq(companies.id, companyId));
 
-      const result = await runChatTurn({
-        db,
-        companyId,
-        locale,
-        history,
-        userMessage: body.content,
-        companyName: company?.name,
-      });
+      /*
+       * ═══ CANCELAR DE VERDAD (CU-868ktvqjm) ═══
+       *
+       * `request.signal` se aborta cuando el cliente corta la conexión. Pasarla hasta la
+       * llamada a Claude es lo que convierte "dejar de esperar" en "cancelar": antes el
+       * turno corría entero pasara lo que pasara del lado del usuario, así que apretar el
+       * botón soltaba la pantalla pero los tokens se gastaban igual.
+       */
+      let result: Awaited<ReturnType<typeof runChatTurn>>;
+      try {
+        result = await runChatTurn({
+          db,
+          companyId,
+          locale,
+          history,
+          userMessage: body.content,
+          companyName: company?.name,
+          signal: request.signal,
+        });
+      } catch (e) {
+        if (!request.signal.aborted) throw e;
+
+        /*
+         * ═══ QUÉ SE GUARDA DE UN TURNO CANCELADO ═══
+         *
+         * LA PREGUNTA SÍ. El usuario la escribió y la mandó; perderla porque decidió no
+         * esperar la respuesta sería castigar una decisión razonable, y al recargar el
+         * hilo vería que su mensaje se evaporó. Se guarda sola, sin respuesta: el hilo
+         * queda con una pregunta sin contestar, que es exactamente lo que pasó.
+         *
+         * LA RESPUESTA NO. Lo que hubiera llegado está cortado a mitad de frase, y una
+         * narrativa truncada ya se trató como fallo y no como contenido en CU-868krw2wn —
+         * ahí porque quedaba inmutable en `report_versions`, acá porque además volvería al
+         * historial y contaminaría el turno siguiente (CU-868krw2gx).
+         *
+         * LO QUE NO SE PUEDE SABER: los tokens de la llamada que se abortó. La API no
+         * devuelve `usage` de una petición que nunca terminó, y `ai_usage_events` no admite
+         * cifras inventadas — es el ledger con el que se calcula el costo real. Las rondas
+         * que SÍ completaron antes de la cancelación ya insertaron su fila dentro de
+         * `runChatTurn`, así que lo que se pierde es a lo sumo una ronda, no el turno.
+         */
+        await db.insert(chatMessages).values({
+          companyId,
+          chatId: params.id,
+          segmentId: segment.id,
+          role: 'user',
+          content: body.content,
+        });
+        // 499 (Client Closed Request): nadie lo va a leer —el cliente ya se fue— pero deja
+        // el hecho en los logs de acceso separado de un 500, que sí sería un fallo nuestro.
+        set.status = 499;
+        return { error: 'cancelled' };
+      }
 
       await db.insert(chatMessages).values({
         companyId,
