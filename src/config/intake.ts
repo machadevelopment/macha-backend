@@ -49,8 +49,28 @@ export const intakeConfig = {
    *
    * Subirlo vuelve a alargar la espera; bajarlo multiplica las llamadas (y el prompt de
    * sistema se re-envía en cada una, aunque el caché de prefijo absorbe casi todo eso).
+   *
+   * ═══ 4.000 → 6.300, 2026-08-19: EL TRABAJO 2 DE ARRIBA ESTÁ MAL DESCRITO ═══
+   *
+   * La medición de las 216 llamadas reales de House Products (ver `lib/sheet-batching.ts`)
+   * dejó ver que "el presupuesto de salida ES el reloj" no se sostiene. El total de tokens de
+   * salida de una hoja no depende del tamaño del lote, así que
+   * `tandas × s_por_llamada ≈ filas × tokens_por_fila / (rendimiento × concurrencia)`: el
+   * lote se cancela y el tiempo de pared sale igual. Medido sobre `Ventas` (18.034 filas,
+   * ~115 tok/s, concurrencia 10): lotes de 57 filas → 16,1 min; de 88 → 16,3 min; de 90 →
+   * 16,7 min. Partir más fino no acorta nada.
+   *
+   * Lo que sí arruina el tiempo es quedarse con MENOS lotes que la ventana de concurrencia:
+   * con lotes de 888 filas son 21 llamadas en 3 tandas de ~471 s = 23,6 min, porque ya no hay
+   * con qué llenar los 10 cupos. Ese —y no la latencia por llamada— es el trabajo 2 de este
+   * número. El 40.000 → 4.000 de agosto fue una mejora real, pero por este motivo.
+   *
+   * El 6.300 sale de mantener el lote donde estaba mientras el estimador se corrige: subió a
+   * 70 tokens/fila (era 45, medido: 61), y 6.300/70 = 90 filas por llamada — prácticamente
+   * las 88 con las que corrió producción. Sin este ajuste, corregir el estimador habría
+   * encogido el lote a 57 y multiplicado las llamadas un 54 % sin ganar un segundo.
    */
-  outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 4_000),
+  outputTokenBudget: Number(process.env.INTAKE_OUTPUT_TOKEN_BUDGET || 6_300),
   /**
    * Cuántos lotes se mandan a Claude EN PARALELO.
    *

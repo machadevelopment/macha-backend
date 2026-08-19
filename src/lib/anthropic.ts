@@ -235,7 +235,7 @@ export type ClassifiedRow = {
 };
 
 /** Lo que el modelo dice de UNA fila. `skip` = "no es un dato", dicho explícitamente. */
-type VeredictoCrudo = {
+export type VeredictoCrudo = {
   i: number;
   e: ClassifiedRow['targetEntity'] | 'skip';
   t: RowVerdict['type'];
@@ -308,6 +308,16 @@ export function construirFilas(
 
 export type ClassifySheetResult = {
   rows: ClassifiedRow[];
+  /**
+   * Los veredictos CRUDOS del modelo para este lote, ya canonicalizados y sin las filas de
+   * costo que `construirFilas` deriva.
+   *
+   * Se expone para que el worker pueda medir si la hoja es HOMOGÉNEA y dejar de mandarle
+   * lotes al modelo (ver `lib/sheet-consensus.ts`). Tiene que ser esto y no `rows`: en `rows`
+   * cada venta con costo aparece dos veces —el ingreso y su `cogs` derivado— y contar la
+   * derivada haría ver como mezclada una hoja perfectamente uniforme.
+   */
+  veredictos: { e: string; t: RowVerdict['type']; c: string | null; cf: number }[];
   /**
    * El mapa de columnas que este lote usó para armar los valores.
    *
@@ -767,6 +777,22 @@ export async function classifySheetRows(params: {
    * en la mitad de la hoja. No se agrega a `rows` para no correr los índices.
    */
   headerRow?: unknown[];
+  /**
+   * Fija el NOMBRE de la categoría al que ya usó esta hoja, cuando este lote la bautizó
+   * distinto (`ventas` donde el lote 1 dijo `sales`).
+   *
+   * Es un callback y no una tabla porque la política de sinonimia no es asunto de este módulo
+   * —vive en `lib/sheet-consensus.ts`— y porque el estado que acumula es POR HOJA, igual que
+   * `columnsCanonicas`: el llamador es el único que sabe qué hoja va por dónde.
+   *
+   * Se aplica a los veredictos ANTES de armar las filas, así que la fila de `cogs` derivada de
+   * una venta conserva su `costo_de_ventas` fijo y no entra en el juego de nombres.
+   */
+  canonizarCategoria?: (
+    entity: string,
+    type: RowVerdict['type'],
+    category: string | null,
+  ) => string | null;
 }): Promise<ClassifySheetResult> {
   assertZdrModel(anthropicIntakeModel);
   const anthropic = getClient();
@@ -844,6 +870,33 @@ export async function classifySheetRows(params: {
 
   const { porIndice, fueraDeRango } = indexarVeredictos(parsed.rows, params.rows.length);
 
+  /*
+   * ═══ EL NOMBRE DE LA CATEGORÍA SE UNIFICA ACÁ, ANTES DE ARMAR LAS FILAS ═══
+   *
+   * Cada lote pide su clasificación por separado, así que nada obliga a que dos lotes de la
+   * misma hoja bauticen igual el mismo concepto. En producción no lo hicieron: sobre filas
+   * indistinguibles de `Ventas`, un lote devolvió `sales`, otro `ventas` y otro
+   * `product_sales` (2026-08-18, House Products). El cliente terminó con tres categorías en su
+   * dashboard para un solo rubro, y ninguna agrupación por categoría vuelve a cuadrar.
+   *
+   * Va antes de `construirFilas` y no después para que la fila de `cogs` que se DERIVA de una
+   * venta —con su `costo_de_ventas` fijo— no participe del renombrado.
+   */
+  if (params.canonizarCategoria) {
+    for (const v of porIndice.values()) {
+      if (v.e === 'skip') continue;
+      v.c = params.canonizarCategoria(v.e, v.t, v.c);
+    }
+  }
+
+  /** Los veredictos del modelo, ya canonicalizados: es lo que mide la homogeneidad de la hoja. */
+  const veredictos = [...porIndice.values()].map((v) => ({
+    e: v.e as string,
+    t: v.t,
+    c: v.c,
+    cf: v.cf,
+  }));
+
   if (hayDesplazamiento(parsed.rows, params.rows.length)) {
     throw new SheetIndexShiftError(params.sheetName, params.rows.length);
   }
@@ -875,6 +928,7 @@ export async function classifySheetRows(params: {
       // Lo que sí vino del primer intento, más lo que rescató el reintento. Los payloads del
       // reintento ya se armaron contra las MISMAS filas crudas, así que se concatenan tal cual.
       rows: [...construirFilas(porIndice, params, columnas), ...reintento.rows],
+      veredictos: [...veredictos, ...reintento.veredictos],
       columns: columnas,
       // `unclassifiedRows` del reintento indexa SU lote; se remapea a los índices originales.
       unclassifiedRows: reintento.unclassifiedRows.map((k) => faltantes[k]!),
@@ -936,6 +990,7 @@ export async function classifySheetRows(params: {
 
   return {
     rows,
+    veredictos,
     columns: columnas,
     /*
      * Las filas que ni el primer intento ni el reintento cubrieron. NO se pierden: el worker
