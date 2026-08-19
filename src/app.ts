@@ -106,56 +106,102 @@ const adminApi = new Elysia()
   .use(adminPlans);
 
 export function createApp() {
-  return new Elysia()
-    .use(clientApi)
-    .use(adminApi)
-    .use(register)
-    .use(creditsTopup)
-    .use(billingWebhooks)
-    .use(me)
-    .use(transactionsList)
-    .use(members)
-    .use(invitationAcceptance)
-    .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
-    .onError(({ error, set }) => {
-      // CU-868kmvaf7: los errores de CLIENTE no van a Sentry. Un token vencido es el
-      // evento más rutinario que existe —los access tokens de WorkOS duran minutos— y
-      // antes generaba un evento cada vez. Con tráfico real eso ahoga los errores de
-      // verdad, que es peor que no tener monitoreo: da la sensación de estar mirando.
-      //
-      // Se mira `set.status` y no el tipo de error a propósito: cubre de una vez los
-      // 401 de sesión, los 403 de capacidad y los 404, sin tener que enumerar clases.
-      // Lo que no clasificó ningún guard sigue subiendo entero.
-      const status = typeof set.status === 'number' ? set.status : 500;
-      const esErrorDeCliente = status >= 400 && status < 500;
-      if (!esErrorDeCliente) Sentry.captureException(error);
+  return (
+    new Elysia()
+      /*
+       * ═══ VA ARRIBA DE LOS `.use(...)`, Y ESO ES LO QUE LO HACE FUNCIONAR ═══
+       *
+       * Este bloque vivía al FINAL de la cadena y no se ejecutaba para casi nada. Los hooks de
+       * Elysia aplican a lo que se monta DESPUÉS de registrarlos, así que un `onError` al final
+       * no alcanza a ninguno de los plugins de arriba — o sea, a toda la app.
+       *
+       * Se comprobó midiendo, no leyendo: un 401 de `bearer.ts` salía como texto plano y sin
+       * `content-type`, aunque este handler dijera lo contrario. Mover el bloque acá arriba lo
+       * arregló; `{ as: 'global' }` por sí solo NO bastó, y se conserva porque es lo que hace
+       * que además cubra los plugins con nombre propio.
+       *
+       * Los errores de negocio de más abajo (IA, facturación) SÍ funcionaban desde siempre
+       * porque sus módulos los lanzan durante el handler, no en un `derive` de un plugin
+       * montado antes. Esa asimetría es justo lo que hacía difícil de ver el problema.
+       */
+      .onError({ as: 'global' }, ({ error, set }) => {
+        // CU-868kmvaf7: los errores de CLIENTE no van a Sentry. Un token vencido es el
+        // evento más rutinario que existe —los access tokens de WorkOS duran minutos— y
+        // antes generaba un evento cada vez. Con tráfico real eso ahoga los errores de
+        // verdad, que es peor que no tener monitoreo: da la sensación de estar mirando.
+        //
+        // Se mira `set.status` y no el tipo de error a propósito: cubre de una vez los
+        // 401 de sesión, los 403 de capacidad y los 404, sin tener que enumerar clases.
+        // Lo que no clasificó ningún guard sigue subiendo entero.
+        const status = typeof set.status === 'number' ? set.status : 500;
+        const esErrorDeCliente = status >= 400 && status < 500;
+        if (!esErrorDeCliente) Sentry.captureException(error);
 
-      // CU-868kmr192: el fallo del proveedor de IA se traduce ANTES de responder.
-      // Sin esto, Elysia serializaba el error del SDK tal cual y el cliente recibía
-      // el JSON de Anthropic completo — incluido "Your credit balance is too low to
-      // access the Anthropic API", que le decía a una empresa con créditos de sobra
-      // que se había quedado sin saldo, y con `request_id` del proveedor de regalo.
-      // CU-868kmwn3q: mismo tratamiento y por la misma razón que el de IA — un error de
-      // configuración del servidor no es información del usuario, y el texto crudo
-      // llevaba dentro el nombre de la variable de entorno.
-      if (error instanceof BillingNotConfiguredError) {
-        set.status = BILLING_NOT_CONFIGURED_STATUS;
-        return { error: BILLING_NOT_CONFIGURED_MESSAGE };
-      }
+        // CU-868kmr192: el fallo del proveedor de IA se traduce ANTES de responder.
+        // Sin esto, Elysia serializaba el error del SDK tal cual y el cliente recibía
+        // el JSON de Anthropic completo — incluido "Your credit balance is too low to
+        // access the Anthropic API", que le decía a una empresa con créditos de sobra
+        // que se había quedado sin saldo, y con `request_id` del proveedor de regalo.
+        // CU-868kmwn3q: mismo tratamiento y por la misma razón que el de IA — un error de
+        // configuración del servidor no es información del usuario, y el texto crudo
+        // llevaba dentro el nombre de la variable de entorno.
+        if (error instanceof BillingNotConfiguredError) {
+          set.status = BILLING_NOT_CONFIGURED_STATUS;
+          return { error: BILLING_NOT_CONFIGURED_MESSAGE };
+        }
 
-      if (error instanceof BillingProviderError) {
-        set.status = BILLING_PROVIDER_STATUS;
-        return { error: BILLING_PROVIDER_MESSAGE };
-      }
+        if (error instanceof BillingProviderError) {
+          set.status = BILLING_PROVIDER_STATUS;
+          return { error: BILLING_PROVIDER_MESSAGE };
+        }
 
-      if (error instanceof AiProviderError) {
-        set.status = aiFailureStatus(error.failure);
-        return { error: aiFailureMessage(error.failure) };
-      }
+        if (error instanceof AiProviderError) {
+          set.status = aiFailureStatus(error.failure);
+          return { error: aiFailureMessage(error.failure) };
+        }
 
-      // Para todo lo demás devuelve `undefined` a propósito: Sentry registra y Elysia
-      // sigue con su manejo por defecto (el status que el guard ya puso en `set`).
-    });
+        /*
+         * ═══ TODO ERROR SALE EN JSON, NUNCA EN TEXTO PLANO (2026-08-19) ═══
+         *
+         * Acá se devolvía `undefined` para dejar que Elysia hiciera su manejo por defecto. Ese
+         * default serializa el `error.message` A SECAS, sin `Content-Type: application/json`,
+         * y eso rompió el frontend en producción.
+         *
+         * El recorrido completo: `tenant.derive.ts` respondió `403 Not a member of the
+         * requested company` —correctísimo— y el proxy del BFF, que hacía `await res.json()`,
+         * explotó con `SyntaxError: Unexpected token 'N', "Not a memb"... is not valid JSON`.
+         * El usuario vio un 500 opaco donde el backend había explicado exactamente qué pasaba.
+         * El frontend tenía su parte de culpa y ya se arregló (macha-frontend#168), pero la
+         * causa de fondo es que este contrato era inconsistente consigo mismo: los errores de
+         * negocio de arriba SÍ devuelven `{ error }` y los de guard no.
+         *
+         * ═══ EL MENSAJE SE FILTRA POR STATUS ═══
+         *
+         * 4xx: el mensaje del guard es información para el cliente y se manda tal cual — "no
+         * eres miembro de esa empresa", "la empresa está suspendida", "falta X-Company-Id" son
+         * justo lo que quien integra necesita leer.
+         *
+         * 5xx: NUNCA el mensaje real. Un error no manejado lleva adentro rutas de archivo,
+         * nombres de variables de entorno y, con un error de Postgres, fragmentos de la
+         * consulta. Ya pasó dos veces (CU-868kmr192 con el JSON de Anthropic, CU-868kmwn3q con
+         * el nombre de una variable de entorno) y el arreglo fue el mismo: traducir antes de
+         * responder. Se generaliza acá para que el próximo error no manejado no vuelva a
+         * filtrar nada — Sentry ya recibió el detalle unas líneas más arriba.
+         */
+        const mensaje = error instanceof Error ? error.message : String(error);
+        return { error: esErrorDeCliente ? mensaje : 'Unexpected server error' };
+      })
+      .use(clientApi)
+      .use(adminApi)
+      .use(register)
+      .use(creditsTopup)
+      .use(billingWebhooks)
+      .use(me)
+      .use(transactionsList)
+      .use(members)
+      .use(invitationAcceptance)
+      .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
+  );
 }
 
 export type App = ReturnType<typeof createApp>;
