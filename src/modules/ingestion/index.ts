@@ -10,7 +10,7 @@ import { countCsvRows } from '@/lib/csv-inspect';
 import { fileMentionsCurrency, isScannable } from '@/lib/currency-scan';
 import { counterCurrency, loadFxCatalog, type Currency } from '@/lib/fx';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
-import { revertDocument } from '@/lib/promotion';
+import { cancelDocumentRows, revertDocument } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
@@ -253,9 +253,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * lote se termina y se cobra. Cancelar acota el gasto, no lo corta en seco. Prometer lo
    * segundo sería mentir sobre lo que el sistema puede hacer.
    *
-   * Lo ya procesado NO se borra: esos lotes se pagaron y sus huellas quedan registradas, así
-   * que volver a subir el archivo cobra solo lo que falta. Cancelar es barato justamente
-   * porque la deduplicación existe.
+   * CU-868kttzb1: lo ya promovido SÍ se deshace (soft-delete), igual que al revertir.
+   *
+   * Antes no, con este razonamiento: "esos lotes se pagaron y sus huellas quedan
+   * registradas, así que volver a subir cobra solo lo que falta". La primera mitad seguía
+   * siendo cierta —las huellas no se borran nunca— pero la segunda escondía un agujero:
+   * `findSeenFingerprints` solo deja bloquear a las huellas de documentos CON DATOS VIVOS, y
+   * `cancelled` está excluido de esa lista. O sea que las filas se quedaban en el ledger sin
+   * nada que impidiera volver a insertarlas. Resubir el archivo duplicaba los números.
    */
   .post('/:id/cancel', async ({ companyId, role, params, set, db }) => {
     // Mismo permiso que revertir: las dos son "deshacer mi propia carga".
@@ -295,12 +300,22 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       .from(companies)
       .where(eq(companies.id, companyId));
 
+    /*
+     * CU-868kttzb1: cancelar DESHACE lo que alcanzó a promoverse.
+     *
+     * Antes esto solo cambiaba el estado. La promoción es parcial e incremental (migración
+     * 0020), así que una carga cancelada a medias dejaba filas VIVAS — y como
+     * `findSeenFingerprints` excluye `cancelled` de los estados con datos vivos, sus huellas
+     * dejaban de bloquear: resubir el mismo archivo las metía otra vez. Ese era el bug de
+     * los números duplicados.
+     *
+     * El `errorReason` se escribe en el mismo update de estado que hace `cancelDocumentRows`
+     * no: se pone después, sobre la fila que esa función ya dejó en `cancelled`.
+     */
+    await cancelDocumentRows(db, companyId, params.id);
     await db
       .update(documents)
-      .set({
-        status: 'cancelled',
-        errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser(),
-      })
+      .set({ errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser() })
       .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
 
     return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: false };

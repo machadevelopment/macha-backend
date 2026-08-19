@@ -106,7 +106,7 @@ mock.module('@/queue', () => ({
 }));
 
 const { startExcelIngestWorker } = await import('@/queue/workers/excel-ingest');
-const { revertDocument } = await import('@/lib/promotion');
+const { cancelDocumentRows, revertDocument } = await import('@/lib/promotion');
 const { getOrComputeMonthlyAmounts, refreshExistingRollups } = await import('@/lib/rollups');
 const { drizzle } = await import('drizzle-orm/postgres-js');
 const schema = await import('@/db/schema');
@@ -231,5 +231,66 @@ describe('cargar → revertir → volver a cargar, con el worker real', () => {
     expect(r!.status).toBe('promoted');
     expect(r!.row_count).toBe(0);
     expect(String(r!.error_reason ?? '')).toMatch(/ya ten|already had/i);
+  });
+});
+
+/**
+ * ═══ CANCELAR A MEDIAS Y RESUBIR (CU-868kttzb1) ═══
+ *
+ * El reporte de QA: *"el usuario al cargar de nuevo el file tiene que revertir el anterior
+ * para que funcione bien, si no duplica números"*.
+ *
+ * Los dos .xlsx que mandó Keneth resultaron IDÉNTICOS byte a byte —mismo MD5— así que no era
+ * un archivo distinto ni un mapa de columnas cambiado. Era el estado `cancelled` mintiendo:
+ * la promoción es parcial e incremental (migración 0020), así que cancelar dejaba filas
+ * VIVAS, pero `findSeenFingerprints` excluye `cancelled` de los estados con datos vivos —con
+ * el argumento de que "ninguno deja filas vivas en producción"— así que sus huellas no
+ * bloqueaban y resubir el mismo archivo las insertaba otra vez.
+ *
+ * El caso no estaba cubierto: los tests de arriba prueban cargar→revertir→recargar y el
+ * archivo que CRECE, pero ninguno cancelaba a mitad de camino.
+ */
+describe('cancelar a medias y volver a subir el mismo archivo (CU-868kttzb1)', () => {
+  /*
+   * Punto de partida limpio. Los describes de arriba dejan una carga VIVA, y sus huellas sí
+   * bloquean —correctamente— así que sin esto la primera subida de acá no ingeriría nada y el
+   * test probaría otra cosa. Se deshace como lo haría `revert`: soft-delete + estado, que es
+   * justo el camino que ya está probado más arriba.
+   */
+  beforeAll(async () => {
+    await owner`update transactions set deleted_at = now() where company_id = ${companyId}`;
+    await owner`update documents set status = 'reverted' where company_id = ${companyId}`;
+    await refreshExistingRollups(drizzle(owner, { schema }) as never, companyId);
+  });
+
+  test('1) cancelar deshace las filas que alcanzaron a promoverse', async () => {
+    const db = drizzle(owner, { schema }) as never;
+    const doc = await subir('cancelada.xlsx');
+    expect(await contarTx()).toBe(1);
+
+    await cancelDocumentRows(db, companyId, doc);
+    await refreshExistingRollups(db, companyId);
+
+    expect(await estado(doc)).toBe('cancelled');
+    // Lo que la persona cree que hizo al apretar "cancelar": sus cifras vuelven a como
+    // estaban. Antes esta fila se quedaba viva y nadie la veía.
+    expect(await contarTx()).toBe(0);
+    expect(await dashboard()).toBe(0);
+  });
+
+  test('2) y resubir el MISMO archivo lo deja UNA sola vez, no dos', async () => {
+    /*
+     * EL BUG, en una línea. Antes acá salían 2 transacciones y el dashboard mostraba el
+     * doble: la fila de la carga cancelada seguía viva y su huella ya no bloqueaba, así que
+     * la segunda carga la insertaba de nuevo.
+     *
+     * Y explica el rodeo que descubrió QA —revertir antes de resubir—: revertir SÍ hacía
+     * soft-delete, así que por ese camino no se duplicaba.
+     */
+    const doc = await subir('cancelada.xlsx');
+
+    expect(await estado(doc)).toBe('promoted');
+    expect(await contarTx()).toBe(1);
+    expect(await dashboard()).toBe(MONTO);
   });
 });

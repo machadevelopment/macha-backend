@@ -60,13 +60,18 @@ export const INTAKE_MESSAGES = {
       `como ${campos.join(', ')}. Si el archivo viene de otro sistema o alguien movió ` +
       `columnas, revisa que las cifras cuadren.`,
     /*
-     * El texto NO dice "cancelado" a secas: dice qué pasó con lo ya procesado y qué costará
-     * volver a intentarlo. Es la pregunta que se hace cualquiera después de cancelar algo a
-     * medias, y la respuesta es buena — por eso conviene darla sin que la pidan.
+     * El texto NO dice "cancelado" a secas: dice qué pasó con lo ya procesado. Es la pregunta
+     * que se hace cualquiera después de cancelar algo a medias.
+     *
+     * CU-868kttzb1: la respuesta CAMBIÓ. Antes decía que lo procesado "quedó guardado" y que
+     * resubir solo cobraría lo que faltaba. Lo primero era cierto y era justamente el bug —
+     * esas filas vivas se volvían a insertar al resubir, porque las huellas de un documento
+     * `cancelled` no bloquean. Ahora cancelar deshace lo que alcanzó a entrar, así que el
+     * mensaje dice eso, que además es lo que la persona creyó estar haciendo al cancelar.
      */
     cancelledByUser: () =>
-      `Cancelaste esta carga. Lo que alcanzamos a procesar quedó guardado, así que si vuelves ` +
-      `a subir el mismo archivo solo cobraremos lo que falte.`,
+      `Cancelaste esta carga. Deshicimos lo que alcanzamos a procesar, así que tus cifras ` +
+      `quedaron como estaban antes de subirla.`,
   },
   en: {
     unsupportedType: (mime: string) => `Unsupported file type: ${mime}. Use .xlsx, .xls or .csv.`,
@@ -96,8 +101,8 @@ export const INTAKE_MESSAGES = {
       `${campos.join(', ')} has moved. If this file comes from a different system or ` +
       `someone rearranged columns, double-check that the figures add up.`,
     cancelledByUser: () =>
-      `You cancelled this upload. Whatever we had already processed is saved, so if you ` +
-      `upload the same file again we'll only charge for what's left.`,
+      `You cancelled this upload. We undid whatever had already been processed, so your ` +
+      `figures are back to how they were before you uploaded it.`,
   },
 } as const;
 
