@@ -23,13 +23,35 @@ export async function startSubscriptionCheckout(params: {
   cancelUrl: string;
   companyId: string;
   planName?: string;
+  /**
+   * Plan destino de un CAMBIO de plan (CU-868ku66du).
+   *
+   * Con este campo el checkout deja de ser solo el del alta: el webhook necesita saber a qué
+   * plan mover la suscripción cuando el pago se confirme, y el `metadata` del proveedor es el
+   * único canal que sobrevive al viaje ida y vuelta por Recurrente.
+   *
+   * Sin él, el metadata sigue siendo `kind: 'subscription'` exactamente como antes — el alta
+   * de empresa no cambia de comportamiento.
+   */
+  targetPlanCode?: string;
 }): Promise<CheckoutResult> {
   const checkout = await recurrenteCreateSubscriptionCheckout({
     amountUsdCents: params.amountUsdCents,
     successUrl: params.successUrl,
     cancelUrl: params.cancelUrl,
     planName: params.planName,
-    metadata: { companyId: params.companyId, kind: 'subscription' },
+    metadata: params.targetPlanCode
+      ? {
+          companyId: params.companyId,
+          kind: 'plan_change',
+          targetPlanCode: params.targetPlanCode,
+          // El monto viaja también: el webhook lo escribe en `amountUsdCents` de la
+          // suscripción, y leerlo del catálogo en ese momento daría el precio de HOY y no el
+          // que el cliente aceptó pagar. Los precios del catálogo son provisionales y pueden
+          // moverse entre que alguien abre el checkout y lo completa.
+          targetAmountUsdCents: String(params.amountUsdCents),
+        }
+      : { companyId: params.companyId, kind: 'subscription' },
   });
   return { checkoutUrl: checkout.checkout_url, providerCheckoutId: checkout.id };
 }

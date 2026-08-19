@@ -44,15 +44,68 @@ import { companies, users } from '@/db/schema';
  * —una fila borrada, una carrera—, se cae al de la empresa antes que fallar: un reporte en
  * el idioma equivocado es un defecto; un reporte que no se genera es una caída.
  */
+/**
+ * ═══ EL IDIOMA QUE LA PANTALLA ESTÁ MOSTRANDO GANA, Y SE PERSISTE (CU-868ku6pp9) ═══
+ *
+ * Lo de arriba resolvió de dónde sale el idioma, pero dejó un hueco que Jose encontró:
+ * plataforma completamente en inglés, reporte generado en español.
+ *
+ * El motivo está anotado a propósito en el frontend (`lib/i18n/persist-locale.ts`): si el
+ * `PUT /me/locale` que dispara el selector falla por algo transitorio —sesión a punto de
+ * vencer, red— el fallo SE TRAGA para que la interfaz igual cambie de idioma sin trabar a
+ * quien lo apretó. Decisión razonable, con una consecuencia que no lo es: la cookie (lo que
+ * el usuario ve) y `users.locale` (lo que el backend usa para escribir) quedan
+ * desincronizados **en silencio y de forma indefinida**, hasta que alguien vuelva a tocar el
+ * selector y esa llamada sí funcione.
+ *
+ * Reintentar el `PUT` no arregla la clase de bug: siempre puede fallar la última vez. Lo que
+ * sí la arregla es que **cada petición que genera contenido lleve el idioma que la pantalla
+ * está mostrando**, y que verlo distinto al guardado sea suficiente para corregir el guardado.
+ * Así el sistema se sana solo en la siguiente cosa que el usuario pida, sin depender de que un
+ * clic concreto haya tenido suerte.
+ *
+ * `visible` NO es un dato de seguridad y por eso se acepta del cliente sin ceremonia: el peor
+ * caso de mentir es recibir tu propio reporte en el otro idioma. Se valida que sea `es`/`en` y
+ * nada más.
+ *
+ * La escritura es oportunista: si falla, se sigue con el idioma correcto igual. Persistirlo es
+ * lo que mantiene las TRES superficies de acuerdo —reporte, chat y el correo que avisa que el
+ * reporte está listo—, porque el correo se manda desde un worker que no tiene ninguna cookie
+ * a la vista.
+ */
 export async function localeDeContenido(
   db: DB,
   companyId: string,
   userId: string,
+  visible?: string | null,
 ): Promise<'es' | 'en'> {
+  const deLaPantalla = visible === 'es' || visible === 'en' ? visible : null;
+
   const [usuario] = await db
     .select({ locale: users.locale })
     .from(users)
     .where(eq(users.id, userId));
+
+  if (deLaPantalla) {
+    // Solo se escribe si de verdad cambió: un UPDATE por cada reporte generado ensucia el
+    // `updated_at` de la fila y no aporta nada.
+    if (usuario && usuario.locale !== deLaPantalla) {
+      await db
+        .update(users)
+        .set({ locale: deLaPantalla })
+        .where(eq(users.id, userId))
+        .catch((err: unknown) => {
+          // Que no se pueda persistir la preferencia no puede tumbar la generación del
+          // contenido: se responde en el idioma correcto y la próxima vez se reintenta solo.
+          console.warn(
+            `[locale] no se pudo sincronizar users.locale=${deLaPantalla} para ${userId}:`,
+            err,
+          );
+        });
+    }
+    return deLaPantalla;
+  }
+
   if (usuario?.locale) return usuario.locale;
 
   const [empresa] = await db
