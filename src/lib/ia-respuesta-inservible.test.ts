@@ -5,6 +5,7 @@ import { AiProviderError } from '@/lib/ai-errors';
  * ═══════════════════════════════════════════════════════════════════════════════════════
  * UNA RESPUESTA CORTADA O VACÍA NO ES UNA RESPUESTA
  * CU-868krw2wn (reportes a medias) · CU-868krw2gx (el asesor no responde)
+ * CU-868ktm2m2 (el consejo diario devuelve error, sin decir por qué)
  * ═══════════════════════════════════════════════════════════════════════════════════════
  *
  * Macha reportó dos cosas que parecían distintas:
@@ -48,6 +49,9 @@ let respuestas: RespuestaFingida[] = [];
 let llamadas = 0;
 let maxTokensPedido = 0;
 let mensajesDeLaUltimaLlamada: unknown[] = [];
+let senalDeLaUltimaLlamada: AbortSignal | undefined;
+/** CU-868ktvqjm: permite abortar justo cuando una ronda respondió. */
+let abortarTrasLaPrimeraLlamada: AbortController | undefined;
 
 const siguiente = (): RespuestaFingida => {
   const r = respuestas[llamadas] ?? respuestas[respuestas.length - 1]!;
@@ -70,15 +74,21 @@ mock.module('@anthropic-ai/sdk', () => ({
         maxTokensPedido = params.max_tokens;
         return { finalMessage: async () => conUso(siguiente()) };
       },
-      create: async (params: { messages: unknown[] }) => {
+      create: async (params: { messages: unknown[] }, options?: { signal?: AbortSignal }) => {
         mensajesDeLaUltimaLlamada = params.messages;
-        return conUso(siguiente());
+        // CU-868ktvqjm: se guarda para comprobar que la señal llega hasta el SDK. Sin eso,
+        // "cancelar" sería solo dejar de escuchar mientras la llamada sigue y se paga.
+        senalDeLaUltimaLlamada = options?.signal;
+        const r = conUso(siguiente());
+        abortarTrasLaPrimeraLlamada?.abort();
+        abortarTrasLaPrimeraLlamada = undefined;
+        return r;
       },
     };
   },
 }));
 
-const { generateReportNarrative } = await import('@/lib/anthropic');
+const { generateReportNarrative, generateInsightNarrative } = await import('@/lib/anthropic');
 const { runChatTurn } = await import('@/lib/chat-orchestrator');
 
 const texto = (t: string): RespuestaFingida => ({
@@ -109,6 +119,8 @@ beforeEach(() => {
   llamadas = 0;
   maxTokensPedido = 0;
   mensajesDeLaUltimaLlamada = [];
+  senalDeLaUltimaLlamada = undefined;
+  abortarTrasLaPrimeraLlamada = undefined;
   respuestas = [texto('Todo bien.')];
 });
 
@@ -242,5 +254,178 @@ describe('turno del asesor (CU-868krw2gx)', () => {
     const ultimo = mensajesDeLaUltimaLlamada.at(-1) as { role: string; content: unknown[] };
     expect(ultimo.role).toBe('user');
     expect(JSON.stringify(ultimo.content)).toContain('ERROR');
+  });
+});
+
+/**
+ * ═══ LA CUARTA SUPERFICIE: EL CONSEJO DIARIO (CU-868ktm2m2) ═══
+ *
+ * Macha reportó "Daily Financial Advice me tira error", con 250 créditos en pantalla — o
+ * sea que no era saldo. `generateInsightNarrative` quedó FUERA del arreglo de arriba: era
+ * el único de los cuatro caminos que no miraba `stop_reason`, y en vez de un error de
+ * dominio lanzaba un `Error` pelado que salía como 500 sin texto. El usuario veía "no
+ * pudimos generar el consejo" y no quedaba rastro de por qué en ningún lado.
+ *
+ * Y acá el riesgo es MAYOR que en el reporte: la herramienta va forzada (`tool_choice`),
+ * así que si su JSON se corta no queda bloque de texto al que degradar. Se pierden las dos
+ * salidas a la vez.
+ */
+const insightsDe = (...textos: string[]): RespuestaFingida => ({
+  stop_reason: 'tool_use',
+  content: [
+    {
+      type: 'tool_use',
+      id: 'tu_ins',
+      name: 'emit_insights',
+      input: { insights: textos.map((text) => ({ category: 'financial', text })) },
+    },
+  ],
+});
+
+describe('el consejo diario no se degrada en silencio (CU-868ktm2m2)', () => {
+  test('una respuesta normal devuelve los insights y su texto', async () => {
+    respuestas = [insightsDe('Cobra las facturas vencidas.', 'El margen cayó dos puntos.')];
+
+    const r = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt');
+
+    expect(r.insights).toHaveLength(2);
+    // El texto plano se RECONSTRUYE desde los insights: `insight_requests.result` lo guarda
+    // desde CU-868kfvabk y ese ledger es append-only, así que su forma no se cambia.
+    expect(r.narrative).toContain('Cobra las facturas vencidas.');
+  });
+
+  test('stop_reason=max_tokens lanza aunque haya insights: el JSON pudo cortarse', async () => {
+    /*
+     * El caso que más engaña. Con la herramienta forzada, un corte a mitad del JSON puede
+     * dejar algunos insights bien formados y perder el resto — y sin mirar `stop_reason`
+     * eso pasa por una respuesta completa. Un consejo al que le faltan dos de tres puntos
+     * no se distingue de uno de un solo punto.
+     */
+    respuestas = [{ ...insightsDe('Solo el primero llegó.'), stop_reason: 'max_tokens' }];
+
+    const error = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt').catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(AiProviderError);
+    expect((error as AiProviderError).failure).toBe('incomplete');
+  });
+
+  test('sin insights y sin texto lanza un error de DOMINIO, no un Error pelado', async () => {
+    // Antes era `throw new Error(...)`, que Elysia servía como 500 sin cuerpo. Un
+    // `AiProviderError` lo traduce el handler global a un mensaje presentable y conserva
+    // la causa técnica adjunta para quien investigue.
+    respuestas = [{ stop_reason: 'end_turn', content: [] }];
+
+    const error = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt').catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(AiProviderError);
+    expect((error as AiProviderError).failure).toBe('incomplete');
+    // La causa lleva los datos con los que se diagnostica sin poder reproducir.
+    expect(String((error as AiProviderError).cause)).toContain('stop_reason=end_turn');
+  });
+
+  test('el error nombra la operación, para saber CUÁL de los cuatro caminos falló', async () => {
+    respuestas = [{ stop_reason: 'end_turn', content: [] }];
+
+    const error = (await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt').catch(
+      (e: unknown) => e,
+    )) as AiProviderError;
+
+    expect(error.operation).toBe('insight_narrative');
+  });
+});
+
+/**
+ * ═══ CANCELAR ES DEJAR DE PAGAR, NO DEJAR DE ESCUCHAR (CU-868ktvqjm) ═══
+ *
+ * CU-868ktmdex puso el botón "Dejar de esperar" con ese nombre exacto porque el turno NO
+ * era cancelable: abortar el `fetch` soltaba la pantalla y el modelo seguía escribiendo.
+ * Acá se cierra: la señal de la petición HTTP viaja hasta la llamada a Claude.
+ */
+describe('un turno cancelado corta de verdad (CU-868ktvqjm)', () => {
+  test('la señal llega hasta el SDK, no se queda en el handler', async () => {
+    respuestas = [texto('Listo.')];
+    const ac = new AbortController();
+
+    await runChatTurn({
+      db: dbMudo,
+      companyId: 'c1',
+      locale: 'es',
+      history: [],
+      userMessage: '¿cómo vamos?',
+      signal: ac.signal,
+    });
+
+    expect(senalDeLaUltimaLlamada).toBe(ac.signal);
+  });
+
+  test('sin señal la llamada sigue funcionando igual', async () => {
+    // El parámetro es opcional: un llamador que no sea una request HTTP no tiene señal.
+    respuestas = [texto('Listo.')];
+
+    const r = await runChatTurn({
+      db: dbMudo,
+      companyId: 'c1',
+      locale: 'es',
+      history: [],
+      userMessage: '¿cómo vamos?',
+    });
+
+    expect(r.assistantText).toBe('Listo.');
+    expect(senalDeLaUltimaLlamada).toBeUndefined();
+  });
+
+  test('cancelar ANTES de empezar no llega a llamar a Claude', async () => {
+    respuestas = [texto('No debería llegar.')];
+    const ac = new AbortController();
+    ac.abort();
+
+    const llamadasAntes = llamadas;
+    const error = await runChatTurn({
+      db: dbMudo,
+      companyId: 'c1',
+      locale: 'es',
+      history: [],
+      userMessage: '¿cómo vamos?',
+      signal: ac.signal,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    // Lo que se prueba es que NO se pagó una llamada: la comprobación va antes del envío.
+    expect(llamadas).toBe(llamadasAntes);
+  });
+
+  test('cancelar ENTRE rondas de herramientas corta antes de pagar la siguiente', async () => {
+    /*
+     * El caso que motiva la comprobación por ronda. Un turno con herramientas hace varias
+     * llamadas; sin cortar entre ellas, una cancelación que llega a mitad no se notaría
+     * hasta terminar la siguiente — o sea que se pagaría una llamada entera después de que
+     * el usuario ya se fue.
+     *
+     * Se aborta DESDE el doble del SDK, en cuanto la primera ronda respondió: es el
+     * instante exacto en que el orquestador va a pedir la segunda, que es donde el
+     * `throwIfAborted` tiene que morder.
+     */
+    respuestas = [usaHerramienta('get_monthly_rollup'), texto('Esta NO debería pedirse.')];
+    const ac = new AbortController();
+    abortarTrasLaPrimeraLlamada = ac;
+
+    const llamadasAntes = llamadas;
+    const error = await runChatTurn({
+      db: dbMudo,
+      companyId: 'c1',
+      locale: 'es',
+      history: [],
+      userMessage: '¿cómo vamos?',
+      signal: ac.signal,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    // UNA sola llamada: la primera completó y se pagó —correcto, su fila de
+    // `ai_usage_events` ya se insertó dentro del bucle— y la segunda nunca se pidió.
+    expect(llamadas - llamadasAntes).toBe(1);
   });
 });
