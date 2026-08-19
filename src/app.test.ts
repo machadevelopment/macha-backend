@@ -188,6 +188,38 @@ describe('rutas guardadas — 401 sin token', () => {
  * handler entra (el router de Elysia resuelve el segmento estático antes que el
  * dinámico).
  */
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ * TODO ERROR SALE EN JSON — el contrato que el frontend asume en cada request
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El fallo que lo motiva (producción, 2026-08-19): `tenant.derive.ts` respondió
+ * `403 Not a member of the requested company` en TEXTO PLANO, y el proxy del BFF —que hace
+ * `await res.json()`— explotó con `SyntaxError: Unexpected token 'N'`. El usuario vio un 500
+ * opaco donde el backend había explicado exactamente qué pasaba.
+ *
+ * El contrato era inconsistente consigo mismo: los errores de negocio (`AiProviderError`,
+ * `BillingProviderError`) ya devolvían `{ error }`, y los de guard no.
+ */
+describe('contrato de errores: siempre JSON', () => {
+  test('un 401 de guard responde JSON, no texto plano', async () => {
+    const res = await call('/documents/');
+    expect(res.status).toBe(401);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const cuerpo = (await res.json()) as { error?: unknown };
+    expect(typeof cuerpo.error).toBe('string');
+  });
+
+  test('el cuerpo se puede parsear siempre — que es lo que rompió en producción', async () => {
+    // Exactamente lo que hace el BFF. Si esto lanza, el frontend devuelve un 500 sin
+    // información en vez del status que el backend eligió.
+    for (const path of ['/documents/', '/metrics', '/reports/', '/transactions/']) {
+      const res = await call(path);
+      expect(async () => await res.json()).not.toThrow();
+    }
+  });
+});
+
 describe('composición de /admin/companies (ticket B5)', () => {
   const paths = createApp().routes.map((r) => r.path);
 
