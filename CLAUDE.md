@@ -173,12 +173,37 @@ Conventions & gotchas:
   **Lo que hace hoy** es fijar el nombre de la categoría ENTRE cargas: el canonizador unifica
   dentro de una hoja pero vive en memoria, así que la semana siguiente el mismo concepto podía
   bautizarse distinto y el cliente volvía a tener dos rubros donde hay uno.
-  **PENDIENTE y decidido, no olvidado**: (a) saltarse la LLAMADA cuando todos los conceptos de
-  un lote ya están en el diccionario — ahí está el ahorro grande, y toca el planificador de
-  lotes; (b) la pantalla donde el CLIENTE categoriza lo que quedó sin entender, que por
-  decisión de Semi va **en el flujo de subida y no en revisión interna** (es la persona que
-  sabe qué es "Cropa" en su propio libro). La tabla ya distingue el origen para que su
-  respuesta valga más que la del modelo.
+  **El ahorro ya está hecho** (`resolverLoteConDiccionario`, 2026-08-20): si TODAS las filas de
+  un lote traen un concepto que la empresa ya resolvió, el lote no llama al modelo. Medido en
+  `cortocircuito-diccionario-e2e` sobre una hoja de 900 gastos con cuatro conceptos:
+  **11 → 4 llamadas, 630 filas resueltas en código**, y el consenso de hoja explícitamente NO
+  aplicaba (el veredicto dominante cubría 25 % contra el 98 % que exige). Es el caso para el
+  que se construyó.
+  - **Es TODO-O-NADA por lote, no "lo que se pueda"**: el lote es la unidad de LLAMADA, así que
+    resolver 87 filas en código y preguntar por la restante cuesta lo mismo que preguntar por
+    las 88. No hay premio por el 99 %, y sí riesgo en partir el lote.
+  - **El veredicto es POR FILA**, no uno para toda la hoja — ahí está la diferencia con el
+    cortocircuito de consenso, y es lo que lo hace servir donde cada fila difiere.
+  - **El consenso de hoja se pregunta PRIMERO** cuando ambos aplican: su veredicto se midió
+    sobre las filas de ESTA carga en tres llamadas que coincidieron, mientras el diccionario
+    responde con reglas de cargas anteriores. Ante la misma fila gana la evidencia recién
+    medida.
+  - **La confianza sale del ORIGEN de la regla y su piso está ATADO a `CONFIDENCE_THRESHOLD`**,
+    no escrito a mano: una regla `inferido` solo existe si el veredicto que la creó superó el
+    umbral, así que el umbral es lo único afirmable de ella. Si alguien sube el umbral, un 0,7
+    literal mandaría a revisión interna todas las filas de todas las cargas, en silencio. Hay
+    test que lo fija.
+  - **Lo que el candado por fila evita, medido y NO lo que suena**: `filaAptaParaCortocircuito`
+    exige fecha y monto legibles, así que un renglón de TOTAL con texto conocido ("Pago a
+    Claro") no se resuelve acá. Pero `staging-rules` lo rechazaría igual por `invalid_date`, o
+    sea que **el total no acabaría sumado en el dashboard aunque el candado no existiera**
+    (comprobado por mutación). Lo que el candado garantiza es que una fila dudosa la JUZGUE el
+    modelo en vez de resolverse con una regla que no aplica: sin él, entra a revisión interna
+    con una categoría inventada en vez de que el modelo la declare `skip` y no genere fila.
+  **PENDIENTE y decidido, no olvidado**: la pantalla donde el CLIENTE categoriza lo que quedó
+  sin entender, que por decisión de Semi va **en el flujo de subida y no en revisión interna**
+  (es la persona que sabe qué es "Cropa" en su propio libro). La tabla ya distingue el origen
+  para que su respuesta valga más que la del modelo.
   **Descartado en la misma conversación, y vale saber por qué**: generar y ejecutar un script
   en el worker. El worker tiene las credenciales de la base, y clasificar no es parsear — un
   script no sabe que "pago a Claro" es servicios. La idea de un sandbox sin red y efímero

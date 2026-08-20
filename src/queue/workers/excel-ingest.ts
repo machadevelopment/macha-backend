@@ -5,6 +5,7 @@ import { withCompanyScope } from '@/lib/db-scope';
 import {
   DiccionarioDeCategorias,
   guardarReglasAprendidas,
+  resolverLoteConDiccionario,
   type ReglaAprendida,
 } from '@/lib/category-dictionary';
 import { downloadObject } from '@/lib/s3';
@@ -321,6 +322,16 @@ export function startExcelIngestWorker(): Promise<string> {
          * fecha o sin monto legible) y mandó a revisión interna en vez de adivinar.
          */
         let filasAptasFallidas = 0;
+        /**
+         * Lotes que no llamaron al modelo porque el diccionario de la empresa ya conocía TODOS
+         * sus conceptos, y filas que eso cubrió.
+         *
+         * Se cuentan aparte del cortocircuito de hoja a propósito: son dos mecanismos con
+         * distinta condición y distinto alcance, y mezclarlos en un contador dejaría sin forma
+         * de saber cuál de los dos está pagando el ahorro de un cliente concreto.
+         */
+        let lotesPorDiccionario = 0;
+        let filasPorDiccionario = 0;
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -1059,6 +1070,53 @@ export function startExcelIngestWorker(): Promise<string> {
           filasAptasFallidas += noAptas;
         }
 
+        /**
+         * Un lote resuelto SIN llamar al modelo porque el diccionario ya conocía todas sus
+         * filas — el ahorro que el acuerdo con Semi dejó pendiente el 2026-08-20.
+         *
+         * ═══ EN QUÉ SE DIFERENCIA DEL CORTOCIRCUITO DE HOJA ═══
+         *
+         * `procesarLoteLocal` aplica UN veredicto a todo el lote, porque su hoja resultó
+         * homogénea. Acá cada fila trae el SUYO, sacado de su propio concepto. Esa es toda la
+         * diferencia, y es la que hace que sirva justo donde el consenso no llega:
+         * `Gastos_Operativos` tiene 13 categorías y la más frecuente cubre el 11 %, así que
+         * nunca va a ser homogénea — pero sus conceptos son los mismos proveedores de la
+         * semana pasada.
+         *
+         * Los candados viven en `resolverLoteConDiccionario`, y son la razón por la que acá no
+         * hay filas "no aptas" que mandar a revisión: si una sola fila del lote no está
+         * cubierta o no parece un movimiento, el lote ENTERO se fue al modelo. Esto solo corre
+         * cuando ya no queda nada que preguntar.
+         */
+        async function procesarLotePorDiccionario({
+          pendiente: { sheetName, batchIndex, batch, fingerprints },
+          porIndice,
+          columnas,
+        }: {
+          pendiente: Pendiente;
+          porIndice: Map<number, VeredictoCrudo>;
+          columnas: ColumnMap;
+        }): Promise<void> {
+          if (await cancelado()) return;
+
+          const rows = construirFilas(porIndice, { rows: batch, baseCurrency }, columnas);
+          await confirmarLote({
+            sheetName,
+            batchIndex,
+            batch,
+            fingerprints,
+            rows,
+            // Sin llamada: no hay `ai_usage_events` que escribir. El crédito SÍ se debita
+            // igual (lo hace `confirmarLote`), y eso es decisión de producto, no del worker:
+            // los créditos miden el trabajo hecho para el cliente, no nuestro costo con
+            // Anthropic. Cambiarlo movería el precio.
+            uso: null,
+          });
+
+          lotesPorDiccionario++;
+          filasPorDiccionario += batch.length;
+        }
+
         /*
          * ═══ SEGUNDA PASADA, EN DOS FASES: SONDA, DECISIÓN, RESTO ═══
          *
@@ -1154,9 +1212,17 @@ export function startExcelIngestWorker(): Promise<string> {
                 `lote(s) restantes se resuelven sin llamar al modelo.`,
             );
           } else {
+            /*
+             * "Van al modelo" habría sido mentira desde que existe el diccionario: este
+             * mensaje se imprime ANTES de preguntarle, y en la corrida que motivó el
+             * mecanismo 7 de esos 8 lotes se resolvieron sin llamar a nadie. Se dice lo que
+             * este punto sabe —que el consenso no aplica— y el conteo real de llamadas sale
+             * en la línea de cierre, que es la única que puede afirmarlo.
+             */
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}": sin consenso ` +
-                `(${decision.motivo}). Sus ${restantes} lote(s) restantes van al modelo.`,
+                `(${decision.motivo}). Sus ${restantes} lote(s) restantes se resuelven fila ` +
+                `por fila (diccionario si lo cubre, modelo si no).`,
             );
           }
         }
@@ -1177,11 +1243,44 @@ export function startExcelIngestWorker(): Promise<string> {
           veredicto: VeredictoDominante;
           columnas: ColumnMap;
         }[] = [];
+        const porDiccionario: {
+          pendiente: Pendiente;
+          porIndice: Map<number, VeredictoCrudo>;
+          columnas: ColumnMap;
+        }[] = [];
         for (const p of resto) {
-          const veredicto = veredictoPorHoja.get(p.sheetName);
           const columnas = mapasPorHoja.get(p.sheetName);
-          if (veredicto && columnas) {
+          if (!columnas) {
+            alModelo.push(p);
+            continue;
+          }
+
+          /*
+           * EL CONSENSO DE HOJA VA PRIMERO, y no es preferencia: es que sabe más.
+           *
+           * Cuando una hoja es homogénea, su veredicto se midió sobre las filas de ESTA carga,
+           * en tres llamadas que coincidieron por encima del 98 %. El diccionario, en cambio,
+           * responde por concepto y con reglas de cargas anteriores. Las dos son buenas, pero
+           * ante la misma fila la evidencia recién medida gana.
+           *
+           * Y hay un motivo concreto además del orden de la evidencia: en una hoja homogénea
+           * el consenso cubre el lote entero SIEMPRE, mientras que el diccionario exige que
+           * las 88 filas estén conocidas. Preguntarle primero al diccionario sería gastar el
+           * recorrido para terminar en el mismo lugar casi siempre.
+           */
+          const veredicto = veredictoPorHoja.get(p.sheetName);
+          if (veredicto) {
             locales.push({ pendiente: p, veredicto, columnas });
+            continue;
+          }
+
+          /*
+           * Sin consenso de hoja: la única salida que queda antes de pagar es que el
+           * diccionario conozca TODAS las filas de este lote. Si falta una, va al modelo.
+           */
+          const delDiccionario = resolverLoteConDiccionario(p.batch, columnas, diccionario);
+          if (delDiccionario) {
+            porDiccionario.push({ pendiente: p, porIndice: delDiccionario, columnas });
           } else {
             alModelo.push(p);
           }
@@ -1197,16 +1296,38 @@ export function startExcelIngestWorker(): Promise<string> {
           procesarLoteLocal,
           intakeConfig.batchConcurrency,
         );
-        const errores = [...erroresResto, ...erroresLocales];
+        const { errors: erroresDiccionario } = await runWithConcurrency(
+          porDiccionario,
+          procesarLotePorDiccionario,
+          intakeConfig.batchConcurrency,
+        );
+        const errores = [...erroresResto, ...erroresLocales, ...erroresDiccionario];
         if (errores.length > 0) throw errores[0];
 
-        if (lotesCortocircuitados > 0) {
+        if (lotesCortocircuitados > 0 || lotesPorDiccionario > 0) {
           const llamadas = sonda.length + alModelo.length;
+          const evitadas = lotesCortocircuitados + lotesPorDiccionario;
+          /*
+           * Los dos ahorros se nombran POR SEPARADO aunque el total sea uno. Cuando un cliente
+           * pregunte por qué su carga costó lo que costó, "consenso de hoja" y "diccionario"
+           * llevan a mirar cosas distintas: lo primero, si sus hojas son homogéneas; lo
+           * segundo, cuánto de su libro ya se aprendió. Un número agregado no distingue una
+           * carga que aprovechó todo de una que no aprovechó nada de lo aprendido.
+           */
+          const partes = [
+            lotesCortocircuitados > 0
+              ? `${lotesCortocircuitados} lote(s) y ${filasCortocircuitadas} fila(s) por ` +
+                `consenso de hoja`
+              : null,
+            lotesPorDiccionario > 0
+              ? `${lotesPorDiccionario} lote(s) y ${filasPorDiccionario} fila(s) por ` +
+                `diccionario de la empresa`
+              : null,
+          ].filter((x): x is string => x !== null);
           console.info(
-            `[excel-ingest] company=${companyId} document=${documentId} cortocircuito: ` +
-              `${lotesCortocircuitados} lote(s) y ${filasCortocircuitadas} fila(s) resueltas ` +
-              `por consenso de hoja, sin llamar al modelo. Llamadas a Claude: ${llamadas} ` +
-              `en vez de ${llamadas + lotesCortocircuitados}.` +
+            `[excel-ingest] company=${companyId} document=${documentId} resuelto sin modelo: ` +
+              `${partes.join(' · ')}. Llamadas a Claude: ${llamadas} en vez de ` +
+              `${llamadas + evitadas}.` +
               (filasAptasFallidas > 0
                 ? ` ${filasAptasFallidas} fila(s) no parecían movimientos y fueron a revisión.`
                 : ''),
