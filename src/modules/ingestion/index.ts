@@ -609,20 +609,48 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      */
     const porConcepto = new Map<
       string,
-      { concepto: string; ejemplo: string; filas: number; entity: string; montoTotal: number }
+      {
+        concepto: string;
+        ejemplo: string;
+        filas: number;
+        entity: string;
+        /** Totales POR MONEDA. Ver la nota de abajo: sumarlas juntas daría una cifra falsa. */
+        montos: Map<string, number>;
+      }
     >();
 
     for (const f of filas) {
       if (!esArreglablePorCategoria(f.flagReason)) continue;
-      const p = f.payload as { description?: unknown; originalAmount?: unknown };
+      const p = f.payload as {
+        description?: unknown;
+        originalAmount?: unknown;
+        originalCurrency?: unknown;
+      };
       const clave = claveDeConcepto(p.description);
       if (clave === null) continue;
 
-      const actual = porConcepto.get(clave);
       const monto = typeof p.originalAmount === 'number' ? Math.abs(p.originalAmount) : 0;
+      /*
+       * ═══ LOS MONTOS VAN SEPARADOS POR MONEDA, NO SUMADOS ═══
+       *
+       * Estas filas están en STAGING: traen `originalAmount` + `originalCurrency` y todavía no
+       * tienen `amount_base`, porque la conversión ocurre al promover (`lib/promotion.ts`, con
+       * la tasa snapshoteada por fila). O sea que acá no hay una cifra convertida que sumar.
+       *
+       * Sumar GTQ con USD daría un número que no es ninguna de las dos cosas, mostrado al lado
+       * del nombre de un concepto como si fuera plata de verdad. En una herramienta de CFO eso
+       * no es un detalle de formato: un USD contado como un quetzal subestima ~7,7 veces, y el
+       * cliente no tiene forma de notarlo.
+       *
+       * Se agrupa por moneda y la pantalla las muestra por separado. Para el caso común —una
+       * sola moneda— se ve exactamente igual que un total.
+       */
+      const moneda = typeof p.originalCurrency === 'string' ? p.originalCurrency : 'GTQ';
+
+      const actual = porConcepto.get(clave);
       if (actual) {
         actual.filas++;
-        actual.montoTotal += monto;
+        actual.montos.set(moneda, (actual.montos.get(moneda) ?? 0) + monto);
       } else {
         porConcepto.set(clave, {
           concepto: clave,
@@ -631,7 +659,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           ejemplo: String(p.description),
           filas: 1,
           entity: f.targetEntity,
-          montoTotal: monto,
+          montos: new Map([[moneda, monto]]),
         });
       }
     }
@@ -641,8 +669,23 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      * va, que las tres que contestó sean las que más mueven su contabilidad. Cien filas de
      * Q 5 pesan menos que dos de Q 40.000, y el orden de una lista es lo único que decide qué
      * se contesta cuando nadie la termina.
+     *
+     * El criterio es el MAYOR total de una sola moneda, no la suma de todas: sumarlas para
+     * ordenar volvería a mezclar lo que arriba se separó, y con una tasa implícita de 1:1 el
+     * orden podría quedar al revés para un cliente que factura en dólares.
      */
-    const conceptos = [...porConcepto.values()].sort((a, b) => b.montoTotal - a.montoTotal);
+    const conceptos = [...porConcepto.values()]
+      .map((c) => ({
+        concepto: c.concepto,
+        ejemplo: c.ejemplo,
+        filas: c.filas,
+        entity: c.entity,
+        montos: [...c.montos.entries()]
+          .map(([currency, total]) => ({ currency, total }))
+          .sort((a, b) => b.total - a.total),
+      }))
+      .sort((a, b) => (b.montos[0]?.total ?? 0) - (a.montos[0]?.total ?? 0));
+
     return { conceptos, total: conceptos.length };
   })
 
