@@ -84,7 +84,7 @@ let documentId: string;
  * del CLIENTE, y hacerlo depender de una corrida completa de ingesta mezclaría dos fallos
  * distintos en un mismo test rojo.
  */
-const FILAS = [
+const FILAS: { description: string; amount: number; flag: string; currency?: string }[] = [
   // Cinco filas del mismo concepto: la prueba de que se pregunta UNA vez, no cinco.
   ...Array.from({ length: 5 }, (_, i) => ({
     description: 'Pago a CLARO',
@@ -97,6 +97,12 @@ const FILAS = [
   { description: 'Flete Cropa', amount: 40_000, flag: 'missing_category' },
   // Marcada por un problema de DATO: no la arregla ninguna categoría, no se pregunta.
   { description: 'Compra de vitrinas', amount: 700, flag: 'invalid_date' },
+  /*
+   * Una fila en USD del MISMO concepto que una en GTQ. Es lo que obliga a separar los montos
+   * por moneda: sumarlas daría una cifra que no es ninguna de las dos, y un dólar contado como
+   * un quetzal subestima ~7,7 veces sin que nada falle.
+   */
+  { description: 'Flete Cropa', amount: 200, flag: 'missing_category', currency: 'USD' },
 ];
 
 beforeAll(async () => {
@@ -139,7 +145,7 @@ beforeAll(async () => {
                 category: null,
                 date: '2026-07-15',
                 originalAmount: f.amount,
-                originalCurrency: 'GTQ',
+                originalCurrency: f.currency ?? 'GTQ',
                 description: f.description,
               })},
               0.35, ${f.flag}, 'pending')
@@ -190,6 +196,35 @@ describe('GET /documents/:id/conceptos-pendientes', () => {
     const r = await pedir(`/${documentId}/conceptos-pendientes`);
     const body = (await r.json()) as { conceptos: { concepto: string }[] };
     expect(body.conceptos[0]!.concepto).toBe(claveDeConcepto('Flete Cropa'));
+  });
+
+  test('los montos van SEPARADOS por moneda, no sumados', async () => {
+    /*
+     * ═══ POR QUÉ ESTO NO ES UN DETALLE DE FORMATO ═══
+     *
+     * Estas filas están en staging: traen `originalAmount` + `originalCurrency` y todavía no
+     * tienen `amount_base`, porque la conversión ocurre al promover con la tasa snapshoteada
+     * por fila. O sea que no hay una cifra convertida que sumar.
+     *
+     * `Flete Cropa` tiene Q 40.000 y USD 200. Sumados darían 40.200 "algo" mostrado al lado del
+     * concepto como si fuera plata de verdad — un dólar contado como un quetzal, ~7,7 veces
+     * subestimado, y el cliente sin forma de notarlo.
+     */
+    const r = await pedir(`/${documentId}/conceptos-pendientes`);
+    const body = (await r.json()) as {
+      conceptos: { concepto: string; montos: { currency: string; total: number }[] }[];
+    };
+
+    const cropa = body.conceptos.find((c) => c.concepto === claveDeConcepto('Flete Cropa'))!;
+    expect(cropa.montos).toEqual([
+      { currency: 'GTQ', total: 40_000 },
+      { currency: 'USD', total: 200 },
+    ]);
+
+    // Y el que tiene una sola moneda trae una sola entrada: el caso común no se complica.
+    const claro = body.conceptos.find((c) => c.concepto === claveDeConcepto('Pago a CLARO'))!;
+    expect(claro.montos).toHaveLength(1);
+    expect(claro.montos[0]!.currency).toBe('GTQ');
   });
 
   test('NO se pregunta por lo que una categoría no arregla', async () => {
@@ -258,8 +293,9 @@ describe('POST /documents/:id/conceptos', () => {
     expect(r.status).toBe(200);
     const body = (await r.json()) as { filasResueltas: number; reglasGuardadas: number };
 
-    // Las seis de "claro" (escrito de dos formas) más la de "cropa". La de `invalid_date` no.
-    expect(body.filasResueltas).toBe(7);
+    // Las seis de "claro" (escrito de dos formas) más las dos de "cropa" (GTQ y USD).
+    // La de `invalid_date` no: su problema es el dato, no el nombre.
+    expect(body.filasResueltas).toBe(8);
     expect(body.reglasGuardadas).toBe(2);
 
     const aprobadas = await owner`
@@ -267,7 +303,7 @@ describe('POST /documents/:id/conceptos', () => {
       from staging_rows
       where document_id = ${documentId} and review_status = 'approved'
     `;
-    expect(aprobadas.length).toBe(7);
+    expect(aprobadas.length).toBe(8);
     for (const a of aprobadas) {
       // `flag_reason` a null y confianza 1: lo dijo el dueño de la contabilidad. Si se dejara
       // la confianza baja que la marcó, `staging-rules` la volvería a marcar por
@@ -285,7 +321,9 @@ describe('POST /documents/:id/conceptos', () => {
       (a) => (a.payload as { category: string }).category === 'transporte',
     );
     expect(claro.length).toBe(6);
-    expect(cropa.length).toBe(1);
+    // Las dos de "cropa", en las dos monedas: la respuesta se aplica por CONCEPTO, y la moneda
+    // de la fila no cambia qué es el concepto.
+    expect(cropa.length).toBe(2);
     // El `type` también viaja: "flete" puede ser costo directo o gasto, y son rubros
     // distintos del dashboard.
     expect((cropa[0]!.payload as { type: string }).type).toBe('cogs');
