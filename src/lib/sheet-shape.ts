@@ -148,6 +148,56 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
     };
   }
 
+  /*
+   * 6. UN PERÍODO POR FILA, SIN REPETIRSE: el reporte TRANSPUESTO.
+   *
+   * ═══ EL CASO QUE SE ESCAPÓ (`U3TECH_Demo_Datos_Ampliado`, 2026-08-19) ═══
+   *
+   * Las cinco señales de arriba buscan reportes ANCHOS: los meses puestos a lo largo, una
+   * fila por cliente. Este archivo trae el mismo agregado girado 90 grados —`Resumen_Mensual`
+   * y `Flujo_Caja`— con los meses hacia ABAJO, una fila por mes y once columnas limpias sin
+   * un solo hueco.
+   *
+   * No dispara ni una: la cobertura del encabezado es 1, no hay celdas vacías, tiene 11
+   * columnas y ningún nombre repetido. Se ve idéntica a una tabla de movimientos.
+   *
+   * Y el daño es el mismo que el de `sheet-duplication.ts`: es LA MISMA PLATA otra vez. El
+   * archivo declara USD 4.840.744 de facturación en `Facturacion_Clientes` (1.403 filas de
+   * detalle) y los repite en `Resumen_Mensual` (36 meses) y en `Flujo_Caja` (lo cobrado).
+   * Sin este filtro, el dashboard del cliente puede llegar a mostrar el triple de sus
+   * ingresos reales.
+   *
+   * ═══ POR QUÉ `sheet-duplication.ts` NO LO ATRAPA ═══
+   *
+   * Ese detector compara TOTALES entre hojas, y acá no coinciden: `Resumen_Mensual` incluye
+   * una fila final "Total" que vuelve a sumar la columna entera, así que da 9.681.488 contra
+   * los 4.840.744 del detalle. La fila que causa el daño es justamente la que lo esconde.
+   *
+   * ═══ LA SEÑAL: PERÍODOS ÚNICOS, NO SOLO PERÍODOS ═══
+   *
+   * Que la primera columna sean meses NO basta — una tabla de movimientos con una columna
+   * "Mes" es perfectamente legítima y común. Lo que distingue a un agregado es que cada
+   * período aparece UNA SOLA VEZ: es una fila POR mes. En un listado de movimientos los
+   * meses se repiten decenas de veces, porque hay muchos movimientos en cada uno.
+   *
+   * Por eso se exige unicidad casi total además de la proporción. Con las dos condiciones,
+   * una hoja de 900 gastos con columna de mes no se toca, y una de 36 filas que son 36 meses
+   * distintos sí.
+   */
+  const primeraColumna = datos.map((f) => f[0]);
+  const conPeriodo = primeraColumna.filter(pareceNombreDePeriodo);
+  if (conPeriodo.length >= 6 && conPeriodo.length / datos.length > 0.8) {
+    const unicos = new Set(conPeriodo.map((c) => String(c).trim().toLowerCase())).size;
+    if (unicos / conPeriodo.length > 0.9) {
+      return {
+        esReporte: true,
+        motivo:
+          `es un resumen por período: sus ${unicos} filas son ${unicos} meses distintos, uno por ` +
+          'fila, no movimientos. Sus cifras ya están en la hoja de detalle que las origina',
+      };
+    }
+  }
+
   if (demasiadoAncha && cobertura < 0.7) {
     return {
       esReporte: true,
