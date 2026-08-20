@@ -1,7 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { companyCategoryRules } from '@/db/schema';
-import { conceptoDeCategoria } from '@/lib/sheet-consensus';
+import type { VeredictoCrudo } from '@/lib/anthropic';
+import type { ColumnMap } from '@/lib/row-assembly';
+import { conceptoDeCategoria, filaAptaParaCortocircuito } from '@/lib/sheet-consensus';
+import { CONFIDENCE_THRESHOLD } from '@/lib/staging-rules';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -294,4 +297,117 @@ export async function guardarReglasAprendidas(
   }
 
   return escritas;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * SALTARSE LA LLAMADA CUANDO EL LOTE ENTERO YA ESTÁ EN EL DICCIONARIO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Hasta acá el diccionario servía para FIJAR EL NOMBRE de la categoría entre cargas (que el
+ * cliente no tenga dos rubros donde hay uno). Útil, pero no era el ahorro: la llamada al
+ * modelo se seguía pagando igual, y después se le corregía el nombre a la respuesta.
+ *
+ * Esto es el ahorro. Si TODAS las filas del lote traen un concepto que esta empresa ya
+ * resolvió, no hay nada que preguntar y el lote se arma en código.
+ *
+ * ═══ POR QUÉ ES "TODAS" Y NO "LA MAYORÍA" ═══
+ *
+ * Un lote es una unidad de llamada, no de decisión: si una sola fila necesita criterio, la
+ * llamada se hace igual y su costo ya está pagado para las otras. Resolver 87 filas en código
+ * y preguntar por la restante costaría lo mismo que preguntar por las 88 — más el riesgo de
+ * partir el lote. El todo-o-nada no es rigor de más: es que no hay premio por el 99 %.
+ *
+ * ═══ TRES CANDADOS, CADA UNO POR UN FALLO DISTINTO ═══
+ *
+ * 1. **Hace falta la columna de DESCRIPCIÓN.** Es de donde sale el concepto. Sin ella no hay
+ *    nada que buscar, y adivinarlo con otra columna sería clasificar por la columna
+ *    equivocada — plata en el rubro equivocado, sin que nada falle.
+ *
+ * 2. **La fila tiene que parecer un movimiento** (`filaAptaParaCortocircuito`: fecha y monto
+ *    legibles en las columnas del mapa). Un renglón de TOTAL puede traer una descripción que
+ *    el diccionario reconoce sin dudar —"Ventas", "Pago a Claro"— y no es un movimiento.
+ *
+ *    **Lo que este candado evita, medido (no lo que suena):** `staging-rules` es un segundo
+ *    filtro real y rechazaría esa fila igual, por `invalid_date` o `invalid_amount` — o sea
+ *    que el total NO acabaría sumado en el dashboard aunque este candado no existiera. Lo que
+ *    cambia sin él es otra cosa, y sigue importando: la fila entra a REVISIÓN INTERNA con una
+ *    categoría que el diccionario le inventó, en vez de que el modelo la declare `skip` y no
+ *    genere fila ninguna. Es ruido para quien revisa, y una categoría fabricada en el registro
+ *    de filas marcadas.
+ *
+ *    Dicho de otra forma: el candado no es la red que evita el error de plata —esa es
+ *    `staging-rules`—, es lo que garantiza que una fila dudosa la JUZGUE el modelo en vez de
+ *    resolverse con una regla que no aplica. Hay test que fija exactamente esa diferencia
+ *    (`cortocircuito-diccionario-e2e`, mutación comprobada).
+ *
+ * 3. **El veredicto viaja con `entity` y `type` de la regla**, no solo con la categoría. Una
+ *    regla sin ellos es ambigua: "flete" puede ser costo directo o gasto operativo, y son
+ *    rubros distintos del dashboard. Por eso la tabla los guarda juntos.
+ *
+ * ═══ LA CONFIANZA NO SE INVENTA ═══
+ *
+ * Se deriva del ORIGEN de la regla, y el piso es `CONFIDENCE_THRESHOLD` — no un 0,7 escrito a
+ * mano. Una regla `inferido` solo existe si el veredicto que la creó venía con confianza por
+ * encima del umbral (ver `guardarReglasAprendidas`), así que el umbral es exactamente lo
+ * único que se puede afirmar de ella: ni más, porque no se guardó el valor original; ni
+ * menos, porque entonces cada fila resuelta por diccionario caería en revisión interna y el
+ * mecanismo entero se volvería en contra.
+ *
+ * Que se DERIVE y no se copie importa: si alguien sube el umbral a 0,75, un 0,7 escrito a
+ * mano mandaría a revisión interna todas las filas de todas las cargas, en silencio y sin que
+ * ningún test lo notara. Hay uno que lo fija.
+ */
+const CONFIANZA_POR_ORIGEN: Record<ReglaDeCategoria['source'], number> = {
+  /** Lo dijo el dueño de la contabilidad sobre su propio libro. No hay fuente mejor. */
+  confirmado_por_cliente: 1,
+  /** Un operador lo corrigió mirando la fila. Menos que el dueño, más que una inferencia. */
+  corregido_por_staff: 0.95,
+  /** Vino de un veredicto del modelo por encima del umbral. El umbral es lo afirmable. */
+  inferido: CONFIDENCE_THRESHOLD,
+};
+
+/**
+ * Los veredictos del lote si el diccionario cubre TODAS sus filas; `null` si falta una.
+ *
+ * `null` significa "este lote va al modelo", que es el default seguro: la respuesta se paga,
+ * pero nadie clasifica de más.
+ */
+export function resolverLoteConDiccionario(
+  batch: unknown[][],
+  columnas: ColumnMap,
+  diccionario: DiccionarioDeCategorias,
+): Map<number, VeredictoCrudo> | null {
+  // Candado 1: sin descripción no hay concepto que buscar.
+  const iDescripcion = columnas.description;
+  if (iDescripcion === null) return null;
+  // Un diccionario vacío no puede cubrir nada, y así la primera carga no paga este recorrido.
+  if (diccionario.tamano === 0) return null;
+
+  const porIndice = new Map<number, VeredictoCrudo>();
+  for (let i = 0; i < batch.length; i++) {
+    const fila = batch[i]!;
+
+    // Candado 2: si no parece un movimiento, no se decide acá. Un renglón de TOTAL cuya
+    // descripción el diccionario reconoce entraría como un movimiento más.
+    if (!filaAptaParaCortocircuito(fila, columnas)) return null;
+
+    const regla = diccionario.buscar(fila[iDescripcion]);
+    if (regla === null) return null;
+
+    // Candado 3: `entity` y `type` salen de la REGLA, no de un default.
+    porIndice.set(i, {
+      i,
+      e: regla.entity as VeredictoCrudo['e'],
+      t: regla.type as VeredictoCrudo['t'],
+      c: regla.category,
+      cf: CONFIANZA_POR_ORIGEN[regla.source],
+    });
+  }
+
+  // Un lote vacío no es "cubierto": no hay nada que resolver y devolver un mapa vacío haría
+  // que el llamador lo diera por hecho sin haber escrito ninguna fila.
+  if (porIndice.size === 0) return null;
+
+  return porIndice;
 }
