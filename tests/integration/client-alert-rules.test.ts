@@ -19,7 +19,19 @@ mock.module('@/lib/auth', () => ({
 }));
 
 // No hay Redis en el job de integración y el bucket `read` no es lo que se prueba aquí.
+/*
+ * `mock.module` es GLOBAL al proceso: la suite de integración corre en una sola invocación de
+ * `bun test`, así que este doble reemplaza `@/lib/rate-limit` para TODOS los archivos.
+ *
+ * De ahí el spread del módulo real. Sin él el mock no sustituye una función: BORRA el resto de
+ * los exports, y cualquier archivo que importe `checkQueueGate` o `reportRateLimited` revienta
+ * con `SyntaxError: Export named ... not found` — un error que no menciona ni este archivo ni
+ * este mock. Pasó exactamente así al agregar `conceptos-del-cliente.test.ts`, que monta el
+ * módulo de ingesta completo.
+ */
+const rateLimitReal = await import('@/lib/rate-limit');
 mock.module('@/lib/rate-limit', () => ({
+  ...rateLimitReal,
   enforceTokenBucket: async () => null,
 }));
 

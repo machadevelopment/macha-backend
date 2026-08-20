@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
@@ -10,13 +10,18 @@ import { countCsvRows } from '@/lib/csv-inspect';
 import { fileMentionsCurrency, isScannable } from '@/lib/currency-scan';
 import { counterCurrency, loadFxCatalog, type Currency } from '@/lib/fx';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
-import { cancelDocumentRows, revertDocument } from '@/lib/promotion';
+import { cancelDocumentRows, revertDocument, encolarPromocionDeLoResuelto } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
-import { documents, companies } from '@/db/schema';
+import { documents, companies, stagingRows } from '@/db/schema';
 import { enqueue, QUEUES, RETRY_POLICY } from '@/queue';
+import {
+  claveDeConcepto,
+  guardarReglasAprendidas,
+  type ReglaAprendida,
+} from '@/lib/category-dictionary';
 
 const ALLOWED_MIME_EXT: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -25,6 +30,28 @@ const ALLOWED_MIME_EXT: Record<string, string> = {
 };
 
 const MESSAGES = INTAKE_MESSAGES;
+
+/**
+ * ¿A esta fila marcada la arregla que el cliente diga qué es?
+ *
+ * Sí cuando el problema es de SIGNIFICADO: el sistema no supo qué era (`low_confidence`), no
+ * pudo nombrarlo (`missing_category`) o lo nombró con un tipo que no existe (`invalid_type`).
+ *
+ * No cuando el problema es el DATO: sin fecha legible, sin monto, con una moneda que no
+ * manejamos. Ninguna categoría arregla eso, y preguntarlo sería pedirle al cliente una
+ * respuesta que no cambia nada — dejándole además la impresión de que ya lo resolvió. Esas
+ * filas siguen su camino por revisión interna, que es donde alguien puede mirar el archivo.
+ *
+ * Se compara por PREFIJO en `low_confidence` porque el motivo lleva el valor pegado
+ * (`low_confidence:0.35`), y una igualdad exacta no casaría con ninguno.
+ */
+const MOTIVOS_ARREGLABLES = ['missing_category', 'invalid_type'] as const;
+
+function esArreglablePorCategoria(flagReason: string | null): boolean {
+  if (flagReason === null) return false;
+  if (flagReason.startsWith('low_confidence')) return true;
+  return (MOTIVOS_ARREGLABLES as readonly string[]).includes(flagReason);
+}
 
 export const ingestion = new Elysia({ prefix: '/documents' })
   .use(tenantDerive)
@@ -508,4 +535,271 @@ export const ingestion = new Elysia({ prefix: '/documents' })
        */
       readSummary: doc.readSummary ?? null,
     };
-  });
+  })
+
+  /**
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   * LO QUE EL SISTEMA NO ENTENDIÓ, PARA QUE LO CONTESTE QUIEN SÍ SABE
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Decisión de Semi, 2026-08-20: cuando queda un concepto sin clasificar, se le pregunta al
+   * CLIENTE durante la subida — **no** va a revisión interna. El motivo es simple y no es de
+   * costos: es la persona que sabe qué es "Cropa" en su propio libro. Nosotros podemos
+   * adivinar; el dueño lo sabe.
+   *
+   * ═══ SE PREGUNTA POR CONCEPTO, NO POR FILA — Y ES LO QUE HACE VIABLE LA PANTALLA ═══
+   *
+   * Un archivo con 400 filas marcadas puede tener seis conceptos distintos. Preguntar por fila
+   * serían 400 preguntas y nadie las contesta: sería revisión interna con otro nombre, en la
+   * cara del cliente. Preguntar por concepto son seis, y cada respuesta arregla todas sus
+   * filas de una vez y **queda aprendida para las cargas siguientes**.
+   *
+   * ═══ SOLO LO QUE UNA CATEGORÍA PUEDE ARREGLAR ═══
+   *
+   * Se filtran los motivos de marcado que una respuesta del cliente resuelve de verdad: no
+   * saber qué es (`low_confidence`), no haber podido nombrarlo (`missing_category`) o haberlo
+   * nombrado con un tipo inválido (`invalid_type`).
+   *
+   * Una fila marcada por `invalid_date` o `invalid_amount` NO aparece acá, y eso es
+   * deliberado: su problema es el dato, no el nombre. Mostrarla sería pedirle al cliente una
+   * respuesta que no cambia nada — y peor, dejarle la impresión de que ya lo arregló. Esas
+   * siguen su camino por revisión interna.
+   */
+  .get('/:id/conceptos-pendientes', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'upload_excel', set);
+
+    const [doc] = await db
+      .select({ id: documents.id })
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+
+    /*
+     * El filtro por `companyId` va ADEMÁS del documento, no en su lugar. El documento ya se
+     * verificó arriba, así que es redundante — y se pone igual porque es la regla que este
+     * proyecto no negocia: ninguna consulta a una tabla de negocio sin `company_id`. Una
+     * consulta correcta por accidente deja de serlo la primera vez que alguien la copia.
+     */
+    const filas = await db
+      .select({
+        payload: stagingRows.payload,
+        targetEntity: stagingRows.targetEntity,
+        flagReason: stagingRows.flagReason,
+      })
+      .from(stagingRows)
+      .where(
+        and(
+          eq(stagingRows.companyId, companyId),
+          eq(stagingRows.documentId, params.id),
+          eq(stagingRows.reviewStatus, 'pending'),
+          isNull(stagingRows.promotedAt),
+        ),
+      );
+
+    /*
+     * El agrupado se hace en CÓDIGO y no con un `GROUP BY`. No es pereza: la clave del grupo
+     * es `claveDeConcepto(payload->>'description')`, la MISMA normalización que usa el
+     * diccionario para guardar y para buscar. Un `GROUP BY lower(...)` en SQL agruparía
+     * distinto —sin quitar acentos, sin colapsar palabras funcionales— y el cliente vería
+     * "Pago a CLARO" y "pago claro" como dos preguntas, contestaría las dos, y la segunda
+     * regla pisaría a la primera.
+     */
+    const porConcepto = new Map<
+      string,
+      { concepto: string; ejemplo: string; filas: number; entity: string; montoTotal: number }
+    >();
+
+    for (const f of filas) {
+      if (!esArreglablePorCategoria(f.flagReason)) continue;
+      const p = f.payload as { description?: unknown; originalAmount?: unknown };
+      const clave = claveDeConcepto(p.description);
+      if (clave === null) continue;
+
+      const actual = porConcepto.get(clave);
+      const monto = typeof p.originalAmount === 'number' ? Math.abs(p.originalAmount) : 0;
+      if (actual) {
+        actual.filas++;
+        actual.montoTotal += monto;
+      } else {
+        porConcepto.set(clave, {
+          concepto: clave,
+          // El texto CRUDO de la primera fila, no la clave normalizada: el cliente reconoce
+          // lo que él escribió en su archivo, no `pago|claro`.
+          ejemplo: String(p.description),
+          filas: 1,
+          entity: f.targetEntity,
+          montoTotal: monto,
+        });
+      }
+    }
+
+    /*
+     * Ordenado por PLATA y no por cantidad de filas. Si el cliente contesta tres de seis y se
+     * va, que las tres que contestó sean las que más mueven su contabilidad. Cien filas de
+     * Q 5 pesan menos que dos de Q 40.000, y el orden de una lista es lo único que decide qué
+     * se contesta cuando nadie la termina.
+     */
+    const conceptos = [...porConcepto.values()].sort((a, b) => b.montoTotal - a.montoTotal);
+    return { conceptos, total: conceptos.length };
+  })
+
+  /**
+   * La respuesta del cliente: qué es cada concepto.
+   *
+   * Hace dos cosas en una transacción, y las dos importan por separado:
+   *
+   *  1. **Guarda la regla** con `source: 'confirmado_por_cliente'`, que es la autoridad más
+   *     alta del diccionario. De acá en adelante no se le vuelve a preguntar, y ninguna
+   *     inferencia posterior del modelo la pisa (ver `category-dictionary.ts`).
+   *  2. **Arregla las filas de ESTA carga** que quedaron esperando por ese concepto, y encola
+   *     su promoción. Sin este segundo paso el cliente contestaría y su dashboard seguiría
+   *     igual — la pregunta se sentiría inútil y con razón.
+   *
+   * ═══ QUÉ DECIDE EL CLIENTE Y QUÉ NO ═══
+   *
+   * Decide `type` (ingreso / costo directo / gasto / otro) y `category` (el nombre del rubro).
+   * NO decide `entity` —transacción, factura o cuenta por pagar—: esa es una forma contable
+   * que el sistema ya determinó al leer la fila, y preguntársela sería pedirle una decisión
+   * de contabilidad en vez de una de su negocio. Se conserva la que la fila ya tenía.
+   *
+   * El `type` viene acotado por el esquema a los cuatro válidos. Si llegara cualquier otro,
+   * `staging-rules` volvería a marcar la fila y el cliente habría contestado para nada.
+   */
+  .post(
+    '/:id/conceptos',
+    async ({ companyId, userId, role, params, body, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
+
+      const [doc] = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
+
+      const pendientes = await db
+        .select({
+          id: stagingRows.id,
+          payload: stagingRows.payload,
+          targetEntity: stagingRows.targetEntity,
+          flagReason: stagingRows.flagReason,
+        })
+        .from(stagingRows)
+        .where(
+          and(
+            eq(stagingRows.companyId, companyId),
+            eq(stagingRows.documentId, params.id),
+            eq(stagingRows.reviewStatus, 'pending'),
+            isNull(stagingRows.promotedAt),
+          ),
+        );
+
+      /* Las respuestas, indexadas por la MISMA clave normalizada con la que se preguntó. */
+      const respuestas = new Map<string, { type: string; category: string }>();
+      for (const r of body.respuestas) {
+        const clave = claveDeConcepto(r.concepto) ?? claveDeConcepto(r.ejemplo ?? null);
+        if (clave === null) continue;
+        respuestas.set(clave, { type: r.type, category: r.category.trim() });
+      }
+      if (respuestas.size === 0) {
+        set.status = 422;
+        return { error: 'Ninguna respuesta trae un concepto reconocible' };
+      }
+
+      let filasResueltas = 0;
+      const reglas: ReglaAprendida[] = [];
+      const vistos = new Set<string>();
+
+      for (const fila of pendientes) {
+        if (!esArreglablePorCategoria(fila.flagReason)) continue;
+        const p = fila.payload as Record<string, unknown>;
+        const clave = claveDeConcepto(p.description);
+        if (clave === null) continue;
+        const r = respuestas.get(clave);
+        if (!r) continue;
+
+        await db
+          .update(stagingRows)
+          .set({
+            payload: { ...p, type: r.type, category: r.category },
+            /*
+             * `confidence` sube a 1: lo dijo el dueño de la contabilidad. Si se dejara la
+             * confianza vieja —la baja que la marcó—, `staging-rules` la volvería a marcar por
+             * `low_confidence` y la respuesta del cliente no serviría de nada.
+             */
+            confidence: '1.0000',
+            flagReason: null,
+            reviewStatus: 'approved',
+            /*
+             * El userId del CLIENTE. La columna no tiene FK y hasta ahora solo guardaba
+             * staff; que ahora guarde ambos no la vuelve ambigua, porque la procedencia real
+             * de la decisión queda en `company_category_rules.source`
+             * (`confirmado_por_cliente` vs `corregido_por_staff`), que es append-only.
+             */
+            reviewedBy: userId,
+            reviewedAt: new Date(),
+          })
+          .where(and(eq(stagingRows.id, fila.id), eq(stagingRows.companyId, companyId)));
+        filasResueltas++;
+
+        if (!vistos.has(clave)) {
+          vistos.add(clave);
+          reglas.push({
+            texto: String(p.description),
+            entity: fila.targetEntity,
+            type: r.type,
+            category: r.category,
+          });
+        }
+      }
+
+      /*
+       * La regla se guarda para las cargas SIGUIENTES; las filas de esta ya quedaron
+       * arregladas arriba. Si esto falla, el cliente no pierde su respuesta —su contabilidad
+       * de hoy está bien— pero se le volvería a preguntar la próxima vez. Es molesto y
+       * recuperable, así que no tumba la respuesta: se registra y sigue.
+       */
+      let reglasGuardadas = 0;
+      try {
+        reglasGuardadas = await guardarReglasAprendidas(db, companyId, reglas, {
+          source: 'confirmado_por_cliente',
+          createdBy: userId,
+        });
+      } catch (err) {
+        console.error('[documents/conceptos] no se pudo guardar el diccionario:', err);
+      }
+
+      // Cierra el ciclo: lo aprobado entra a la contabilidad. Mismo camino que usa el staff
+      // al resolver una fila, para que no haya dos formas de promover lo resuelto.
+      if (filasResueltas > 0) {
+        await encolarPromocionDeLoResuelto(db, companyId, params.id);
+      }
+
+      return { filasResueltas, reglasGuardadas, conceptosRecibidos: respuestas.size };
+    },
+    {
+      body: t.Object({
+        respuestas: t.Array(
+          t.Object({
+            /** La clave normalizada que devolvió `GET /conceptos-pendientes`. */
+            concepto: t.String({ minLength: 1 }),
+            /** El texto crudo, como respaldo si el cliente manda el ejemplo en vez de la clave. */
+            ejemplo: t.Optional(t.String()),
+            type: t.Union([
+              t.Literal('revenue'),
+              t.Literal('cogs'),
+              t.Literal('opex'),
+              t.Literal('other'),
+            ]),
+            category: t.String({ minLength: 1, maxLength: 80 }),
+          }),
+          { minItems: 1, maxItems: 100 },
+        ),
+      }),
+    },
+  );
