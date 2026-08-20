@@ -200,10 +200,36 @@ Conventions & gotchas:
     (comprobado por mutación). Lo que el candado garantiza es que una fila dudosa la JUZGUE el
     modelo en vez de resolverse con una regla que no aplica: sin él, entra a revisión interna
     con una categoría inventada en vez de que el modelo la declare `skip` y no genere fila.
-  **PENDIENTE y decidido, no olvidado**: la pantalla donde el CLIENTE categoriza lo que quedó
-  sin entender, que por decisión de Semi va **en el flujo de subida y no en revisión interna**
-  (es la persona que sabe qué es "Cropa" en su propio libro). La tabla ya distingue el origen
-  para que su respuesta valga más que la del modelo.
+  **El cliente ya contesta lo que no se entendió** (2026-08-20, la otra mitad del acuerdo).
+  `GET /documents/:id/conceptos-pendientes` + `POST /documents/:id/conceptos` en el backend, y
+  `components/upload/conceptos-pendientes.tsx` en el flujo de subida — **no** en revisión
+  interna, por decisión de Semi: es la persona que sabe qué es "Cropa" en su propio libro.
+  - **Se pregunta por CONCEPTO, no por fila**, y eso es lo que hace viable la pantalla: un
+    archivo con 400 filas marcadas puede tener seis conceptos, y 400 preguntas no las contesta
+    nadie — sería revisión interna con otro nombre, en la cara del cliente. El agrupado usa
+    `claveDeConcepto`, la MISMA normalización del diccionario; un `GROUP BY lower(...)` en SQL
+    agruparía distinto y el cliente vería "Pago a CLARO" y "pago claro" como dos preguntas.
+  - **Solo se pregunta lo que una categoría arregla** (`low_confidence`, `missing_category`,
+    `invalid_type`). Una fila marcada por `invalid_date` o `invalid_amount` NO aparece: su
+    problema es el dato, no el nombre, y mostrarla sería pedir una respuesta que no cambia nada
+    dejándole además la impresión de que ya lo resolvió. Esas siguen por revisión interna.
+  - **Contestar arregla las filas de ESTA carga**, no solo las próximas: sube la confianza a 1,
+    limpia el `flag_reason` y encola la promoción por el MISMO camino que usa staff
+    (`encolarPromocionDeLoResuelto`, que por eso se movió de `/admin/staging-rows` a
+    `lib/promotion`). Sin eso el cliente contesta y su dashboard sigue igual.
+  - **El cliente decide `type` y `category`, NO `entity`**: transacción/factura/cuenta por pagar
+    es una forma contable que el sistema ya determinó al leer la fila. Y el desplegable dice "Un
+    gasto de operación", no `opex` — el valor que viaja es `opex` porque el esquema lo acota,
+    pero nadie que lleve una tienda debería aprender la palabra.
+  - **Los montos van SEPARADOS por moneda, nunca sumados.** Las filas de staging traen
+    `originalAmount` + `originalCurrency` y todavía no tienen `amount_base` (la conversión pasa
+    al promover, con la tasa snapshoteada por fila), así que no hay cifra convertida que sumar.
+    Sumar GTQ con USD daría un número que no es ninguna de las dos, al lado del concepto como si
+    fuera plata de verdad — un dólar contado como quetzal subestima ~7,7 veces. El ORDEN de la
+    lista usa el mayor total de UNA moneda por el mismo motivo.
+  - **Lo contestado se quita de la lista en local, sin volver a pedirla**: la promoción va por
+    cola, así que un GET inmediato puede devolver los mismos conceptos todavía pendientes y el
+    cliente vería reaparecer lo que acaba de contestar.
   **Descartado en la misma conversación, y vale saber por qué**: generar y ejecutar un script
   en el worker. El worker tiene las credenciales de la base, y clasificar no es parsear — un
   script no sabe que "pago a Claro" es servicios. La idea de un sandbox sin red y efímero
