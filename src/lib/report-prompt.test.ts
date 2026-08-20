@@ -4,6 +4,7 @@ import {
   buildReportSystemPrompt,
   sanitizeInstructions,
 } from '@/lib/report-prompt';
+import { DEFAULT_SECTIONS, REPORT_TYPES } from '@/lib/report-sections';
 
 describe('buildReportSystemPrompt', () => {
   /**
@@ -96,5 +97,51 @@ describe('sanitizeInstructions', () => {
 
   test('normaliza CRLF', () => {
     expect(sanitizeInstructions('a\r\nb')).toBe('a\nb');
+  });
+});
+
+/**
+ * CU-868ku9rpy — cuatro tipos de reporte, y cada uno tiene que decir algo distinto.
+ *
+ * El prototipo ofrece seis tipos y el backend definía uno. Al agregar los tres que SÍ se
+ * pueden construir con las secciones que ya existen, apareció el riesgo real: cuatro tipos
+ * que comparten la sección de KPIs producirían cuatro narrativas indistinguibles, y el
+ * selector de tipo quedaría decorativo. Lo que lo evita es la intro por tipo.
+ */
+describe('los cuatro tipos piden narrativas distintas (CU-868ku9rpy)', () => {
+  const base = { locale: 'es' as const, sections: [] };
+
+  test('cada tipo mete su propia instrucción en el prompt', () => {
+    const intros = REPORT_TYPES.map((reportType) =>
+      buildReportSystemPrompt({ ...base, reportType }),
+    );
+
+    // Ninguno repite el prompt de otro: si dos coincidieran, el tipo no cambiaría nada.
+    expect(new Set(intros).size).toBe(REPORT_TYPES.length);
+  });
+
+  test('el de costos habla de gasto y acota el papel de los ingresos', () => {
+    const p = buildReportSystemPrompt({ ...base, reportType: 'cost_analysis' });
+    expect(p).toMatch(/COSTOS Y GASTOS/);
+    // El matiz que importa: los ingresos son la referencia para pesar el gasto, no el tema.
+    expect(p).toMatch(/no como tema/);
+  });
+
+  test('el de ventas manda decir cuándo NO hay productos, en vez de callarse', () => {
+    /*
+     * `top_products` viene vacía cuando el Excel del cliente no traía producto por fila —
+     * el caso normal, no la excepción. Sin esta instrucción el modelo se calla y el usuario
+     * lee un reporte de ventas sin ventas por producto, sin saber por qué.
+     */
+    const p = buildReportSystemPrompt({ ...base, reportType: 'sales_performance' });
+    expect(p).toMatch(/vac[ií]a/i);
+  });
+
+  test('cada tipo trae un juego de secciones por defecto que no está vacío', () => {
+    for (const tipo of REPORT_TYPES) {
+      expect(DEFAULT_SECTIONS[tipo].length).toBeGreaterThan(0);
+      // `kpis` va en los cuatro: es el ancla de cualquier reporte financiero.
+      expect(DEFAULT_SECTIONS[tipo]).toContain('kpis');
+    }
   });
 });

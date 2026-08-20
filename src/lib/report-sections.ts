@@ -61,11 +61,41 @@ export const REPORT_SECTIONS = [
 export type ReportSection = (typeof REPORT_SECTIONS)[number];
 
 /**
- * Tipos de reporte. Arranca con uno solo y COMPLETO (decisión del ticket B2), pero la
- * forma es de catálogo desde ya para que agregar el segundo sea una entrada en esta lista
- * y su juego de secciones por defecto, no una refactorización de la firma.
+ * Tipos de reporte.
+ *
+ * Arrancó con uno solo y COMPLETO (decisión del ticket B2), con la forma de catálogo desde
+ * el día uno para que agregar el segundo fuera una entrada en esta lista y su juego de
+ * secciones, no una refactorización. Esto es cobrar esa apuesta.
+ *
+ * ═══ CUATRO Y NO SEIS (CU-868ku9rpy) ═══
+ *
+ * El prototipo ofrece seis: resumen ejecutivo, desempeño financiero, análisis de flujo de
+ * caja, análisis de costos, ventas y productos, y **personal y plantilla**. Van cuatro.
+ *
+ * Los dos que no van, y por qué NO es pereza:
+ *
+ *   · `workforce` (personal y plantilla) — el ledger no tiene nómina. Sus movimientos son
+ *     `revenue`/`cogs`/`opex`/`other`; el gasto de planilla cae dentro de `opex` sin
+ *     distinguirse del alquiler o del software. Un reporte de plantilla que no puede contar
+ *     empleados ni separar su costo sería un título con las mismas cifras de siempre debajo.
+ *   · `cash_flow` como tipo APARTE — la caja del período, con datos de base acumulativa, es
+ *     exactamente `revenue - cogs - opex`, o sea la misma resta que la utilidad. Ya está
+ *     documentado en `analytics/kpi-header.tsx`: una caja de verdad distinta exige base de
+ *     EFECTIVO (fechar por cuándo se cobró, no por cuándo se facturó) y ningún endpoint
+ *     expone eso todavía. Dos tipos de reporte con el mismo contenido y nombres distintos
+ *     es peor que uno: en un producto financiero, dos títulos distintos prometen dos
+ *     análisis distintos.
+ *
+ * Los cuatro que van se arman ENTERAMENTE con secciones que ya existen y se calculan hoy.
+ * Ninguno necesita un dato que el backend no tenga, que es la única razón por la que se
+ * pueden agregar en una lista.
  */
-export const REPORT_TYPES = ['executive_summary'] as const;
+export const REPORT_TYPES = [
+  'executive_summary',
+  'financial_performance',
+  'cost_analysis',
+  'sales_performance',
+] as const;
 export type ReportType = (typeof REPORT_TYPES)[number];
 
 /**
@@ -78,6 +108,15 @@ export type ReportType = (typeof REPORT_TYPES)[number];
  */
 export const DEFAULT_SECTIONS: Record<ReportType, ReportSection[]> = {
   executive_summary: ['kpis', 'recommendations'],
+  /*
+   * CU-868ku9rpy. Cada juego se elige por lo que el TIPO promete, no por incluir todo lo
+   * disponible: un reporte que trae las seis secciones siempre no es un tipo, es un volcado
+   * con seis nombres. El usuario puede agregar o quitar secciones a mano — esto es el punto
+   * de partida que hace que elegir el tipo signifique algo.
+   */
+  financial_performance: ['kpis', 'revenue_trend', 'cost_breakdown', 'recommendations'],
+  cost_analysis: ['kpis', 'cost_breakdown', 'risks', 'recommendations'],
+  sales_performance: ['kpis', 'revenue_trend', 'top_products', 'recommendations'],
 };
 
 export interface ReportKpis {

@@ -54,10 +54,30 @@ NEVER invent, recompute or fill in figures: use only the snapshot's. If a sectio
 Write an executive narrative in plain text, no markdown, in English.`,
 };
 
+/*
+ * CU-868ku9rpy: cada tipo dice al modelo QUÉ PREGUNTA responde, no solo cómo llamarse.
+ *
+ * Sin esto, cuatro tipos con las mismas secciones producirían cuatro narrativas
+ * indistinguibles y el selector de tipo sería decorativo. La intro es lo que hace que
+ * "análisis de costos" hable de costos aunque comparta la sección de KPIs con los otros
+ * tres.
+ */
 const TYPE_INTRO: Record<ReportType, { es: string; en: string }> = {
   executive_summary: {
     es: 'El reporte es un RESUMEN EJECUTIVO: qué pasó en el período y por qué importa, en el orden en que se listan las secciones.',
     en: 'The report is an EXECUTIVE SUMMARY: what happened in the period and why it matters, in the order the sections are listed.',
+  },
+  financial_performance: {
+    es: 'El reporte es un ANÁLISIS DE DESEMPEÑO FINANCIERO: cómo se movieron ingresos, costos y margen contra el período anterior, y qué explica la diferencia. Prioriza la comparación por encima de la foto del período.',
+    en: 'The report is a FINANCIAL PERFORMANCE review: how revenue, costs and margin moved against the previous period, and what explains the gap. Favour the comparison over the snapshot.',
+  },
+  cost_analysis: {
+    es: 'El reporte es un ANÁLISIS DE COSTOS Y GASTOS: en qué se está yendo el dinero, qué categorías pesan más y cuáles se movieron. Habla de los ingresos solo como referencia para pesar el gasto, no como tema.',
+    en: 'The report is a COST AND SPEND analysis: where the money goes, which categories weigh most and which ones moved. Mention revenue only as a yardstick for the spend, not as the subject.',
+  },
+  sales_performance: {
+    es: 'El reporte es un ANÁLISIS DE VENTAS Y PRODUCTOS: qué se vendió, qué producto manda y cómo se movió la venta en el período. Si la sección de productos viene vacía, dilo — significa que el archivo del cliente no traía producto por fila.',
+    en: 'The report is a SALES AND PRODUCT analysis: what sold, which product leads and how sales moved over the period. If the products section is empty, say so — it means the client file had no product per row.',
   },
 };
 
