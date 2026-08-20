@@ -2,6 +2,7 @@ import { describe, expect, test, beforeAll, afterAll, mock } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { Elysia } from 'elysia';
 import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
+import { crearDobleDeCola } from './doble-de-cola';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════
@@ -36,21 +37,17 @@ mock.module('@/lib/auth', () => ({
   verifyToken: async (token: string) => ({ sub: token }),
 }));
 
-/** La cola no corre acá: lo que se comprueba es que se ENCOLE la promoción, no que promueva. */
-const encolados: { queue: string; payload: unknown }[] = [];
-mock.module('@/queue', () => ({
-  QUEUES: {
-    excelIngest: 'excel.ingest',
-    documentPromote: 'document.promote',
-    alertEvaluate: 'alert.evaluate',
-  },
-  RETRY_POLICY: {},
-  enqueue: async (queue: string, payload: unknown) => {
-    encolados.push({ queue, payload });
-    return 'job-id';
-  },
-  registerWorker: async () => 'worker-id',
-}));
+/*
+ * La cola no corre acá: lo que se comprueba es que se ENCOLE la promoción, no que promueva.
+ *
+ * El doble es el COMPARTIDO, y este archivo es la razón por la que existe: monta el módulo de
+ * ingesta completo, que importa `RETRY_POLICY`, y los cinco dobles locales que había antes no
+ * lo exportaban. `mock.module` es global al proceso y el último en cargarse gana, así que el
+ * síntoma fue un `SyntaxError` de importación en CI y no en local. Ver `./doble-de-cola`.
+ */
+const dobleDeCola = crearDobleDeCola();
+const encolados = dobleDeCola.encolados;
+mock.module('@/queue', () => dobleDeCola.modulo);
 
 const { ingestion } = await import('@/modules/ingestion');
 const { DiccionarioDeCategorias, claveDeConcepto } = await import('@/lib/category-dictionary');
