@@ -21,13 +21,22 @@ import { TEMPLATES } from './email';
 const URL_OK = 'https://app.macha.finance/invitaciones/aceptar?token=abc-123';
 
 describe('el asset de marca', () => {
-  test('el logo va incrustado como data URI, no como URL remota', () => {
+  test('el logo del CORREO va por URL pública, no como data URI', () => {
     /*
-     * LA RAZÓN DE FONDO: Gmail y Outlook bloquean imágenes remotas por defecto. Un correo
-     * transaccional cuyo trabajo es parecer legítimo se vería con el logo roto hasta que
-     * quien lo recibe apriete "mostrar imágenes".
+     * ═══ ESTE TEST AFIRMABA LO CONTRARIO, Y ESTABA MAL ═══
+     *
+     * Decía: "Gmail y Outlook bloquean imágenes remotas por defecto, un correo se vería con
+     * el logo roto hasta que quien lo recibe apriete mostrar imágenes". Las dos mitades están
+     * al revés, y el resultado fue el logo roto que reportó Jose:
+     *
+     *   · Gmail SÍ carga imágenes remotas, desde 2013, por su propio proxy
+     *     (`googleusercontent.com`) y sin preguntarle a quien lee.
+     *   · Gmail NO renderiza `data:` URIs en el cuerpo de un correo: los descarta.
+     *
+     * Se había elegido el único formato que Gmail no soporta para esquivar un bloqueo que
+     * dejó de existir hace más de una década. El test pasaba porque probaba que el código
+     * hacía lo que el código hacía.
      */
-    expect(ISOTIPO_DATA_URI.startsWith('data:image/png;base64,')).toBe(true);
     const html = renderBrandedEmail({
       locale: 'es',
       title: 'x',
@@ -35,9 +44,38 @@ describe('el asset de marca', () => {
       ctaLabel: 'z',
       ctaUrl: URL_OK,
     });
-    expect(html).toContain('src="data:image/png;base64,');
-    // Ninguna referencia a una imagen servida por HTTP.
-    expect(html).not.toMatch(/<img[^>]+src="https?:/);
+
+    expect(html).toContain('/brand/isotipo.png');
+    // Y NINGÚN data URI: es lo que Gmail descarta.
+    expect(html).not.toContain('src="data:image');
+  });
+
+  test('el logo lleva `width` y `height` en el atributo, no solo en el estilo', () => {
+    /*
+     * Outlook (motor de Word) ignora `width`/`height` en CSS para imágenes. Sin los
+     * atributos, reserva el tamaño NATURAL del PNG —170x200— y el logo sale gigante,
+     * empujando el resto de la tarjeta.
+     *
+     * Los valores salen del aspecto real (170/200 = 0,85), no de un redondeo cómodo: a 36px
+     * de alto son 31 de ancho. Un ancho inventado deforma el isotipo, que es justo lo que un
+     * correo de marca no puede permitirse.
+     */
+    const html = renderBrandedEmail({
+      locale: 'es',
+      title: 'x',
+      bodyHtml: 'y',
+      ctaLabel: 'z',
+      ctaUrl: URL_OK,
+    });
+
+    expect(html).toContain('width="31" height="36"');
+    expect(Math.round(36 * ISOTIPO_ASPECTO)).toBe(31);
+  });
+
+  test('el data URI se conserva para el HTML que se ve en un navegador', () => {
+    // El PDF del reporte y el HTML autenticado sí lo pueden usar: se abren fuera de un
+    // cliente de correo, y en el caso del PDF a veces sin red.
+    expect(ISOTIPO_DATA_URI.startsWith('data:image/png;base64,')).toBe(true);
   });
 
   test('los bytes decodifican a un PNG válido', () => {
@@ -133,7 +171,7 @@ describe('los tres correos usan el shell (el punto del ticket)', () => {
       const { html, subject } = armar();
 
       // Las cinco piezas del shell aprobado.
-      expect(html).toContain('src="data:image/png;base64,'); // logo
+      expect(html).toContain('/brand/isotipo.png'); // logo, servido públicamente
       expect(html).toContain('border-radius:20px'); // tarjeta
       expect(html).toContain('border-radius:100px;background:#0A0A0A'); // botón píldora
       expect(html).toContain('Convierte datos, en decisiones.'); // tagline del pie
