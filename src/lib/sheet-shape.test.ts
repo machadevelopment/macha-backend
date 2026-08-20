@@ -124,3 +124,70 @@ describe('datos a lo ancho: una fila que son veinticuatro movimientos', () => {
     expect(analizarFormaDeHoja(hoja).motivo).toContain('un valor por mes');
   });
 });
+
+/**
+ * ═══ EL REPORTE TRANSPUESTO ═══
+ *
+ * `U3TECH_Demo_Datos_Ampliado`, 2026-08-19. Las señales anteriores buscan reportes ANCHOS
+ * (meses a lo largo, una fila por cliente); este archivo trae el mismo agregado girado 90
+ * grados: los meses hacia ABAJO, una fila por mes, once columnas limpias sin un hueco.
+ *
+ * No disparaba ninguna señal —cobertura 1, cero celdas vacías, 11 columnas, sin nombres
+ * repetidos— así que se veía idéntico a una tabla de movimientos. Y el daño es el mismo que
+ * el de `sheet-duplication.ts`: es la MISMA PLATA que ya está en la hoja de detalle.
+ */
+describe('resumen por período: el reporte transpuesto', () => {
+  /** Una fila por mes, como `Resumen_Mensual` del archivo real. */
+  const resumenMensual = (meses: number) => [
+    ['Mes', 'Ingresos Facturados (USD)', 'Costo Directo (USD)', 'Utilidad Bruta (USD)'],
+    ...Array.from({ length: meses }, (_, i) => {
+      const m = (i % 12) + 1;
+      const anio = 2023 + Math.floor(i / 12);
+      return [`${anio}-${String(m).padStart(2, '0')}`, 47185 + i, 22655 + i, 24530 + i];
+    }),
+  ];
+
+  test('36 filas que son 36 meses distintos NO son movimientos', () => {
+    const f = analizarFormaDeHoja(resumenMensual(36));
+    expect(f.esReporte).toBe(true);
+  });
+
+  test('el motivo dice que sus cifras ya están en otra hoja', () => {
+    // Importa para el mensaje al cliente: descartar una hoja sin explicar que su dinero SÍ
+    // se contabilizó, desde la hoja de detalle, se lee como "perdimos tus datos".
+    const f = analizarFormaDeHoja(resumenMensual(36));
+    expect(f.motivo).toMatch(/resumen por per|ya están en la hoja de detalle/i);
+  });
+
+  test('una hoja de MOVIMIENTOS con columna de mes NO se descarta', () => {
+    /*
+     * El contraste que impide que esto se convierta en el bug opuesto —perder contabilidad
+     * en silencio, que es el peor de los dos errores.
+     *
+     * La diferencia no es tener períodos en la primera columna: es que en un agregado cada
+     * mes aparece UNA vez, y en un listado de movimientos se repite decenas de veces porque
+     * hay muchos movimientos en cada mes. Acá van 60 filas repartidas en 5 meses.
+     */
+    const movimientos = [
+      ['Mes', 'Concepto', 'Monto'],
+      ...Array.from({ length: 60 }, (_, i) => [`2026-0${(i % 5) + 1}`, `Venta ${i}`, 100 + i]),
+    ];
+    expect(analizarFormaDeHoja(movimientos).esReporte).toBe(false);
+  });
+
+  test('una hoja corta no se descarta, aunque sus filas sean meses', () => {
+    /*
+     * Con 5 meses la hoja tiene 6 filas y la corta la guarda de `rows.length < 8`, no el
+     * mínimo de esta señal. Se deja escrito porque el efecto importa igual: una hoja chica
+     * nunca se descarta —cuesta poco mandarla al modelo y equivocarse ahí sale caro— y el
+     * mínimo de 6 de esta señal es, en la práctica, casi redundante con esa guarda.
+     */
+    expect(analizarFormaDeHoja(resumenMensual(5)).esReporte).toBe(false);
+  });
+
+  test('siete meses seguidos YA son una serie, y se descarta', () => {
+    // El primer tamaño en el que la señal manda de verdad: pasa la guarda de longitud y
+    // cumple el mínimo de períodos.
+    expect(analizarFormaDeHoja(resumenMensual(7)).esReporte).toBe(true);
+  });
+});
