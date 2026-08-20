@@ -307,3 +307,61 @@ export const companyColumnProfiles = pgTable(
     ),
   }),
 );
+
+/**
+ * Diccionario de CATEGORÍAS por empresa — acuerdo Keneth–Semi, 2026-08-20.
+ *
+ * `companyColumnProfiles` guarda DÓNDE está cada dato (qué columna es el monto); esta tabla
+ * guarda QUÉ SIGNIFICA el texto de la fila: que "pago a Claro" es servicios. Lo primero se
+ * saca del layout; lo segundo no está en la forma del archivo sino en su significado, y es lo
+ * único que seguía costando una llamada al modelo carga tras carga con la misma respuesta.
+ *
+ * Append-only por el mismo motivo que el perfil de columnas, no por simetría: una categoría
+ * equivocada manda plata al rubro equivocado del dashboard sin que nada falle, y la única
+ * respuesta útil a "¿por qué subieron mis servicios en marzo?" es "con esta regla se
+ * clasificó" — que solo existe si las versiones anteriores siguen ahí.
+ */
+export const companyCategoryRules = pgTable(
+  'company_category_rules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id),
+    /**
+     * El concepto NORMALIZADO que dispara la regla — ver `lib/category-dictionary.ts`.
+     *
+     * Normalizado y no crudo: "Pago a CLARO", "pago claro" y "Pago  a  Claro." son el mismo
+     * concepto para cualquiera que los lea, y guardarlos por separado haría que el
+     * diccionario creciera sin aprender nada.
+     */
+    concepto: text('concepto').notNull(),
+    /**
+     * A qué se resuelve. `entity` y `type` van con la categoría porque una regla sin ellos es
+     * ambigua: "flete" puede ser costo directo (traer mercadería) o gasto operativo (mandar
+     * una muestra), y son rubros distintos del dashboard.
+     */
+    entity: text('entity').notNull(),
+    type: text('type'),
+    category: text('category').notNull(),
+    /**
+     * `inferido` | `confirmado_por_cliente` | `corregido_por_staff`.
+     *
+     * Resuelve el conflicto cuando hay dos reglas para el mismo concepto, y el orden no es
+     * arbitrario: lo que confirmó el cliente gana, porque es quien conoce su propio libro.
+     */
+    source: text('source').notNull().default('inferido'),
+    version: integer('version').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** `null` = la infirió la ingesta sola, sin persona de por medio. */
+    createdBy: uuid('created_by'),
+  },
+  (t) => ({
+    versionUq: uniqueIndex('company_category_rules_version_uq').on(
+      t.companyId,
+      t.concepto,
+      t.version,
+    ),
+    empresaIdx: index('company_category_rules_empresa_idx').on(t.companyId, t.concepto, t.version),
+  }),
+);
