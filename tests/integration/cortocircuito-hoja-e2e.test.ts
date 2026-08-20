@@ -138,7 +138,21 @@ mock.module('@/lib/anthropic', () => ({
   DEFAULT_INSIGHT_PROMPT: '',
 }));
 
-mock.module('@/lib/s3', () => ({ downloadObject: async () => libro() }));
+/*
+ * `mock.module` es GLOBAL al proceso, no al archivo: la suite de integración corre en una sola
+ * invocación de `bun test`, así que este doble reemplaza `@/lib/s3` para TODOS los archivos.
+ *
+ * De ahí el spread del módulo real. Sin él, el mock no "agrega" `downloadObject`: BORRA todo lo
+ * demás que el módulo exporta, y cualquier archivo que importe `uploadKey` u `uploadObject`
+ * revienta con `SyntaxError: Export named 'uploadKey' not found` — un error de importación que
+ * no menciona ni este archivo ni este mock. Pasó exactamente así al agregar
+ * `conceptos-del-cliente.test.ts`, que monta el módulo de ingesta completo.
+ */
+const s3Real = await import('@/lib/s3');
+mock.module('@/lib/s3', () => ({
+  ...s3Real,
+  downloadObject: async () => libro(),
+}));
 
 type Handler = (payload: { documentId: string; companyId: string }) => Promise<void>;
 let handler: Handler | undefined;
