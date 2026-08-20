@@ -284,6 +284,89 @@ export function construirFilas(
      * económico visto por su otra cara, y sin la fecha no entraría al mismo período ni sin
      * el producto al mismo margen.
      */
+    /*
+     * ═══ UNA FACTURA EMITIDA ES TAMBIÉN UN INGRESO (CU pendiente, 2026-08-19) ═══
+     *
+     * Jose subió `U3TECH_Demo_Datos_Ampliado` y reportó que "no logra reconocer los ingresos".
+     * Medido contra producción: la hoja `Facturacion_Clientes` —1.403 filas, USD 4.840.744, que
+     * ES la facturación real de esa empresa— se clasificó como `invoice` y se promovió entera.
+     * El dashboard siguió mostrando CERO ingresos, porque `lib/rollups.ts` suma `revenue`
+     * únicamente de `transactions`; `invoices` alimenta AR y nada más.
+     *
+     * O sea que el dato estaba bien leído, bien clasificado y bien guardado — y aun así el
+     * cliente veía su negocio en cero.
+     *
+     * ═══ NO ES UN ERROR DE CLASIFICACIÓN: ES QUE SON DOS HECHOS ═══
+     *
+     * El prompt pide "UNA de estas entidades" y el modelo eligió bien: una factura pendiente SÍ
+     * es una cuenta por cobrar. Lo que estaba mal es la premisa de que sea solo eso. Emitir una
+     * factura reconoce el ingreso (devengo) Y crea el derecho de cobro; son las dos caras del
+     * mismo hecho económico, una en resultados y otra en balance.
+     *
+     * A quién afectaba: a TODA empresa que factura en vez de cobrar al mostrador — servicios,
+     * consultoría, software, o sea buena parte del mercado al que apunta el producto. Una
+     * cafetería no lo notaba porque sus ventas son transacciones desde el principio.
+     *
+     * ═══ ES EL MISMO PATRÓN QUE YA USA LA VENTA CON COSTO (ABAJO) ═══
+     *
+     * Una fila con ingreso y costo produce dos transacciones; una factura produce su `invoice`
+     * y su transacción de ingreso. El ingreso HEREDA la fecha de emisión y la contraparte, no
+     * la de vencimiento ni la de pago: el ingreso se devenga cuando se emite, y usar la fecha de
+     * cobro lo movería de período — que es justo el error que la contabilidad de caja comete y
+     * este producto no debería.
+     *
+     * ═══ POR QUÉ NO SE HACE AL REVÉS (sumar invoices en el rollup) ═══
+     *
+     * Porque el ingreso quedaría fuera del ledger: `transactions` es lo que leen el rollup, el
+     * reporte, el margen por producto y el chat. Sumarlo solo en el rollup obligaría a repetir
+     * la misma suma en cada consumidor, y el que se olvide muestra una cifra distinta de la del
+     * dashboard sin que nada falle. Acá la fila existe una vez y todos la ven.
+     *
+     * El revert sigue funcionando igual: las dos filas comparten `document_id`, así que el
+     * soft-delete se las lleva juntas.
+     */
+    if (v.e === 'invoice') {
+      /*
+       * El payload del ingreso se ARMA DE NUEVO con `targetEntity: 'transaction'`, no se
+       * copia el de la factura. Las dos formas son distintas —la factura lleva `issueDate` y
+       * `counterparty`; la transacción lleva `date`, `type` y `category`— así que un spread
+       * habría producido una fila sin `date`, que `staging-rules` marca por `invalid_date`.
+       * Fue exactamente lo que hizo el primer intento de este cambio.
+       *
+       * `assemblePayload` ya sabe leer la fila para cada forma: se le pide la otra.
+       */
+      const ingreso = assemblePayload({
+        verdict: {
+          ...verdict,
+          targetEntity: 'transaction',
+          type: 'revenue',
+          // La categoría del modelo se conserva si la dio; si no, una que dice de dónde salió.
+          // `facturacion` describe el ORIGEN, no el rubro comercial del cliente: inventarle un
+          // rubro sería meterle al dashboard una categoría de negocio que él nunca escribió.
+          category: verdict.category ?? 'facturacion',
+        },
+        row,
+        columns,
+        baseCurrency: params.baseCurrency,
+      });
+
+      /*
+       * Sin monto o sin fecha legibles no se registra el ingreso. La `invoice` ya se emitió
+       * arriba y `staging-rules` la evaluará por su cuenta; agregar acá una transacción que
+       * de todas formas va a caer marcada solo duplica el trabajo de revisión sobre la misma
+       * fila del archivo.
+       */
+      const monto = ingreso.originalAmount;
+      if (typeof monto === 'number' && Number.isFinite(monto) && monto !== 0 && ingreso.date) {
+        out.push({
+          targetEntity: 'transaction',
+          confidence: typeof v.cf === 'number' ? v.cf : 0,
+          payload: ingreso,
+        });
+      }
+      continue;
+    }
+
     if (v.e !== 'transaction' || v.t !== 'revenue') continue;
     const costo = costoDeLaFila(row, columns);
     if (costo === null || costo === 0) continue;
