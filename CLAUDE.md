@@ -147,6 +147,42 @@ Conventions & gotchas:
     bueno uno que este proceso nunca vio sale gratis hasta que clasifica mal media hoja.
   - Simulado contra el archivo real con el pipeline nuevo: **213 → 15 llamadas, USD 15,56 →
     1,10, ~17,5 → ~1,6 min, 0 filas a revisión.**
+- **Diccionario de CATEGORÍAS por empresa** (`lib/category-dictionary.ts` + tabla
+  `company_category_rules`, migración `0034`, acuerdo Keneth–Semi 2026-08-20). El perfil de
+  columnas (`0027`) resolvió DÓNDE está cada dato; esto resuelve QUÉ SIGNIFICA el texto de la
+  fila. La distinción importa porque un parser del layout puede sacar lo primero y NUNCA lo
+  segundo: que "pago a Claro" sea servicios no está en la forma del archivo. Por eso era lo
+  único que seguía costando una llamada carga tras carga, con la misma respuesta.
+  **No sustituye al consenso de hoja, actúa en otro eje**: el consenso deja de preguntar por
+  una HOJA homogénea (`Ventas`, 18.034 filas todas `revenue`); el diccionario sirve justo
+  donde el consenso no llega — `Gastos_Operativos`, 13 categorías y la más frecuente cubre el
+  11 %, donde cada fila sí requiere criterio pero los CONCEPTOS se repiten entre cargas. El
+  diccionario no crece con las filas del archivo sino con los conceptos distintos del negocio,
+  que son decenas y se estabilizan.
+  **La autoridad se evalúa ANTES de la versión**: `confirmado_por_cliente` >
+  `corregido_por_staff` > `inferido`. Al revés, una inferencia del modelo de la semana
+  siguiente pisaría lo que el cliente confirmó y se le volvería a preguntar algo que ya
+  contestó — que es exactamente lo que el mecanismo viene a evitar. Staff gana al modelo pero
+  NO al cliente: un operador arregla un disparate evidente, pero si el dueño dijo que "Cropa"
+  es transporte, sabe algo que nosotros no.
+  **Solo aprende con confianza ≥ 0,7 y nunca de un `skip`** (guardar una duda como regla la
+  propaga a todas las cargas siguientes), **escribe UNA vez al final del documento** (si la
+  carga se cancela a mitad no quedan reglas a medias, y la tabla es append-only: no se podrían
+  limpiar) y **un fallo al guardar NO tumba la carga** — la contabilidad ya está promovida y
+  correcta; lo que se pierde es el ahorro de la próxima, que se vuelve a aprender sola.
+  **Lo que hace hoy** es fijar el nombre de la categoría ENTRE cargas: el canonizador unifica
+  dentro de una hoja pero vive en memoria, así que la semana siguiente el mismo concepto podía
+  bautizarse distinto y el cliente volvía a tener dos rubros donde hay uno.
+  **PENDIENTE y decidido, no olvidado**: (a) saltarse la LLAMADA cuando todos los conceptos de
+  un lote ya están en el diccionario — ahí está el ahorro grande, y toca el planificador de
+  lotes; (b) la pantalla donde el CLIENTE categoriza lo que quedó sin entender, que por
+  decisión de Semi va **en el flujo de subida y no en revisión interna** (es la persona que
+  sabe qué es "Cropa" en su propio libro). La tabla ya distingue el origen para que su
+  respuesta valga más que la del modelo.
+  **Descartado en la misma conversación, y vale saber por qué**: generar y ejecutar un script
+  en el worker. El worker tiene las credenciales de la base, y clasificar no es parsear — un
+  script no sabe que "pago a Claro" es servicios. La idea de un sandbox sin red y efímero
+  quedó como camino futuro, no como lo que se construyó.
 - **La categoría se unifica por hoja** (`CanonizadorDeCategorias`, mismo archivo). No es ahorro,
   es un bug de datos: cada lote pide su clasificación por separado y nada obligaba a que dos
   lotes de la misma hoja bautizaran igual el mismo concepto. En producción no lo hicieron —
