@@ -2,6 +2,11 @@ import * as XLSX from 'xlsx';
 import { and, eq } from 'drizzle-orm';
 import { registerWorker, enqueue, QUEUES } from '@/queue';
 import { withCompanyScope } from '@/lib/db-scope';
+import {
+  DiccionarioDeCategorias,
+  guardarReglasAprendidas,
+  type ReglaAprendida,
+} from '@/lib/category-dictionary';
 import { downloadObject } from '@/lib/s3';
 import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
@@ -282,6 +287,31 @@ export function startExcelIngestWorker(): Promise<string> {
          * un solo objeto deja el contador de reescrituras del archivo completo en un lugar.
          */
         const canonizador = new CanonizadorDeCategorias();
+
+        /**
+         * ═══ DICCIONARIO DE CATEGORÍAS DE ESTA EMPRESA (Keneth–Semi, 2026-08-20) ═══
+         *
+         * Lo que el modelo ya clasificó para esta empresa en cargas anteriores. Se carga UNA
+         * vez por documento —no una consulta por fila: con 18.000 filas serían 18.000 idas a
+         * la base para ahorrar llamadas al modelo, o sea cambiar un costo por otro.
+         *
+         * Se usa para dos cosas distintas y las dos importan:
+         *   · APLICAR lo ya sabido, sin volver a preguntar.
+         *   · APRENDER lo nuevo al final de la carga, para que la próxima no pregunte.
+         */
+        const diccionario = await withCompanyScope(companyId, (db) =>
+          DiccionarioDeCategorias.cargar(db, companyId),
+        );
+
+        /** Lo que esta carga descubrió y hay que guardar. Se escribe UNA vez, al terminar. */
+        const aprendidas: ReglaAprendida[] = [];
+        /**
+         * Categorías cuyo nombre lo fijó el diccionario de la empresa, no este documento.
+         *
+         * Es la prueba de que el diccionario está haciendo su trabajo entre cargas: cada una
+         * de estas es un rubro que NO se partió en dos en el dashboard del cliente.
+         */
+        let nombresDelDiccionario = 0;
 
         /** Lotes resueltos sin llamar al modelo, y filas que eso cubrió. Para el log. */
         let lotesCortocircuitados = 0;
@@ -841,8 +871,31 @@ export function startExcelIngestWorker(): Promise<string> {
              * de `Ventas` devolvieron `sales`, `ventas` y `product_sales` para el mismo
              * concepto y el cliente terminó con tres rubros donde hay uno.
              */
-            canonizarCategoria: (entity, type, category) =>
-              canonizador.canonizar(sheetName, entity, type, category),
+            /*
+             * ═══ DOS NIVELES, Y EL ORDEN IMPORTA (Keneth–Semi, 2026-08-20) ═══
+             *
+             * El canonizador unifica DENTRO de la hoja: sin él, dos lotes de `Ventas`
+             * devolvieron `sales`, `ventas` y `product_sales` para el mismo concepto y el
+             * cliente terminó con tres rubros donde hay uno.
+             *
+             * Pero eso vive en memoria y muere con la carga. La semana siguiente el modelo
+             * puede bautizar el mismo concepto distinto otra vez, y el cliente vuelve a tener
+             * dos rubros — el mismo bug, un nivel más arriba.
+             *
+             * El diccionario va PRIMERO justamente por eso: si esta empresa ya tiene un
+             * nombre para este concepto, ese nombre gana, y su dashboard dice lo mismo esta
+             * semana y la próxima. Solo cuando el diccionario no lo conoce decide el
+             * canonizador, y su elección se guarda al final para que la próxima carga sí lo
+             * encuentre.
+             */
+            canonizarCategoria: (entity, type, category) => {
+              const delDiccionario = diccionario.buscar(category);
+              if (delDiccionario !== null && delDiccionario.category !== category) {
+                nombresDelDiccionario++;
+                return delDiccionario.category;
+              }
+              return canonizador.canonizar(sheetName, entity, type, category);
+            },
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -863,6 +916,35 @@ export function startExcelIngestWorker(): Promise<string> {
             consensos.set(sheetName, consenso);
           }
           consenso.registrarLote(result.veredictos);
+
+          /*
+           * ═══ LO QUE ESTA CARGA APRENDIÓ (Keneth–Semi, 2026-08-20) ═══
+           *
+           * Se empareja cada veredicto con la DESCRIPCIÓN de su fila para guardar la regla
+           * "este concepto es esta categoría". El emparejamiento es por ÍNDICE, y eso es
+           * seguro acá por una razón concreta: `hayDesplazamiento` ya abortó el lote si el
+           * modelo numeró corrido, así que en este punto la posición i del veredicto es la
+           * fila i del lote. Sin esa garantía, esto guardaría reglas cruzadas — el concepto
+           * de una fila con la categoría de la siguiente.
+           *
+           * Solo se recoge, no se escribe: la escritura va UNA vez al final del documento.
+           * Escribir por lote dejaría reglas a medias si la carga se cancela o falla, y una
+           * tabla append-only no las puede limpiar después.
+           */
+          const iDescripcion = result.columns.description;
+          if (iDescripcion !== null) {
+            for (const [i, v] of result.veredictos.entries()) {
+              // `skip` no enseña nada: el modelo dijo explícitamente que esa fila no es un
+              // movimiento, y guardarla como regla clasificaría de más la próxima vez.
+              if (v.e === 'skip' || v.c === null) continue;
+              // Confianza baja va a revisión interna, así que tampoco es algo que el sistema
+              // pueda dar por sabido — guardarlo sería propagar una duda como certeza.
+              if (v.cf < 0.7) continue;
+              const texto = batch[i]?.[iDescripcion];
+              if (texto === undefined) continue;
+              aprendidas.push({ texto, entity: v.e, type: v.t, category: v.c });
+            }
+          }
 
           /*
            * ANTES de la transacción, a propósito: si dos lotes de la misma hoja leyeron
@@ -1128,6 +1210,45 @@ export function startExcelIngestWorker(): Promise<string> {
               (filasAptasFallidas > 0
                 ? ` ${filasAptasFallidas} fila(s) no parecían movimientos y fueron a revisión.`
                 : ''),
+          );
+        }
+        /*
+         * ═══ GUARDAR EL DICCIONARIO (Keneth–Semi, 2026-08-20) ═══
+         *
+         * Va acá, después de que todos los lotes confirmaron, y no dentro de cada lote: si la
+         * carga se cancela o falla a mitad, no quedan reglas a medias — y `company_category_rules`
+         * es append-only, así que no se podrían limpiar después.
+         *
+         * Un fallo al guardar NO tumba la carga. La contabilidad del cliente ya está
+         * promovida y correcta; lo que se pierde es el ahorro de la PRÓXIMA carga, que se
+         * vuelve a aprender sola la próxima vez. Tumbar una carga buena por eso sería cambiar
+         * un problema de costo por uno de datos.
+         */
+        if (aprendidas.length > 0) {
+          try {
+            const escritas = await withCompanyScope(companyId, (db) =>
+              guardarReglasAprendidas(db, companyId, aprendidas),
+            );
+            if (escritas > 0) {
+              console.info(
+                `[excel-ingest] company=${companyId} document=${documentId} diccionario: ` +
+                  `${escritas} concepto(s) nuevo(s) aprendidos de ${aprendidas.length} ` +
+                  `clasificación(es). La próxima carga no vuelve a preguntarlos.`,
+              );
+            }
+          } catch (e) {
+            console.error(
+              `[excel-ingest] company=${companyId} document=${documentId} no se pudo guardar el ` +
+                `diccionario de categorías (la carga NO se afecta):`,
+              e,
+            );
+          }
+        }
+        if (nombresDelDiccionario > 0) {
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} diccionario: ` +
+              `${nombresDelDiccionario} categoría(s) tomaron el nombre que esta empresa ya usaba ` +
+              `en cargas anteriores, en vez de uno nuevo para el mismo concepto.`,
           );
         }
         if (canonizador.nombresUnificados > 0) {
