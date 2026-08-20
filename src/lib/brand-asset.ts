@@ -1,12 +1,25 @@
+import { env } from './env';
+
 /**
- * El isotipo de Macha —las tres barras salvia— en base64, listo para incrustar.
+ * El isotipo de Macha —las tres barras salvia— en base64.
  *
- * ═══ POR QUÉ VIVE EN EL CÓDIGO Y NO EN UNA URL ═══
+ * ═══ POR QUÉ VIVE EN EL CÓDIGO ═══
  *
- * Un correo NO puede depender de una URL nuestra para mostrar su logo. Gmail y Outlook
- * bloquean las imágenes remotas por defecto, así que el logo aparecería roto hasta que quien
- * lo recibe apriete "mostrar imágenes" — en un correo transaccional cuyo trabajo es
- * justamente parecer legítimo, eso lo hace parecer lo contrario. Incrustado, se ve siempre.
+ * Lo consume el PDF del reporte (CU-868ku6pax), que se abre FUERA de la app y a veces sin
+ * red: ahí el binario tiene que viajar dentro del archivo o el logo no existe.
+ *
+ * ═══ EL CORREO YA NO LO USA, Y ESA FUE UNA CORRECCIÓN ═══
+ *
+ * La primera versión de este archivo decía que un correo "no puede depender de una URL
+ * nuestra porque Gmail y Outlook bloquean las imágenes remotas por defecto". Las dos mitades
+ * estaban al revés, y el resultado fue el logo roto que reportó Jose:
+ *
+ *   · Gmail SÍ carga imágenes remotas, desde 2013, por su propio proxy
+ *     (`googleusercontent.com`) y sin preguntarle a quien lee.
+ *   · Gmail NO renderiza `data:` URIs en el cuerpo de un correo: los descarta.
+ *
+ * O sea que se había elegido el único formato que Gmail no soporta, para esquivar un bloqueo
+ * que Gmail dejó de hacer hace más de una década. El correo ahora usa `ISOTIPO_URL`.
  *
  * Sale del HTML que aprobó Jose (adjunto de CU-868ku64e3, `macha_email_invitacion.html`),
  * donde ya venía embebido de esta forma: 170x200 px, PNG con alfa. No se re-exportó de otra
@@ -69,8 +82,30 @@ export const ISOTIPO_PNG_BASE64 =
   'hkftYf/LMUi6E0frrUdl2qkVvRWlfWxbUbAuteM8kLQumvsuTeVSoAVTMTJ4vhbS9Jj9p3zLhOLaGkhaL1yn7Pysv4ODbqgd' +
   'CPwfEHo98oxk95oAAAAASUVORK5CYII=';
 
-/** Listo para pegar en un `src` de `<img>`. */
+/**
+ * Listo para pegar en un `src` de `<img>`. **Solo para HTML que se ve en un navegador.**
+ *
+ * Un cliente de correo lo descarta (ver la nota de arriba). Se conserva porque el HTML del
+ * reporte —el que se sirve autenticado en la app, no el PDF— sí lo puede usar.
+ */
 export const ISOTIPO_DATA_URI = `data:image/png;base64,${ISOTIPO_PNG_BASE64}`;
+
+/**
+ * El isotipo servido públicamente, para los CORREOS.
+ *
+ * Sale de `env.appBaseUrl` y no de una variable propia: es el mismo dominio público del
+ * frontend que ya usan todos los enlaces de los correos (`app-urls.ts`). Una segunda variable
+ * para la misma URL es una que se puede quedar desincronizada, y el síntoma sería un logo roto
+ * en producción y un correo que sí funciona en local.
+ *
+ * ⚠️ La ruta es parte del contrato de todo correo YA ENVIADO: uno de hace seis meses sigue
+ * pidiendo este archivo. Moverlo o renombrarlo rompe el logo del historial completo, no solo
+ * de los correos nuevos. El archivo vive en `macha-frontend/public/brand/isotipo.png` y ese
+ * directorio está excluido del matcher del middleware a propósito — dentro, `authkitProxy`
+ * responde 307 hacia WorkOS y un cliente de correo no sigue redirecciones para cargar una
+ * imagen.
+ */
+export const ISOTIPO_URL = `${env.appBaseUrl}/brand/isotipo.png`;
 
 /** Los bytes del PNG, para `pdf-lib` (`embedPng`) y cualquier consumidor binario. */
 export function isotipoPngBytes(): Uint8Array {

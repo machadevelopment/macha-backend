@@ -1,4 +1,4 @@
-import { ISOTIPO_DATA_URI } from '@/lib/brand-asset';
+import { ISOTIPO_URL } from '@/lib/brand-asset';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════
@@ -173,7 +173,7 @@ export function renderBrandedEmail(params: BrandedEmailParams): string {
       <tr><td class="px" style="padding:44px 48px 0;">
         <table role="presentation" cellpadding="0" cellspacing="0"><tr>
           <td width="64" height="64" align="center" valign="middle" style="width:64px;height:64px;background:#FFFFFF;border:1px solid #E9EBE7;border-radius:16px;box-shadow:0 2px 8px rgba(20,30,20,.06);">
-            <img src="${ISOTIPO_DATA_URI}" alt="Macha Finance" style="display:block;height:36px;width:auto;margin:0 auto;">
+            <img src="${ISOTIPO_URL}" alt="Macha Finance" width="31" height="36" style="display:block;height:36px;width:31px;margin:0 auto;border:0;">
           </td>
         </tr></table>
       </td></tr>
@@ -194,7 +194,7 @@ export function renderBrandedEmail(params: BrandedEmailParams): string {
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;">
       <tr><td align="center" style="padding:22px 24px 8px;">
         <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-          <td style="padding-right:8px;"><img src="${ISOTIPO_DATA_URI}" alt="" style="display:block;height:18px;width:auto;"></td>
+          <td style="padding-right:8px;"><img src="${ISOTIPO_URL}" alt="" width="15" height="18" style="display:block;height:18px;width:15px;border:0;"></td>
           <td style="font-size:13px;font-weight:600;color:#0A0A0A;letter-spacing:-.01em;">Macha Finance</td>
         </tr></table>
       </td></tr>
