@@ -313,9 +313,95 @@ describe('una venta que trae su costo produce DOS transacciones', () => {
     expect(armar('transaction', 'cogs')).toHaveLength(1);
   });
 
-  test('una factura no se desdobla', () => {
-    // Una cuenta por cobrar o por pagar no lleva costo de ventas propio.
-    expect(armar('invoice', null)).toHaveLength(1);
+  test('una factura NO se desdobla por COSTO', () => {
+    /*
+     * Lo que este test afirmaba antes —"una factura no se desdobla"— dejó de ser cierto, y el
+     * matiz es el punto: una factura no lleva costo de ventas propio, pero SÍ produce su
+     * transacción de ingreso (ver el bloque siguiente). Se comprueba que ninguna de las dos
+     * filas sea `cogs`, en vez de contar cuántas hay.
+     */
+    const tipos = armar('invoice', null).map(
+      (f) => (f.payload as Record<string, unknown>).type ?? f.targetEntity,
+    );
+    expect(tipos).not.toContain('cogs');
+  });
+
+  describe('una factura emitida produce también su INGRESO', () => {
+    /**
+     * ═══ EL BUG QUE ESTO ARREGLA ═══
+     *
+     * Jose subió `U3TECH_Demo_Datos_Ampliado` y reportó que "no logra reconocer los ingresos".
+     * Medido contra producción: `Facturacion_Clientes` —1.403 filas, USD 4.840.744, la
+     * facturación real de esa empresa— se clasificó como `invoice` y se promovió entera, y el
+     * dashboard siguió mostrando CERO ingresos: `lib/rollups.ts` suma `revenue` solo de
+     * `transactions`.
+     *
+     * No era un error de clasificación: una factura pendiente sí es una cuenta por cobrar. Lo
+     * que estaba mal era la premisa de que fuera SOLO eso. Emitirla reconoce el ingreso y crea
+     * el derecho de cobro — dos caras del mismo hecho, una en resultados y otra en balance.
+     *
+     * Afectaba a toda empresa que factura en vez de cobrar al mostrador: servicios,
+     * consultoría, software. Una cafetería no lo notaba porque sus ventas ya son transacciones.
+     */
+    const filas = () => armar('invoice', null);
+
+    test('salen la factura Y su ingreso', () => {
+      const f = filas();
+      expect(f).toHaveLength(2);
+      expect(f.map((x) => x.targetEntity).sort()).toEqual(['invoice', 'transaction']);
+    });
+
+    test('el ingreso es `revenue` y lleva el MISMO monto que la factura', () => {
+      const f = filas();
+      const factura = f.find((x) => x.targetEntity === 'invoice')!.payload as Record<
+        string,
+        unknown
+      >;
+      const ingreso = f.find((x) => x.targetEntity === 'transaction')!.payload as Record<
+        string,
+        unknown
+      >;
+      expect(ingreso.type).toBe('revenue');
+      expect(ingreso.originalAmount).toBe(factura.originalAmount);
+    });
+
+    test('el ingreso se devenga en la fecha de EMISIÓN, no en la de vencimiento', () => {
+      /*
+       * Usar el vencimiento movería el ingreso de período — que es exactamente el error que
+       * comete la contabilidad de caja y que este producto no debería cometer.
+       */
+      const f = filas();
+      const factura = f.find((x) => x.targetEntity === 'invoice')!.payload as Record<
+        string,
+        unknown
+      >;
+      const ingreso = f.find((x) => x.targetEntity === 'transaction')!.payload as Record<
+        string,
+        unknown
+      >;
+      expect(ingreso.date).toBe(factura.issueDate);
+    });
+
+    test('el ingreso tiene la forma de una transacción, no la de una factura', () => {
+      // Un spread del payload de la factura habría dejado la fila sin `date` y
+      // `staging-rules` la habría marcado entera por `invalid_date`. Pasó en el primer intento.
+      const ingreso = filas().find((x) => x.targetEntity === 'transaction')!.payload as Record<
+        string,
+        unknown
+      >;
+      expect(ingreso.date).toBeTruthy();
+      expect(ingreso.type).toBeTruthy();
+      expect(ingreso.category).toBeTruthy();
+      // Y no arrastra los campos propios de la cuenta por cobrar.
+      expect(ingreso.issueDate).toBeUndefined();
+      expect(ingreso.dueDate).toBeUndefined();
+    });
+
+    test('una cuenta por PAGAR no produce ingreso', () => {
+      // Lo contrario sería registrar como ingreso lo que la empresa debe.
+      const f = armar('bill', null);
+      expect(f.every((x) => x.targetEntity === 'bill')).toBe(true);
+    });
   });
 
   test('sin columna de costo, sigue saliendo una sola fila', () => {
