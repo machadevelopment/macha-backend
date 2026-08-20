@@ -13,6 +13,7 @@ import {
 import { findFxRate, missingFxRateMessage, type Currency } from '@/lib/fx';
 import { ProductResolver } from '@/lib/product-dimension';
 import { StoreResolver } from '@/lib/store-dimension';
+import { enqueue, QUEUES } from '@/queue';
 
 export type PromotionResult =
   | {
@@ -521,4 +522,59 @@ export async function cancelDocumentRows(
   documentId: string,
 ): Promise<void> {
   await deshacerFilas(db, companyId, documentId, 'cancelled');
+}
+
+/**
+ * Cierra el ciclo de la revisión interna: encola la promoción de la fila que se acaba de
+ * resolver.
+ *
+ * NO ESPERA A QUE NO QUEDE NINGUNA PENDIENTE, y esa es la diferencia con la primera versión
+ * de esta función. Con promoción parcial (migración 0020) cada fila aprobada entra por su
+ * cuenta, así que hacer esperar a la última pendiente retrasaría sin motivo a las 400 ya
+ * resueltas de un archivo de 414 — y si una sola fila nunca se resuelve, no entrarían nunca.
+ *
+ * Los estados que sí reciben filas nuevas son `promoted` (el normal ahora: el archivo ya
+ * entró con lo limpio y le quedan filas retenidas) y `review` (el archivo entero venía
+ * marcado y no se pudo promover nada). Se filtra por esos dos a propósito: sin el filtro,
+ * resolver una fila vieja de un documento `reverted` o `failed` lo resucitaría a `promoted`,
+ * reinsertando en producción datos que alguien había dado de baja.
+ *
+ * ═══ VIVE ACÁ Y NO EN EL MÓDULO ADMIN (2026-08-20) ═══
+ *
+ * Nació dentro de `/admin/staging-rows` porque la revisión interna era el único camino que
+ * resolvía una fila. Ya no lo es: el cliente resuelve sus propios conceptos desde el flujo de
+ * subida (decisión de Semi), y ese camino necesita cerrar el ciclo exactamente igual.
+ *
+ * Duplicarla sería peor que moverla: el filtro de estados de abajo es lo que evita resucitar
+ * un documento `reverted` a `promoted`, y dos copias de esa regla se separan la primera vez que
+ * alguien toca una sola.
+ *
+ * Se llama desde los caminos que RESUELVEN una fila (el `PATCH` de staff y la respuesta del
+ * cliente), nunca desde uno que solo la reescribe. La
+ * re-extracción (`POST /:id/reextract`) reescribe payload/confianza pero deja
+ * `review_status` en `pending` a propósito: que Claude reconsidere no es que un humano
+ * aprobó, y la fila todavía tiene que pasar por el `PATCH`.
+ *
+ * Es best-effort y no revienta la respuesta del `PATCH`: la revisión de la fila YA se
+ * confirmó y auditó cuando llegamos acá. Si la cola está caída, lo correcto es que el
+ * operador vea su cambio guardado —no un 500 que le haga pensar que no se guardó— y que la
+ * fila quede pendiente de promover, que es recuperable. Se registra en consola para que el
+ * fallo no sea invisible.
+ */
+export async function encolarPromocionDeLoResuelto(
+  db: DB,
+  companyId: string,
+  documentId: string,
+): Promise<void> {
+  try {
+    const [doc] = await db
+      .select({ status: documents.status })
+      .from(documents)
+      .where(eq(documents.id, documentId));
+    if (doc?.status !== 'review' && doc?.status !== 'promoted') return;
+
+    await enqueue(QUEUES.documentPromote, { documentId, companyId });
+  } catch (err) {
+    console.error('[promotion] no se pudo encolar la promoción de lo resuelto:', documentId, err);
+  }
 }

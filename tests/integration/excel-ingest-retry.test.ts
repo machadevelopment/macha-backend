@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeAll, afterAll, mock } from 'bun:test';
 import * as XLSX from 'xlsx';
 import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
+import { crearDobleDeCola } from './doble-de-cola';
 
 /**
  * CU-868kkgypv criterio 3: un fallo a media ejecución seguido de reintento no puede
@@ -134,7 +135,19 @@ mock.module('@/lib/anthropic', () => ({
   DEFAULT_INSIGHT_PROMPT: '',
 }));
 
+/*
+ * `mock.module` es GLOBAL al proceso, no al archivo: la suite de integración corre en una sola
+ * invocación de `bun test`, así que este doble reemplaza `@/lib/s3` para TODOS los archivos.
+ *
+ * De ahí el spread del módulo real. Sin él, el mock no "agrega" `downloadObject`: BORRA todo lo
+ * demás que el módulo exporta, y cualquier archivo que importe `uploadKey` u `uploadObject`
+ * revienta con `SyntaxError: Export named 'uploadKey' not found` — un error de importación que
+ * no menciona ni este archivo ni este mock. Pasó exactamente así al agregar
+ * `conceptos-del-cliente.test.ts`, que monta el módulo de ingesta completo.
+ */
+const s3Real = await import('@/lib/s3');
 mock.module('@/lib/s3', () => ({
+  ...s3Real,
   downloadObject: async () => libroDeDosHojas(),
 }));
 
@@ -143,12 +156,19 @@ mock.module('@/lib/s3', () => ({
 type Handler = (payload: { documentId: string; companyId: string }) => Promise<void>;
 let handler: Handler | undefined;
 
+/*
+ * El doble de la cola es COMPARTIDO (`./doble-de-cola`) y no local, porque `mock.module` es
+ * global al proceso: cinco archivos lo doblaban por separado, cada uno con los dos o tres
+ * exports que él usaba, y el último en cargarse ganaba. Al montar un módulo que importa
+ * `RETRY_POLICY` eso se volvió `SyntaxError: Export named 'RETRY_POLICY' not found` — en CI
+ * y no en local, porque el orden de carga no es el mismo. Ver la nota del ayudante.
+ */
+const dobleDeCola = crearDobleDeCola();
 mock.module('@/queue', () => ({
-  QUEUES: { excelIngest: 'excel.ingest', alertEvaluate: 'alert.evaluate' },
-  enqueue: async () => null,
-  registerWorker: async (_queue: string, h: Handler) => {
+  ...dobleDeCola.modulo,
+  registerWorker: async (queue: string, h: Handler) => {
     handler = h;
-    return 'worker-id';
+    return dobleDeCola.modulo.registerWorker(queue, h as never);
   },
 }));
 
