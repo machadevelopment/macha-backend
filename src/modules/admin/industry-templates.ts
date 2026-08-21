@@ -2,10 +2,17 @@ import { Elysia, t } from 'elysia';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
-import { adminAuditLog, companies, industryTemplates, industryTemplateVersions } from '@/db/schema';
+import {
+  adminAuditLog,
+  companies,
+  industryStarterTemplates,
+  industryTemplates,
+  industryTemplateVersions,
+} from '@/db/schema';
 import { logAdminAction } from '@/lib/admin-audit';
 import { normalizeIndustry } from '@/lib/industry-template';
 import { agruparCandidatos, type Correccion } from '@/lib/learning-loop';
+import { industryStarterKey, uploadObject } from '@/lib/s3';
 
 /**
  * CU-868kfvafg: CRUD + historial de versiones de plantillas de mapeo por industria
@@ -14,8 +21,141 @@ import { agruparCandidatos, type Correccion } from '@/lib/learning-loop';
  * actual — quedan alineadas automáticamente, sin trabajo extra (criterio 2).
  * Sin preview/test tool en MVP (criterio 3, deferido).
  */
+/**
+ * Tipos aceptados para una plantilla descargable. Es el MISMO conjunto que acepta la ingesta
+ * del cliente, y a propósito: el archivo que se le entrega tiene que poder volver por la
+ * misma puerta por la que entra todo lo demás.
+ */
+const EXT_PLANTILLA: Record<string, string> = {
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel': 'xls',
+  'text/csv': 'csv',
+};
+
 export const adminIndustryTemplates = new Elysia({ prefix: '/admin/industry-templates' })
   .use(adminGuard)
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * PLANTILLA .XLSX DESCARGABLE POR INDUSTRIA — subida por staff (Jose, 2026-08-20)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Jose: "el equipo debe poder cargar diferentes plantillas por tipo de industria, para que los
+   * usuarios que no tengan un Excel establecido puedan descargarla al hacer el onboarding".
+   *
+   * ═══ LA DESCARGA YA EXISTÍA; ESTO ES LA OTRA MITAD ═══
+   *
+   * `/industry-templates/download` genera un .xlsx al vuelo con las categorías canónicas de la
+   * industria de la empresa. Sirve para enseñar QUÉ COLUMNAS llenar y por eso nunca da un enlace
+   * roto. Lo que no puede hacer es traer contenido CURADO: hojas de verdad, ejemplos con sentido
+   * para una cafetería o una consultora, un formato pensado por alguien. Eso no se genera.
+   *
+   * Después de esto, esa ruta prefiere el archivo curado si existe y sigue generando si no. O
+   * sea que el criterio "si una industria no tiene plantilla, el onboarding no rompe ni muestra
+   * un enlace roto" se cumple POR CONSTRUCCIÓN, sin un condicional en el frontend: es la misma
+   * URL y el mismo botón, siempre.
+   *
+   * ═══ SE GUARDA UNA VERSIÓN NUEVA, NUNCA SE REEMPLAZA ═══
+   *
+   * `version = max + 1` y el objeto de S3 lleva la versión en su clave. Sin eso, subir una
+   * corrección sobreescribiría los bytes de la versión anterior y la fila vieja quedaría
+   * apuntando a un archivo que ya no es el suyo — un historial que miente es peor que no tener
+   * historial.
+   *
+   * El `INSERT` va DESPUÉS de que S3 confirme. Al revés quedaría una fila apuntando a un objeto
+   * que no existe, y la descarga del cliente fallaría con un 500 en vez de caer al generado.
+   * En este orden, un fallo de S3 no deja rastro y el operador reintenta.
+   */
+  .post(
+    '/starters/:industry',
+    async ({ staffId, tier, params, body, set, db }) => {
+      assertStaffCapability(tier, 'manage_plans_and_templates', set);
+
+      // La misma normalización que usa el resolver de la ingesta: sin esto "Retail" y "retail"
+      // serían dos industrias con dos plantillas, y la empresa recibiría la que le toque por
+      // cómo alguien escribió su rubro.
+      const industry = normalizeIndustry(params.industry);
+      if (!industry) {
+        set.status = 422;
+        return { error: 'La industria no puede estar vacía' };
+      }
+
+      const file = body.file;
+      const ext = EXT_PLANTILLA[file.type];
+      if (!ext) {
+        set.status = 415;
+        return { error: `Tipo no soportado: ${file.type}. Debe ser .xlsx, .xls o .csv` };
+      }
+
+      const [ultima] = await db
+        .select({ version: industryStarterTemplates.version })
+        .from(industryStarterTemplates)
+        .where(eq(industryStarterTemplates.industry, industry))
+        .orderBy(desc(industryStarterTemplates.version))
+        .limit(1);
+      const version = (ultima?.version ?? 0) + 1;
+
+      const key = industryStarterKey(industry, version, ext);
+      await uploadObject(key, new Uint8Array(await file.arrayBuffer()), file.type);
+
+      const [fila] = await db
+        .insert(industryStarterTemplates)
+        .values({
+          industry,
+          s3Key: key,
+          originalFilename: file.name,
+          fileSizeBytes: file.size,
+          contentType: file.type,
+          notes: body.notes ?? null,
+          version,
+          createdBy: staffId,
+        })
+        .returning({ id: industryStarterTemplates.id });
+
+      await logAdminAction(db, {
+        actorStaffId: staffId,
+        // Es catálogo de PLATAFORMA: no pertenece a ninguna empresa. Se OMITE en vez de
+        // mandar una: poner un `company_id` acá haría parecer, en la auditoría, que se tocó la
+        // configuración de ese cliente.
+        action: 'industry_starter_template.upload',
+        targetTable: 'industry_starter_templates',
+        targetId: fila!.id,
+        metadata: { industry, version, filename: file.name, sizeBytes: file.size },
+      });
+
+      return { id: fila!.id, industry, version, filename: file.name };
+    },
+    {
+      body: t.Object({
+        // Tope externo holgado para que una subida absurda no llegue al handler. Una plantilla
+        // curada es un archivo chico: son ejemplos, no la contabilidad de nadie.
+        file: t.File({ maxSize: '10m' }),
+        notes: t.Optional(t.String({ maxLength: 500 })),
+      }),
+    },
+  )
+
+  /**
+   * El historial de plantillas descargables. La vigente es la de `version` más alta.
+   *
+   * Se devuelven TODAS y no solo la vigente: el panel necesita mostrar el historial para que
+   * volver atrás sea posible —subir de nuevo un archivo anterior— y para que una lista de
+   * versiones con su nota sea revisable dentro de seis meses.
+   */
+  .get('/starters', async ({ tier, set, db }) => {
+    assertStaffCapability(tier, 'manage_plans_and_templates', set);
+    return db
+      .select({
+        id: industryStarterTemplates.id,
+        industry: industryStarterTemplates.industry,
+        originalFilename: industryStarterTemplates.originalFilename,
+        fileSizeBytes: industryStarterTemplates.fileSizeBytes,
+        notes: industryStarterTemplates.notes,
+        version: industryStarterTemplates.version,
+        createdAt: industryStarterTemplates.createdAt,
+      })
+      .from(industryStarterTemplates)
+      .orderBy(industryStarterTemplates.industry, desc(industryStarterTemplates.version));
+  })
   .get('/', async ({ tier, set, db }) => {
     assertStaffCapability(tier, 'manage_plans_and_templates', set);
     return db.select().from(industryTemplates);

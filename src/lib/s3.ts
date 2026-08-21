@@ -39,6 +39,24 @@ export const s3 = new S3Client({
 export const uploadKey = (companyId: string, documentId: string, ext: string) =>
   `companies/${companyId}/uploads/${documentId}.${ext}`;
 
+/**
+ * Clave de una plantilla descargable por industria (migración `0035`).
+ *
+ * NO va bajo `companies/`, y esa es la diferencia con todo lo demás en este bucket: no es de
+ * ningún tenant. La plantilla de "retail" es la misma para todos los clientes de retail, y
+ * prefijarla por empresa obligaría a guardar N copias del mismo archivo y a elegir cuál servir.
+ *
+ * La regla de "prefijar por company_id" existe para que un objeto de un cliente no pueda
+ * quedar accesible desde el prefijo de otro. Acá no hay dato de cliente que aislar: es
+ * catálogo de plataforma, igual que la tabla que lo referencia no lleva RLS.
+ *
+ * Lleva la VERSIÓN en la clave porque la tabla es append-only: sin ella, subir una versión
+ * nueva sobreescribiría el objeto de la anterior y "volver atrás" dejaría de ser posible —
+ * la fila vieja seguiría ahí apuntando a bytes que ya no son los suyos.
+ */
+export const industryStarterKey = (industry: string, version: number, ext: string) =>
+  `platform/industry-starters/${industry}/v${version}.${ext}`;
+
 export const reportRenderKey = (companyId: string, reportVersionId: string) =>
   `companies/${companyId}/reports/${reportVersionId}.html`;
 
