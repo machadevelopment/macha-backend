@@ -57,6 +57,48 @@ export const industryTemplateVersions = pgTable(
   }),
 );
 
+/**
+ * Plantilla .xlsx DESCARGABLE por industria (pedido de Jose, 2026-08-20) — migración `0035`.
+ *
+ * NO confundir con `industryTemplateVersions`, que está justo arriba: esa es el material que le
+ * enseña a la IA a leer el Excel que el cliente YA tiene (sinónimos de columna + few-shot), y
+ * nunca la ve una persona. Esto es un ARCHIVO PARA EL CLIENTE, para cuando no tiene ninguno.
+ *
+ * Comparten la palabra "plantilla" y nada más. La razón larga de por qué son tablas separadas
+ * está en el encabezado de la migración; la corta: cambian por motivos independientes, y
+ * mezclarlas haría que agregar un sinónimo de columna arrastrara el archivo, o que subir un
+ * .xlsx nuevo forzara una versión del diccionario que nadie pidió.
+ *
+ * Append-only, la vigente es la de mayor `version`. Sin `company_id` ni RLS: es catálogo de
+ * plataforma, la plantilla de "retail" es la misma para todos los clientes de retail.
+ */
+export const industryStarterTemplates = pgTable(
+  'industry_starter_templates',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Texto libre, para casar con `companies.industry`, que también lo es. */
+    industry: text('industry').notNull(),
+    /** Solo la clave: el binario vive en S3 y nunca entra a la base. */
+    s3Key: text('s3_key').notNull(),
+    /** El nombre con el que se subió — es el que el cliente ve al descargar. */
+    originalFilename: text('original_filename').notNull(),
+    fileSizeBytes: integer('file_size_bytes').notNull(),
+    contentType: text('content_type').notNull(),
+    /** Nota del staff que la subió. Lo que hace revisable una lista de versiones en seis meses. */
+    notes: text('notes'),
+    version: integer('version').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** `staff.id`. Sin FK: la trazabilidad de quién la tocó vive en `admin_audit_log`. */
+    createdBy: uuid('created_by'),
+  },
+  (t) => ({
+    starterVersionUq: uniqueIndex('industry_starter_templates_version_uq').on(
+      t.industry,
+      t.version,
+    ),
+  }),
+);
+
 // 4.11 documents — one row per uploaded Excel; orchestrates ingest + revert.
 export const documents = pgTable(
   'documents',
