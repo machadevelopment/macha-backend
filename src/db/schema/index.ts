@@ -13,3 +13,4 @@ export * from './notifications'; // notifications
 export * from './audit'; // admin_audit_log
 export * from './settings'; // platform_settings (CU-868kfvafy)
 export * from './billing'; // subscriptions, payments (CU-868kfvae6/afy M8)
+export * from './leads'; // demo_requests (formulario de la landing, Jose 2026-08-21)

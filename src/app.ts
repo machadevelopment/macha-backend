@@ -13,6 +13,8 @@ import { adminCredits } from '@/modules/admin/credits';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
 import { adminPlans } from '@/modules/admin/plans';
+import { adminDemoRequests } from '@/modules/admin/demo-requests';
+import { publicDemoRequests } from '@/modules/public/demo-requests';
 import { clientPlans } from '@/modules/billing/plans';
 import { alerts } from '@/modules/alerts';
 import { clientAlertRules } from '@/modules/alert-rules';
@@ -103,7 +105,8 @@ const adminApi = new Elysia()
   .use(adminCredits)
   .use(adminAlertRules)
   .use(adminMonitoring)
-  .use(adminPlans);
+  .use(adminPlans)
+  .use(adminDemoRequests);
 
 export function createApp() {
   return (
@@ -196,6 +199,7 @@ export function createApp() {
       .use(register)
       .use(creditsTopup)
       .use(billingWebhooks)
+      .use(publicDemoRequests)
       .use(me)
       .use(transactionsList)
       .use(members)
