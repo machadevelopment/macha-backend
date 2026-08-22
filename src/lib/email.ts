@@ -4,7 +4,12 @@ import { env } from './env';
 import { type DB } from '@/db/client';
 import { notifications } from '@/db/schema';
 import { enqueue, QUEUES } from '@/queue';
-import { renderBrandedEmail, destacado } from '@/lib/email-shell';
+import { renderBrandedEmail, destacado, escaparHtml } from '@/lib/email-shell';
+
+/** Texto del lead que va dentro de `bodyHtml` (ya escapado). */
+function escaparEnCuerpo(texto: string): string {
+  return escaparHtml(texto).replace(/\n/g, '<br>');
+}
 
 /**
  * CU-868kfvad9: Resend, plantillas ES/EN, idioma según companies.locale. "Seam" de
@@ -75,6 +80,36 @@ export const TEMPLATES = {
         showPlainLink: true,
       }),
     }),
+    /**
+     * Aviso interno al equipo cuando alguien pide demo desde la landing. No es un correo al
+     * lead: es el aviso ENCIMA de la fila en `demo_requests`. El cuerpo lleva los datos que
+     * escribió; el botón abre el panel donde está la lista completa.
+     */
+    demoRequest: (datos: {
+      nombre: string;
+      empresa: string;
+      correo: string;
+      telefono: string;
+      mensaje: string;
+      panelUrl: string;
+    }) => ({
+      subject: `Nueva solicitud de demo: ${datos.empresa}`,
+      html: renderBrandedEmail({
+        locale: 'es',
+        title: 'Nueva solicitud de demo',
+        bodyHtml:
+          `${destacado(datos.nombre)} de ${destacado(datos.empresa)} pidió una demo.<br><br>` +
+          `<strong>Correo:</strong> ${escaparEnCuerpo(datos.correo)}<br>` +
+          (datos.telefono
+            ? `<strong>Teléfono:</strong> ${escaparEnCuerpo(datos.telefono)}<br>`
+            : '') +
+          (datos.mensaje
+            ? `<br><strong>Mensaje:</strong><br>${escaparEnCuerpo(datos.mensaje)}`
+            : ''),
+        ctaLabel: 'Ver en el panel',
+        ctaUrl: datos.panelUrl,
+      }),
+    }),
   },
   en: {
     reportReady: (viewUrl: string) => ({
@@ -112,12 +147,39 @@ export const TEMPLATES = {
         showPlainLink: true,
       }),
     }),
+    demoRequest: (datos: {
+      nombre: string;
+      empresa: string;
+      correo: string;
+      telefono: string;
+      mensaje: string;
+      panelUrl: string;
+    }) => ({
+      subject: `New demo request: ${datos.empresa}`,
+      html: renderBrandedEmail({
+        locale: 'en',
+        title: 'New demo request',
+        bodyHtml:
+          `${destacado(datos.nombre)} from ${destacado(datos.empresa)} requested a demo.<br><br>` +
+          `<strong>Email:</strong> ${escaparEnCuerpo(datos.correo)}<br>` +
+          (datos.telefono ? `<strong>Phone:</strong> ${escaparEnCuerpo(datos.telefono)}<br>` : '') +
+          (datos.mensaje
+            ? `<br><strong>Message:</strong><br>${escaparEnCuerpo(datos.mensaje)}`
+            : ''),
+        ctaLabel: 'Open in admin',
+        ctaUrl: datos.panelUrl,
+      }),
+    }),
   },
 } as const;
 
 export interface EmailSendPayload {
-  companyId: string;
-  kind: 'report' | 'alert' | 'invitation';
+  /**
+   * Null solo en correos de plataforma (aviso de demo): no hay empresa que scopear y
+   * `notifications` exige `company_id`. El worker salta el scope y no escribe esa tabla.
+   */
+  companyId: string | null;
+  kind: 'report' | 'alert' | 'invitation' | 'demo_request';
   refId: string;
   recipientEmail: string;
   subject: string;
@@ -196,15 +258,46 @@ function reportarFalloDeEnvio(payload: EmailSendPayload, motivo: string): void {
   });
 }
 
-/** Called only by the email.send worker (src/queue/workers/email-send.ts). */
+/**
+ * Correos de plataforma (sin empresa). Solo Resend + Sentry: la tabla `notifications` es
+ * tenant-scoped y no hay fila que anotar. El lead YA está en `demo_requests`; este envío es
+ * el aviso encima.
+ */
+export async function deliverPlatformEmail(payload: EmailSendPayload): Promise<void> {
+  if (!resend) {
+    reportarFalloDeEnvio(payload, 'RESEND_API_KEY not configured');
+    return;
+  }
+  const result = await resend.emails.send({
+    from: env.resendFromEmail,
+    to: payload.recipientEmail,
+    subject: payload.subject,
+    html: payload.html,
+  });
+  if (result.error) reportarFalloDeEnvio(payload, result.error.message);
+}
+
+/**
+ * Called only by the email.send worker for correos CON empresa.
+ * Los de plataforma (`companyId: null`) van por `deliverPlatformEmail`.
+ */
 export async function deliverEmail(db: DB, payload: EmailSendPayload): Promise<void> {
+  if (payload.companyId == null) {
+    throw new Error('deliverEmail requiere companyId; use deliverPlatformEmail');
+  }
+  const companyId = payload.companyId;
+  if (payload.kind === 'demo_request') {
+    throw new Error('demo_request no escribe notifications; use deliverPlatformEmail');
+  }
+  const kind = payload.kind;
+
   if (!resend) {
     // No RESEND_API_KEY in this environment — record the attempt as failed rather
     // than silently pretending it sent, so notifications/monitoring stays honest.
     const motivo = 'RESEND_API_KEY not configured';
     await db.insert(notifications).values({
-      companyId: payload.companyId,
-      kind: payload.kind,
+      companyId,
+      kind,
       recipientEmail: payload.recipientEmail,
       refId: payload.refId,
       status: 'failed',
@@ -222,8 +315,8 @@ export async function deliverEmail(db: DB, payload: EmailSendPayload): Promise<v
   });
 
   await db.insert(notifications).values({
-    companyId: payload.companyId,
-    kind: payload.kind,
+    companyId,
+    kind,
     recipientEmail: payload.recipientEmail,
     refId: payload.refId,
     resendMessageId: result.data?.id,
@@ -261,6 +354,39 @@ export async function sendInvitationEmail(params: {
     companyId: params.companyId,
     kind: 'invitation',
     refId: params.invitationId,
+    recipientEmail: params.recipientEmail,
+    subject: t.subject,
+    html: t.html,
+  });
+}
+
+/**
+ * Aviso al equipo de una solicitud de demo. Best-effort: la fila ya está guardada; si esto
+ * falla, el panel sigue mostrando el lead.
+ */
+export async function sendDemoRequestNotice(params: {
+  locale: 'es' | 'en';
+  requestId: string;
+  recipientEmail: string;
+  nombre: string;
+  empresa: string;
+  correo: string;
+  telefono: string;
+  mensaje: string;
+}): Promise<void> {
+  const panelUrl = `${env.appBaseUrl.replace(/\/$/, '')}/admin/demo-requests`;
+  const t = TEMPLATES[params.locale].demoRequest({
+    nombre: params.nombre,
+    empresa: params.empresa,
+    correo: params.correo,
+    telefono: params.telefono,
+    mensaje: params.mensaje,
+    panelUrl,
+  });
+  await enqueueEmail({
+    companyId: null,
+    kind: 'demo_request',
+    refId: params.requestId,
     recipientEmail: params.recipientEmail,
     subject: t.subject,
     html: t.html,
