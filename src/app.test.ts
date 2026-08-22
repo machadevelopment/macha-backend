@@ -72,6 +72,22 @@ describe('rutas públicas — ningún guard debe alcanzarlas', () => {
     });
     expect(res.status).toBe(400);
   });
+
+  /**
+   * El formulario de la landing: primer endpoint de negocio sin JWT. Un 401 aquí significaría
+   * que heredó un guard de inquilino y nadie podría pedir demo.
+   * 422 = llegó al handler y TypeBox rechazó el cuerpo vacío (no 401).
+   */
+  test('POST /public/demo-requests llega al handler sin token (422, no 401)', async () => {
+    const res = await call('/public/demo-requests', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).not.toBe(401);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+  });
 });
 
 /**
@@ -157,6 +173,7 @@ describe('rutas guardadas — 401 sin token', () => {
     '/admin/companies/',
     '/admin/staging-rows/',
     '/admin/ai-cost',
+    '/admin/demo-requests/',
     // CU-868kjc6h1: el catálogo de tasas cuelga de un módulo propio con su propio
     // `.use(adminGuard)` — si alguien lo montara sin guard, esto lo caza.
     '/admin/companies/00000000-0000-0000-0000-000000000000/fx-rates/',

@@ -214,10 +214,11 @@ describe('lo que NO cambió', () => {
     expect(typeof t.html).toBe('string');
   });
 
-  test('siguen existiendo los tres tipos, en los dos idiomas', () => {
+  test('existen los cuatro tipos, en los dos idiomas', () => {
     for (const locale of ['es', 'en'] as const) {
       expect(Object.keys(TEMPLATES[locale]).sort()).toEqual([
         'alertTriggered',
+        'demoRequest',
         'invitation',
         'reportReady',
       ]);
