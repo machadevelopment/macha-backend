@@ -1042,8 +1042,16 @@ export function startExcelIngestWorker(): Promise<string> {
            * Escribir por lote dejaría reglas a medias si la carga se cancela o falla, y una
            * tabla append-only no las puede limpiar después.
            */
-          const iDescripcion = result.columns.description;
-          if (iDescripcion !== null) {
+          /*
+           * La MISMA columna que usa `resolverLoteConDiccionario` para buscar, y tiene que
+           * serlo: si acá se aprendiera por `description` y allá se buscara por `product`, la
+           * regla se guardaría bajo una clave que nadie va a consultar nunca. Con `description`
+           * a secas, además, el diccionario no aprendía NADA en las 54 hojas de producción que
+           * no la traen — entre ellas `Ventas`, la más grande de cualquier archivo.
+           */
+          const iDescripcion =
+            result.columns.description ?? result.columns.product ?? result.columns.counterparty;
+          if (iDescripcion !== null && iDescripcion !== undefined) {
             for (const [i, v] of result.veredictos.entries()) {
               // `skip` no enseña nada: el modelo dijo explícitamente que esa fila no es un
               // movimiento, y guardarla como regla clasificaría de más la próxima vez.
