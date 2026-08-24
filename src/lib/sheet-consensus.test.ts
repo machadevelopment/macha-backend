@@ -11,6 +11,7 @@ import {
   elegirSonda,
   filaAptaParaCortocircuito,
   sonElMismoConcepto,
+  sinPrefijoDeTipo,
 } from './sheet-consensus';
 import type { ColumnMap } from './row-assembly';
 
@@ -688,5 +689,60 @@ describe('el mismo concepto con un matiz de más se unifica', () => {
      */
     expect(sonElMismoConcepto('gasto', 'gasto_ventas')).toBe(false);
     expect(sonElMismoConcepto('venta', 'venta_vehiculos')).toBe(false);
+  });
+});
+
+/**
+ * ═══ AUDITORÍA DE LAS 143 CATEGORÍAS QUE HAY EN PRODUCCIÓN (2026-08-24) ═══
+ *
+ * Cada caso de "unen" es un rubro que un cliente REAL ve partido en dos en su dashboard, y
+ * cada caso de "no unen" es un rubro que perdería si la regla se aflojara. Los dos lados
+ * pesan igual: la auditoría midió 24 categorías de `opex` en House Products, 20 en HeladosGT
+ * y 19 en CarsGT, y el error caro no es dejar dos rubros separados — es fusionar dos que el
+ * dueño necesita ver aparte.
+ */
+describe('sinonimia medida contra producción', () => {
+  test.each([
+    // el tipo pegado como prefijo: 69 filas de U3 TECH
+    ['opex.software', 'software'],
+    ['cogs.hosting', 'hosting'],
+    // pares ES/EN que conviven HOY en la misma empresa
+    ['capacitacion_personal', 'staff_training'],
+    ['cleaning_supplies', 'limpieza_suministros'],
+    ['equipment_maintenance', 'mantenimiento_equipos'],
+    ['garantias_soporte', 'warranty_support'],
+    ['permisos_licencias', 'permits_licenses'],
+    ['combustible_flotilla', 'fuel_fleet'],
+    ['comisiones_ventas', 'sales_commissions'],
+    ['transportation_fuel', 'transport_fuel'],
+    ['import_customs', 'importacion_aduanas'],
+    ['venta_vehiculos', 'vehicle_sales'],
+  ])('%s y %s son el mismo rubro', (a, b) => {
+    expect(sonElMismoConcepto(a, b)).toBe(true);
+  });
+
+  test.each([
+    // DESGLOSES: el dueño puede querer ver el agua separada de la luz. No se tocan.
+    ['utilities', 'utilities_water'],
+    ['payroll', 'payroll_admin'],
+    // líneas de producto distintas de un mismo negocio
+    ['laptops_sales', 'tablets_sales'],
+    // comparten una palabra y no son lo mismo
+    ['servicios_publicos', 'servicios_profesionales'],
+    ['accesorios_sales', 'costo_de_ventas'],
+    ['gasto', 'gasto_ventas'],
+    ['rent', 'marketing'],
+  ])('%s y %s siguen siendo rubros distintos', (a, b) => {
+    expect(sonElMismoConcepto(a, b)).toBe(false);
+  });
+
+  test('el prefijo se quita solo cuando es un tipo contable', () => {
+    expect(sinPrefijoDeTipo('opex.software')).toBe('software');
+    expect(sinPrefijoDeTipo('cogs.hosting')).toBe('hosting');
+    // Un punto que no separa un tipo no se toca: no es un prefijo, es parte del nombre.
+    expect(sinPrefijoDeTipo('www.algo')).toBe('www.algo');
+    expect(sinPrefijoDeTipo('marketing')).toBe('marketing');
+    // `opex.` a secas no deja nada: antes que devolver vacío se conserva el original.
+    expect(sinPrefijoDeTipo('opex.')).toBe('opex.');
   });
 });

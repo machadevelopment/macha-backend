@@ -181,6 +181,56 @@ const LEMAS: Record<string, string> = {
   aduana: 'customs',
   aduanas: 'customs',
   arancel: 'customs',
+  /*
+   * ═══ EXTRAÍDOS DE LAS 143 CATEGORÍAS QUE HAY HOY EN PRODUCCIÓN (auditoría 2026-08-24) ═══
+   *
+   * Cada línea de acá abajo es un rubro que un cliente REAL ve partido en dos en su dashboard.
+   * No son traducciones imaginadas: son los pares que aparecen juntos en la misma empresa —
+   * `capacitacion_personal` y `staff_training` en HeladosGT, `contabilidad` y
+   * `accounting_fees` en Electro Hogar, `comisiones_ventas` y `sales_commissions` en CarsGT.
+   *
+   * La auditoría midió el tamaño del problema: 24 categorías de `opex` en House Products,
+   * 20 en HeladosGT, 19 en CarsGT. No todas son duplicados —un negocio tiene muchos gastos
+   * distintos— pero los pares ES/EN sí lo son, y son la mayoría de lo que sobra.
+   *
+   * ═══ LO QUE NO SE TOCA, Y ES UNA DECISIÓN ═══
+   *
+   * Los DESGLOSES no se unifican: `utilities_water` no se colapsa contra `utilities`, ni
+   * `payroll_admin` contra `payroll`. Un dueño puede querer ver el agua separada de la luz, y
+   * la regla de contención con su mínimo de dos lemas ya los deja aparte. Traducir es
+   * objetivo; decidir que dos rubros distintos son uno es del cliente, no nuestro.
+   */
+  capacitacion: 'training',
+  entrenamiento: 'training',
+  personal: 'staff',
+  suministro: 'supply',
+  insumo: 'supply',
+  bancaria: 'bank',
+  contabilidad: 'accounting',
+  contable: 'accounting',
+  equipo: 'equipment',
+  garantia: 'warranty',
+  soporte: 'support',
+  permiso: 'permit',
+  licencia: 'license',
+  seguridad: 'security',
+  flotilla: 'fleet',
+  reparto: 'delivery',
+  entrega: 'delivery',
+  refrigeracion: 'refrigeration',
+  transportation: 'transport',
+  reparacion: 'repair',
+  legal: 'legal',
+  honorario: 'fee',
+  suscripcion: 'subscription',
+  /*
+   * Las dos formas INGLESAS de un lema que ya existía en español, para que el par caiga junto.
+   * `comision` ya mapeaba a `fee` desde antes; sin `commission` aquí, `comisiones_ventas` daba
+   * `fee|sale` y `sales_commissions` daba `commission|sale` — dos rubros donde hay uno.
+   * `supplie` es la forma que produce `sinPlural` sobre `supplies`.
+   */
+  commission: 'fee',
+  supplie: 'supply',
   nomina: 'payroll',
   salario: 'payroll',
   sueldo: 'payroll',
@@ -227,6 +277,50 @@ const LEMAS: Record<string, string> = {
 };
 
 /** Sin acentos, en minúsculas, partido en palabras. */
+/**
+ * Los cuatro tipos contables, tal como el esquema los acota.
+ *
+ * Se usan para reconocer —y quitar— el prefijo que el modelo a veces pega delante de la
+ * categoría. Ver `sinPrefijoDeTipo`.
+ */
+const TIPOS_CONTABLES = new Set(['revenue', 'cogs', 'opex', 'other']);
+
+/**
+ * Quita el `tipo.` que el modelo a veces antepone a la categoría.
+ *
+ * ═══ MEDIDO EN PRODUCCIÓN (auditoría 2026-08-24) ═══
+ *
+ *     opex.software           28 filas      software                28 filas
+ *     cogs.hosting            21 filas      hosting                 ...
+ *     opex.professional_fees   8 filas      professional_fees       ...
+ *     opex.rent                4 filas      rent                    ...
+ *     opex.utilities           4 filas      utilities               ...
+ *     opex.marketing           4 filas      marketing               ...
+ *
+ * 69 filas de U3 TECH, y su dashboard muestra `opex.software` Y `software` como dos rubros.
+ * El tipo contable YA viaja en su propio campo (`t`), así que repetirlo dentro del nombre no
+ * agrega nada: es basura estructural.
+ *
+ * ═══ POR QUÉ ACÁ Y NO EN `PALABRAS_GENERICAS` ═══
+ *
+ * Porque `revenue` es un lema legítimo —`ingreso` mapea a él— y meterlo en las genéricas
+ * dejaría a una categoría llamada `ingresos` sin ninguna palabra significativa. Lo que sobra
+ * no es la palabra: es la palabra EN POSICIÓN DE PREFIJO, seguida de punto. Solo eso se quita.
+ *
+ * Y se quita del NOMBRE, no solo del concepto: el canonizador guarda el nombre tal como lo
+ * escribió el primer lote, así que sin esto el cliente vería `opex.software` en su dashboard
+ * aunque los dos rubros ya estuvieran unificados por dentro.
+ */
+export function sinPrefijoDeTipo(nombre: string): string {
+  const punto = nombre.indexOf('.');
+  if (punto <= 0) return nombre;
+  const prefijo = nombre.slice(0, punto).trim().toLowerCase();
+  if (!TIPOS_CONTABLES.has(prefijo)) return nombre;
+  const resto = nombre.slice(punto + 1).trim();
+  // `opex.` a secas no deja nada: se conserva el original antes que devolver vacío.
+  return resto === '' ? nombre : resto;
+}
+
 function enPalabras(nombre: string): string[] {
   return nombre
     .normalize('NFD')
@@ -253,11 +347,39 @@ function sinPlural(token: string): string {
  * Conjunto y no lista: `costo_de_ventas` y `ventas_costo` son el mismo concepto dicho en otro
  * orden, y ningún cliente los leería como dos rubros.
  */
-export function conceptoDeCategoria(nombre: string): string {
+/**
+ * El lema de un token, probando las formas de plural que `sinPlural` no cubre.
+ *
+ * `sinPlural` quita la `s` final y con eso alcanza para `ventas`/`venta`. No alcanza para dos
+ * formas que producción SÍ tiene (auditoría 2026-08-24):
+ *
+ *   · plural español en `-es`:  `comisiones` → `comisione`, y el lema es `comision`
+ *   · plural inglés en `-ies`:  `supplies`   → `supplie`,   y el lema es `supply`
+ *
+ * Por eso `comisiones_ventas` y `sales_commissions` seguían siendo dos rubros en el dashboard
+ * de CarsGT, igual que `cleaning_supplies` y `limpieza_suministros` en HeladosGT.
+ *
+ * Se prueban formas en orden y gana la primera que EXISTE en la tabla; si ninguna existe se
+ * devuelve el token tal cual. O sea que agregar formas no puede unir de más: solo puede
+ * encontrar un lema que ya estaba escrito.
+ */
+function lemaDe(token: string): string {
+  const candidatos = [token];
+  if (token.endsWith('e')) candidatos.push(token.slice(0, -1)); // comisione → comision
+  if (token.endsWith('ie')) candidatos.push(`${token.slice(0, -2)}y`); // supplie → supply
+  for (const c of candidatos) {
+    const l = LEMAS[c];
+    if (l !== undefined) return l;
+  }
+  return token;
+}
+
+export function conceptoDeCategoria(nombreCrudo: string): string {
+  const nombre = sinPrefijoDeTipo(nombreCrudo);
   const palabras = enPalabras(nombre)
     .map(sinPlural)
     .filter((t) => !PALABRAS_GENERICAS.has(t))
-    .map((t) => LEMAS[t] ?? t)
+    .map(lemaDe)
     .map(sinPlural);
 
   // Todo genérico (una categoría llamada "total_general"): se devuelve el nombre normalizado
@@ -357,7 +479,8 @@ export class CanonizadorDeCategorias {
     categoria: string | null,
   ): string | null {
     if (categoria === null) return null;
-    const limpia = categoria.trim();
+    // El prefijo del tipo se quita del NOMBRE, no solo del concepto: es lo que el cliente lee.
+    const limpia = sinPrefijoDeTipo(categoria.trim()).trim();
     if (limpia === '') return null;
 
     const k = this.clave(sheetName, entity, type, limpia);

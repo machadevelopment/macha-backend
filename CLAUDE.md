@@ -294,7 +294,17 @@ Conventions & gotchas:
   por (entidad, tipo): las 13 categorías de `Gastos_Operativos` son todas `opex` y colapsarlas
   dejaría al cliente sin su pantalla de gastos. **El canonizador nunca inventa un nombre** —solo
   mapea sobre uno que ya apareció en esa hoja—, así que si la tabla de sinónimos se queda corta
-  el peor caso es no unificar, no unificar mal. **Y se unifica también por CONTENCIÓN**
+  el peor caso es no unificar, no unificar mal. **La tabla salió de AUDITAR producción**
+  (2026-08-24): 143 categorías reales, con 24 rubros de `opex` en House Products, 20 en
+  HeladosGT y 19 en CarsGT — los pares ES/EN son la mayor parte de lo que sobra. Dos hallazgos
+  de esa auditoría que no se ven leyendo código: el modelo a veces pega **el tipo como prefijo**
+  (`opex.software` junto a `software`, 69 filas de U3 TECH) y eso se quita del NOMBRE y no solo
+  del concepto, porque es lo que el cliente lee; y **el plural rompía la unificación** —
+  `comisiones`→`comisione`, `supplies`→`supplie`— así que `lemaDe` prueba las formas `-es` e
+  `-ies` antes de rendirse. **Los DESGLOSES no se unifican y es decisión, no olvido**:
+  `utilities_water` no se colapsa contra `utilities` ni `payroll_admin` contra `payroll`. Un
+  dueño puede querer ver el agua separada de la luz; traducir es objetivo, decidir que dos
+  rubros distintos son uno es del cliente. **Y se unifica también por CONTENCIÓN**
   (2026-08-24): si las palabras significativas de un nombre están todas dentro de las de otro,
   es el mismo concepto con un matiz de más. Verificado en producción sobre una concesionaria
   que produjo TRES nombres para el mismo gasto, uno por lote — `import_customs` (11 filas),
