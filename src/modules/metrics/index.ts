@@ -10,6 +10,7 @@ import { computePeriodMetrics } from './period';
 import { companies, invoices, bills } from '@/db/schema';
 import { productPerformance } from './products';
 import { categoryBreakdown } from './categories';
+import { storeBreakdown } from './stores';
 import { counterpartyConcentration } from './counterparties';
 
 function monthStart(monthsAgo: number): string {
@@ -407,6 +408,62 @@ export const metricsCategories = new Elysia().use(tenantDerive).get(
             sharePct: t.Number(),
           }),
         ),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+/**
+ * Ventas por TIENDA en el rango — CU-868kuw1e3, la tarjeta de "Ventas por tienda" de la
+ * pantalla de Ventas por producto.
+ *
+ * Ruta aparte de `/metrics/products` y no un campo más en aquella respuesta, por el mismo
+ * criterio que ya separó `/ar-ap/counterparties`: `/metrics/products` la llama el DASHBOARD
+ * en cada carga para su tarjeta de producto estrella, y colgarle esta agregación le sumaría
+ * un `GROUP BY` con join a la pantalla de entrada de todos los usuarios para devolver datos
+ * que solo mira quien abre Ventas por producto.
+ *
+ * La agregación vive en `./stores` y la comparte con la herramienta `sales_by_store` del
+ * asesor: dos "ventas por tienda" en el producto acabarían dándole al mismo dueño dos cifras
+ * distintas para la misma pregunta.
+ *
+ * `unattributedTotal` viaja SIEMPRE, incluso en cero. Es lo que le permite al frontend
+ * distinguir los tres estados que se ven igual si solo se mira `rows`: no hay ventas, hay
+ * ventas y ninguna trae tienda, o hay tiendas pero una parte de las ventas no está atribuida.
+ */
+export const metricsStores = new Elysia().use(tenantDerive).get(
+  '/metrics/stores',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/stores');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const { rows, unattributedTotal } = await storeBreakdown(db, companyId, query.from, query.to);
+
+    return { baseCurrency: company?.baseCurrency ?? 'GTQ', rows, unattributedTotal };
+  },
+  {
+    query: t.Object({ from: RANGO_ISO, to: RANGO_ISO }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        rows: t.Array(
+          t.Object({
+            storeId: t.String(),
+            name: t.String(),
+            total: t.Number(),
+            transactionCount: t.Number(),
+            sharePct: t.Number(),
+          }),
+        ),
+        unattributedTotal: t.Number(),
       }),
       429: rateLimitedResponse,
     },
