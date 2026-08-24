@@ -907,6 +907,12 @@ export async function classifySheetRows(params: {
     type: RowVerdict['type'],
     category: string | null,
   ) => string | null;
+  /**
+   * Sube la confianza de un lote cuyo número es UNIFORME al techo que el modelo ya le dio al
+   * mismo veredicto en esta hoja. Es un callback por el mismo motivo que `canonizarCategoria`:
+   * el estado que acumula es POR HOJA y la política vive en `lib/sheet-consensus.ts`.
+   */
+  nivelarConfianza?: (veredictos: VeredictoCrudo[]) => void;
 }): Promise<ClassifySheetResult> {
   assertZdrModel(anthropicIntakeModel);
   const anthropic = getClient();
@@ -1002,6 +1008,14 @@ export async function classifySheetRows(params: {
       v.c = params.canonizarCategoria(v.e, v.t, v.c);
     }
   }
+
+  /*
+   * La confianza se nivela DESPUÉS de canonizar la categoría, y el orden no es casual: el
+   * techo se guarda por veredicto —(entidad, tipo, categoría)— así que con los nombres todavía
+   * sin unificar, `venta_vehiculos` y `vehicle_sales` serían dos veredictos distintos y ninguno
+   * heredaría el techo del otro. Es la misma dependencia que ya tiene el consenso de hoja.
+   */
+  params.nivelarConfianza?.([...porIndice.values()]);
 
   /** Los veredictos del modelo, ya canonicalizados: es lo que mide la homogeneidad de la hoja. */
   const veredictos = [...porIndice.values()].map((v) => ({
