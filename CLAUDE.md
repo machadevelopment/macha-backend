@@ -236,6 +236,23 @@ Conventions & gotchas:
   `GET /documents/:id/conceptos-pendientes` + `POST /documents/:id/conceptos` en el backend, y
   `components/upload/conceptos-pendientes.tsx` en el flujo de subida — **no** en revisión
   interna, por decisión de Semi: es la persona que sabe qué es "Cropa" en su propio libro.
+  - **El concepto sale de `description`, `product` o `counterparty` — el primero que exista**
+    (reporte de Jose, 2026-08-24: *"da como 60 filas flageadas · resolverlos es un proceso bien
+    manual que no debería ser tan complejo"*). Salía SOLO de `description` y toda fila sin ella
+    se descartaba en silencio. Medido sobre las **4.686 filas marcadas de producción** que una
+    categoría arregla: **1.739 no traen `description`**, y de esas **977 traen `product` y 668
+    `counterparty`** — el concepto estaba, en otra columna. Un libro de ventas por producto
+    identifica la fila con "Kapel Blend" y uno de compras con el proveedor; ninguno escribe una
+    descripción y no tienen por qué. El efecto era el peor posible: la pantalla que existe para
+    que el cliente resuelva sus filas con UNA respuesta le mostraba **cero conceptos**, y las
+    sesenta se iban enteras a revisión interna. **El GET y el POST usan el MISMO criterio**, y
+    esa simetría no es estética: con el POST buscando solo por `description`, el cliente vería
+    el concepto, contestaría, y ninguna fila cambiaría — peor que no mostrarlo, porque le diría
+    que resolvió algo que sigue igual. El ORDEN tampoco es arbitrario: `description` describe el
+    HECHO, `product` identifica la fila y el dueño la reconoce, `counterparty` agrupa más grueso
+    (un proveedor factura cosas de rubros distintos). Se toma el primero, nunca una
+    concatenación: mezclar producto y proveedor partiría en dos el concepto de una fila que trae
+    ambos.
   - **Se pregunta por CONCEPTO, no por fila**, y eso es lo que hace viable la pantalla: un
     archivo con 400 filas marcadas puede tener seis conceptos, y 400 preguntas no las contesta
     nadie — sería revisión interna con otro nombre, en la cara del cliente. El agrupado usa

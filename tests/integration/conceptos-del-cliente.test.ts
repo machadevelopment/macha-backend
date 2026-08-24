@@ -238,6 +238,76 @@ describe('GET /documents/:id/conceptos-pendientes', () => {
     expect(body.conceptos.map((c) => c.ejemplo)).not.toContain('Compra de vitrinas');
   });
 
+  /**
+   * ═══ EL REPORTE DE JOSE (2026-08-24) ═══
+   *
+   * *"hay muchas columnas que deja como flageadas, entonces es bien difícil porque da como 60
+   * · resolverlos es un proceso bien manual que no debería ser tan complejo"*.
+   *
+   * La causa: el concepto salía SOLO de `description`, y una fila sin ella se descartaba en
+   * silencio. Medido en producción sobre las 4.686 filas marcadas que una categoría arregla,
+   * **1.739 no traen `description`** — y de esas, 977 traen `product` y 668 `counterparty`.
+   * El concepto estaba ahí, en otra columna.
+   *
+   * El resultado para el cliente era el peor posible: su pantalla mostraba CERO conceptos y
+   * las sesenta filas se iban enteras a revisión manual — justo el trabajo que esa pantalla
+   * existe para evitar.
+   */
+  test('una fila SIN descripción se pregunta por su producto o su proveedor', async () => {
+    const [doc] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status, row_count, flagged_count)
+      values (${companyId}, ${userId}, ${`${companyId}/ventas.xlsx`}, 'ventas.xlsx',
+              100, 'text/csv', 'promoted', 3, 3)
+      returning id
+    `;
+
+    // Tal cual vienen de un libro de ventas por producto y uno de compras por proveedor:
+    // identifican la fila, pero ninguno escribe una descripción.
+    const sinDescripcion = [
+      { product: 'Kapel Blend', counterparty: null },
+      { product: 'Kapel Blend', counterparty: null },
+      { product: null, counterparty: 'Distribuidora Norte' },
+    ];
+    for (const f of sinDescripcion) {
+      await owner`
+        insert into staging_rows (company_id, document_id, target_entity, payload, confidence,
+                                  flag_reason, review_status)
+        values (${companyId}, ${doc!.id}, 'transaction',
+                ${owner.json({
+                  type: 'opex',
+                  category: null,
+                  date: '2026-07-15',
+                  originalAmount: 100,
+                  originalCurrency: 'GTQ',
+                  description: null,
+                  product: f.product,
+                  counterparty: f.counterparty,
+                })},
+                0.35, 'low_confidence:0.35', 'pending')
+      `;
+    }
+
+    const res = await pedir(`/${doc!.id}/conceptos-pendientes`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      conceptos: { concepto: string; ejemplo: string; filas: number }[];
+      total: number;
+    };
+
+    // Dos conceptos —el producto y el proveedor—, no cero y tampoco tres.
+    expect(body.total).toBe(2);
+    expect(body.conceptos).toHaveLength(2);
+
+    const porEjemplo = new Map(body.conceptos.map((c) => [c.ejemplo, c]));
+    expect([...porEjemplo.keys()].sort()).toEqual(['Distribuidora Norte', 'Kapel Blend']);
+    // Las dos filas del mismo producto son UNA pregunta.
+    expect(porEjemplo.get('Kapel Blend')?.filas).toBe(2);
+
+    // Y el ejemplo es el texto que el cliente escribió, nunca la palabra "null".
+    for (const c of body.conceptos) expect(c.ejemplo).not.toBe('null');
+  });
+
   test('el documento de otra empresa da 404, no sus conceptos', async () => {
     /*
      * ═══ QUÉ CAPA ES LA QUE SOSTIENE ESTO — MEDIDO, NO SUPUESTO ═══

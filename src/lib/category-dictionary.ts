@@ -108,6 +108,52 @@ const PALABRAS_FUNCIONALES = new Set([
  * `null` cuando no queda nada normalizable. Una clave vacía casaría con cualquier fila sin
  * descripción y clasificaría media hoja por accidente (la base también lo ataja con un CHECK).
  */
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL TEXTO QUE IDENTIFICA UNA FILA NO SIEMPRE ESTÁ EN `description`
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Reporte de Jose (2026-08-24): *"hay muchas columnas que deja como flageadas, entonces es
+ * bien difícil porque da como 60 · resolverlos es un proceso bien manual que no debería ser
+ * tan complejo"*.
+ *
+ * La causa medida: `GET /documents/:id/conceptos-pendientes` sacaba el concepto SOLO de
+ * `payload.description`, y descartaba en silencio toda fila que no lo trajera. Sobre las
+ * 4.686 filas marcadas de producción que una categoría arreglaría:
+ *
+ *     con `description`   2.947   el cliente las ve y las contesta
+ *     SIN `description`   1.739   invisibles para él → caían enteras en revisión interna
+ *
+ * De esas 1.739, **977 traen `product` y 668 traen `counterparty`**: el concepto estaba ahí,
+ * solo que en otra columna. Un libro de ventas por producto identifica la fila con "Kapel
+ * Blend"; uno de compras, con el nombre del proveedor. Ninguno de los dos escribe una
+ * descripción, y no tienen por qué.
+ *
+ * El efecto para el cliente era el peor posible: la pantalla donde puede resolver sus propias
+ * filas con UNA respuesta le mostraba CERO conceptos, y las sesenta filas quedaban esperando
+ * a que alguien de Macha las tocara una por una. Justo el trabajo manual que ese mecanismo
+ * existe para evitar.
+ *
+ * ═══ EL ORDEN NO ES ARBITRARIO ═══
+ *
+ * `description` primero porque es el campo que describe el HECHO ("pago a Claro"), que es lo
+ * que mejor responde "¿qué es esto?". `product` después: identifica la fila y el dueño lo
+ * reconoce al instante. `counterparty` al final: sirve, pero un mismo proveedor puede
+ * facturar cosas de rubros distintos, así que agrupar por él es más grueso.
+ *
+ * Se toma el PRIMERO que exista, no una concatenación: mezclar producto y proveedor en una
+ * sola clave partiría en dos el concepto de una fila que trae ambos.
+ */
+export function textoDeConcepto(payload: unknown): unknown {
+  if (payload === null || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  for (const campo of ['description', 'product', 'counterparty'] as const) {
+    const v = p[campo];
+    if (typeof v === 'string' && v.trim() !== '') return v;
+  }
+  return null;
+}
+
 export function claveDeConcepto(texto: unknown): string | null {
   if (typeof texto !== 'string') return null;
   const limpio = texto.trim();
