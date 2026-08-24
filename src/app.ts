@@ -34,6 +34,7 @@ import {
   metricsProducts,
   metricsCategories,
   metricsStores,
+  metricsCurrencies,
 } from '@/modules/metrics';
 import { inventory } from '@/modules/inventory';
 import { me } from '@/modules/me';
@@ -87,6 +88,7 @@ const clientApi = new Elysia()
   .use(metricsProducts)
   .use(metricsCategories)
   .use(metricsStores)
+  .use(metricsCurrencies)
   .use(inventory)
   .use(insights)
   .use(creditsBalance)

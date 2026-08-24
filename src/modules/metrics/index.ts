@@ -11,6 +11,7 @@ import { companies, invoices, bills } from '@/db/schema';
 import { productPerformance } from './products';
 import { categoryBreakdown } from './categories';
 import { storeBreakdown } from './stores';
+import { currencyComposition } from './currencies';
 import { counterpartyConcentration } from './counterparties';
 
 function monthStart(monthsAgo: number): string {
@@ -408,6 +409,64 @@ export const metricsCategories = new Elysia().use(tenantDerive).get(
             sharePct: t.Number(),
           }),
         ),
+      }),
+      429: rateLimitedResponse,
+    },
+  },
+);
+
+/**
+ * Composición por moneda del período, con la tasa aplicada — CU-868kj3gnv.
+ *
+ * Ruta aparte y no un campo más en `/metrics/period` a propósito: `/metrics/period` la llama
+ * el dashboard en cada carga y para la inmensa mayoría de las empresas —las que operan en una
+ * sola moneda— esta respuesta no se usa nunca. Colgarla ahí sería sumarle un `GROUP BY` con
+ * cinco agregados a la pantalla de entrada de todos los usuarios para devolver algo que casi
+ * nadie mira.
+ *
+ * `multiCurrency` viaja en la respuesta y NO se deduce en el cliente: es la definición única
+ * de "esta empresa es multi-moneda", y el dashboard y los reportes tienen que coincidir en
+ * ella o el cliente ve el control en una pantalla y no en la otra.
+ */
+export const metricsCurrencies = new Elysia().use(tenantDerive).get(
+  '/metrics/currencies',
+  async ({ companyId, role, query, set, db }) => {
+    assertClientCapability(role, 'view_dashboard_reports', set);
+
+    const limited = await enforceTokenBucket('read', companyId, set, 'GET /metrics/currencies');
+    if (limited) return limited;
+
+    const [company] = await db
+      .select({ baseCurrency: companies.baseCurrency })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+
+    const base = (company?.baseCurrency ?? 'GTQ') as 'GTQ' | 'USD';
+    return await currencyComposition(db, companyId, base, query.from, query.to);
+  },
+  {
+    query: t.Object({ from: RANGO_ISO, to: RANGO_ISO }),
+    response: {
+      200: t.Object({
+        baseCurrency: t.String(),
+        rows: t.Array(
+          t.Object({
+            currency: t.String(),
+            originalTotal: t.Number(),
+            baseTotal: t.Number(),
+            transactionCount: t.Number(),
+            rate: t.Union([
+              t.Object({
+                min: t.Number(),
+                max: t.Number(),
+                latest: t.Number(),
+                latestDate: t.String(),
+              }),
+              t.Null(),
+            ]),
+          }),
+        ),
+        multiCurrency: t.Boolean(),
       }),
       429: rateLimitedResponse,
     },
