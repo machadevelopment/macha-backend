@@ -19,6 +19,7 @@ import { documents, companies, stagingRows } from '@/db/schema';
 import { enqueue, QUEUES, RETRY_POLICY } from '@/queue';
 import {
   claveDeConcepto,
+  textoDeConcepto,
   guardarReglasAprendidas,
   type ReglaAprendida,
 } from '@/lib/category-dictionary';
@@ -601,7 +602,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
     /*
      * El agrupado se hace en CÓDIGO y no con un `GROUP BY`. No es pereza: la clave del grupo
-     * es `claveDeConcepto(payload->>'description')`, la MISMA normalización que usa el
+     * es `claveDeConcepto(textoDeConcepto(payload))`, la MISMA normalización que usa el
      * diccionario para guardar y para buscar. Un `GROUP BY lower(...)` en SQL agruparía
      * distinto —sin quitar acentos, sin colapsar palabras funcionales— y el cliente vería
      * "Pago a CLARO" y "pago claro" como dos preguntas, contestaría las dos, y la segunda
@@ -623,10 +624,19 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       if (!esArreglablePorCategoria(f.flagReason)) continue;
       const p = f.payload as {
         description?: unknown;
+        product?: unknown;
+        counterparty?: unknown;
         originalAmount?: unknown;
         originalCurrency?: unknown;
       };
-      const clave = claveDeConcepto(p.description);
+      /*
+       * El texto sale de `description`, `product` o `counterparty` — el primero que exista.
+       * Antes salía SOLO de `description`, y las 1.739 filas de producción que no la traen
+       * quedaban invisibles para el cliente: su pantalla mostraba cero conceptos y las sesenta
+       * filas se iban enteras a revisión interna. Ver `textoDeConcepto`.
+       */
+      const texto = textoDeConcepto(p);
+      const clave = claveDeConcepto(texto);
       if (clave === null) continue;
 
       const monto = typeof p.originalAmount === 'number' ? Math.abs(p.originalAmount) : 0;
@@ -655,8 +665,10 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         porConcepto.set(clave, {
           concepto: clave,
           // El texto CRUDO de la primera fila, no la clave normalizada: el cliente reconoce
-          // lo que él escribió en su archivo, no `pago|claro`.
-          ejemplo: String(p.description),
+          // lo que él escribió en su archivo, no `pago|claro`. Y es el MISMO texto del que
+          // salió la clave — con `p.description` a secas, una fila identificada por su
+          // producto le mostraría la palabra "null" como nombre del concepto.
+          ejemplo: String(texto),
           filas: 1,
           entity: f.targetEntity,
           montos: new Map([[moneda, monto]]),
@@ -761,7 +773,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       for (const fila of pendientes) {
         if (!esArreglablePorCategoria(fila.flagReason)) continue;
         const p = fila.payload as Record<string, unknown>;
-        const clave = claveDeConcepto(p.description);
+        /*
+         * EL MISMO criterio que usa el GET, y tiene que serlo: si acá se buscara solo por
+         * `description`, el cliente vería el concepto en su pantalla —porque el GET ya lo
+         * encuentra por `product`— contestaría, y ninguna fila cambiaría. Peor que no
+         * mostrarlo: le diría que resolvió algo que sigue igual.
+         */
+        const texto = textoDeConcepto(p);
+        const clave = claveDeConcepto(texto);
         if (clave === null) continue;
         const r = respuestas.get(clave);
         if (!r) continue;
@@ -793,7 +812,9 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         if (!vistos.has(clave)) {
           vistos.add(clave);
           reglas.push({
-            texto: String(p.description),
+            // El mismo texto del que salió la clave: la regla se guarda para que la próxima
+            // carga la ENCUENTRE, y `buscar()` normaliza por esa misma vía.
+            texto: String(texto),
             entity: fila.targetEntity,
             type: r.type,
             category: r.category,
