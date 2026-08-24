@@ -717,6 +717,8 @@ describe('sinonimia medida contra producción', () => {
     ['transportation_fuel', 'transport_fuel'],
     ['import_customs', 'importacion_aduanas'],
     ['venta_vehiculos', 'vehicle_sales'],
+    ['capacitacion_personal', 'personnel_training'],
+    ['import_customs', 'import_duties'],
   ])('%s y %s son el mismo rubro', (a, b) => {
     expect(sonElMismoConcepto(a, b)).toBe(true);
   });
@@ -725,6 +727,8 @@ describe('sinonimia medida contra producción', () => {
     // DESGLOSES: el dueño puede querer ver el agua separada de la luz. No se tocan.
     ['utilities', 'utilities_water'],
     ['payroll', 'payroll_admin'],
+    ['fuel', 'fleet_fuel'],
+    ['sales', 'vehicle_sales'],
     // líneas de producto distintas de un mismo negocio
     ['laptops_sales', 'tablets_sales'],
     // comparten una palabra y no son lo mismo

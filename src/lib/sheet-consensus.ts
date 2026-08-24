@@ -231,6 +231,15 @@ const LEMAS: Record<string, string> = {
    */
   commission: 'fee',
   supplie: 'supply',
+  /*
+   * Segunda pasada, sobre la carga que CarsGT resubió ya con los lemas de arriba puestos
+   * (documento `d17a8b9c`, 2026-08-24): `personnel_training` seguía separado de
+   * `capacitacion_personal`, e `import_duties` de `import_customs`. Los dos son traducción
+   * pura, que es lo único que esta tabla decide.
+   */
+  personnel: 'staff',
+  duty: 'customs',
+  dutie: 'customs',
   nomina: 'payroll',
   salario: 'payroll',
   sueldo: 'payroll',
