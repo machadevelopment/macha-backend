@@ -191,6 +191,21 @@ Conventions & gotchas:
   11 %, donde cada fila sí requiere criterio pero los CONCEPTOS se repiten entre cargas. El
   diccionario no crece con las filas del archivo sino con los conceptos distintos del negocio,
   que son decenas y se estabilizan.
+  **EL CONCEPTO SALE DE `description`, `product` O `counterparty` — EN LOS TRES LADOS**
+  (auditoría 2026-08-24). Se exigía `description` y nada más, y eso apagaba el mecanismo
+  entero para media base: de las **101 hojas con perfil de columnas en producción, solo 47 la
+  traen**, y las que no son las principales — `Ventas` en 7 empresas, `OrdenesCompra` en 4,
+  `CuentasPorCobrar` en 3. Un libro de ventas por producto identifica la fila con "Kapel Blend"
+  y no escribe una descripción jamás. **El efecto era circular y por eso no se veía**: sin esa
+  columna la hoja no APRENDE reglas, así que nunca hay diccionario que aplicar, así que cada
+  carga vuelve a pagarle al modelo por las mismas filas — el ahorro estaba apagado justo en la
+  hoja más grande de cada archivo. Los TRES lados usan el mismo criterio y tienen que hacerlo:
+  el worker al aprender (si aprende por una columna y busca por otra, la regla queda bajo una
+  clave que nadie consulta), `resolverLoteConDiccionario` al aplicar, y
+  `conceptos-pendientes` al preguntarle al cliente. El ORDEN es `description` (describe el
+  HECHO) → `product` (identifica la fila, el dueño la reconoce) → `counterparty` (agrupa más
+  grueso: un proveedor factura rubros distintos), y se toma el PRIMERO que exista, nunca una
+  concatenación.
   **La autoridad se evalúa ANTES de la versión**: `confirmado_por_cliente` >
   `corregido_por_staff` > `inferido`. Al revés, una inferencia del modelo de la semana
   siguiente pisaría lo que el cliente confirmó y se le volvería a preguntar algo que ya

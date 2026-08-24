@@ -263,20 +263,65 @@ describe('resolverLoteConDiccionario', () => {
     expect(r).toBeNull();
   });
 
-  test('CANDADO: sin columna de descripción no se resuelve nada', async () => {
-    // Es de donde sale el concepto. Buscarlo en otra columna sería clasificar por la columna
-    // equivocada: plata en el rubro equivocado, sin que nada falle.
+  test('CANDADO: sin NINGUNA columna que identifique la fila no se resuelve nada', async () => {
+    /*
+     * Sin descripción, sin producto y sin contraparte no hay concepto que buscar, y resolver
+     * por cualquier otra columna sería clasificar por la equivocada: plata en el rubro
+     * equivocado, sin que nada falle.
+     */
     const d = await (diccionarioCon([
       { texto: 'pago a claro', category: 'servicios' },
     ]) as never as Promise<DiccionarioDeCategorias>);
 
     const r = resolverLoteConDiccionario(
       [[FECHA, 1500, 'Pago a CLARO']],
-      { ...MAPA, description: null },
+      { ...MAPA, description: null, product: null, counterparty: null },
       d,
     );
 
     expect(r).toBeNull();
+  });
+
+  /**
+   * ═══ EL DICCIONARIO ESTABA APAGADO PARA MEDIA BASE (auditoría 2026-08-24) ═══
+   *
+   * Se exigía `description` y nada más. Medido en producción: de las 101 hojas con perfil de
+   * columnas, **solo 47 la traen** — y las que no son las principales (`Ventas` en 7 empresas,
+   * `OrdenesCompra` en 4, `CuentasPorCobrar` en 3).
+   *
+   * El efecto era circular, y por eso no se veía: sin columna de descripción la hoja no APRENDE
+   * reglas, así que nunca hay diccionario que aplicar, así que cada carga vuelve a pagarle al
+   * modelo por las mismas filas. Un libro de ventas por producto identifica la fila con "Kapel
+   * Blend" y no escribe una descripción jamás.
+   */
+  test('una hoja identificada por PRODUCTO también se resuelve con el diccionario', async () => {
+    const d = await (diccionarioCon([
+      { texto: 'Kapel Blend', category: 'venta_cafe' },
+    ]) as never as Promise<DiccionarioDeCategorias>);
+
+    // El producto vive en la columna 2 y no hay descripción: es la forma de un libro de ventas.
+    const r = resolverLoteConDiccionario(
+      [[FECHA, 1500, 'Kapel Blend']],
+      { ...MAPA, description: null, product: 2 },
+      d,
+    );
+
+    expect(r).not.toBeNull();
+    expect(r?.get(0)?.c).toBe('venta_cafe');
+  });
+
+  test('y una identificada por CONTRAPARTE también', async () => {
+    const d = await (diccionarioCon([
+      { texto: 'Distribuidora Norte', category: 'compra_mercaderia' },
+    ]) as never as Promise<DiccionarioDeCategorias>);
+
+    const r = resolverLoteConDiccionario(
+      [[FECHA, 1500, 'Distribuidora Norte']],
+      { ...MAPA, description: null, counterparty: 2 },
+      d,
+    );
+
+    expect(r?.get(0)?.c).toBe('compra_mercaderia');
   });
 
   test('un diccionario vacío no cubre nada (la primera carga paga entera)', () => {

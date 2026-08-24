@@ -424,9 +424,19 @@ export function resolverLoteConDiccionario(
   columnas: ColumnMap,
   diccionario: DiccionarioDeCategorias,
 ): Map<number, VeredictoCrudo> | null {
-  // Candado 1: sin descripción no hay concepto que buscar.
-  const iDescripcion = columnas.description;
-  if (iDescripcion === null) return null;
+  /*
+   * Candado 1: hace falta una columna que IDENTIFIQUE la fila. Hasta 2026-08-24 se exigía
+   * `description` y nada más, y eso apagaba el diccionario entero para media base: de las 101
+   * hojas con perfil de columnas en producción, **solo 47 traen `description`** — y las que no
+   * son las principales (`Ventas` en 7 empresas, `OrdenesCompra` en 4, `CuentasPorCobrar` en 3).
+   *
+   * El efecto era circular y por eso no se veía: sin columna de descripción la hoja no APRENDE
+   * reglas, así que nunca hay diccionario que aplicar, así que cada carga vuelve a pagarle al
+   * modelo por las mismas filas. Un libro de ventas por producto identifica la fila con "Kapel
+   * Blend" y jamás escribe una descripción.
+   */
+  const iConcepto = columnas.description ?? columnas.product ?? columnas.counterparty;
+  if (iConcepto === null || iConcepto === undefined) return null;
   // Un diccionario vacío no puede cubrir nada, y así la primera carga no paga este recorrido.
   if (diccionario.tamano === 0) return null;
 
@@ -438,7 +448,7 @@ export function resolverLoteConDiccionario(
     // descripción el diccionario reconoce entraría como un movimiento más.
     if (!filaAptaParaCortocircuito(fila, columnas)) return null;
 
-    const regla = diccionario.buscar(fila[iDescripcion]);
+    const regla = diccionario.buscar(fila[iConcepto]);
     if (regla === null) return null;
 
     // Candado 3: `entity` y `type` salen de la REGLA, no de un default.
