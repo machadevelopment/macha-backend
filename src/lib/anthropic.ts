@@ -252,7 +252,7 @@ export type VeredictoCrudo = {
  */
 export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
-  params: { rows: unknown[][]; baseCurrency: string },
+  params: { rows: unknown[][]; baseCurrency: string; ventaYaRegistradaEnOtraHoja?: boolean },
   columns: ColumnMap,
 ): ClassifiedRow[] {
   const out: ClassifiedRow[] = [];
@@ -325,7 +325,32 @@ export function construirFilas(
      * El revert sigue funcionando igual: las dos filas comparten `document_id`, así que el
      * soft-delete se las lleva juntas.
      */
-    if (v.e === 'invoice') {
+    /*
+     * ═══ SALVO QUE LA VENTA QUE LA RESPALDA YA ESTÉ REGISTRADA (2026-08-24) ═══
+     *
+     * La regla de arriba es correcta y se conserva entera: una factura emitida reconoce su
+     * ingreso. Lo que faltaba decir es "una vez".
+     *
+     * Un libro real de concesionaria (CarsGT) trae `Ventas` con las 240 ventas Y
+     * `CuentasPorCobrar` con las 81 que siguen pendientes de cobro — y las 81 apuntan por
+     * `ID Venta` a una venta que la otra hoja YA registró como ingreso. Derivarles su ingreso
+     * otra vez sumó Q 3.039.680 que el cliente nunca facturó dos veces.
+     *
+     * No es un caso raro ni una plantilla mal hecha: es como se lleva la contabilidad. La hoja
+     * de cobros es un ESTADO de la venta, no una venta más.
+     *
+     * ═══ LO QUE ESTA CONDICIÓN NO DESHACE ═══
+     *
+     * El caso que motivó la regla del 19 de agosto sigue igual. `Facturacion_Clientes` de
+     * U3TECH —1.403 filas, USD 4.840.744— es la ÚNICA fuente de ingreso de ese libro: no hay
+     * hoja de ventas a la que apunte, así que no hay referencia, la condición es falsa y su
+     * ingreso se devenga como debe. La factura sigue reconociendo ingreso por defecto; solo
+     * deja de hacerlo cuando el mismo libro demuestra que ese ingreso ya está contado.
+     *
+     * Quién lo decide es el ESQUEMA del libro (`lib/sheet-relations.ts`), no un nombre de
+     * hoja: "CuentasPorCobrar" es una convención y el próximo cliente la llamará "Cobros".
+     */
+    if (v.e === 'invoice' && !params.ventaYaRegistradaEnOtraHoja) {
       /*
        * El payload del ingreso se ARMA DE NUEVO con `targetEntity: 'transaction'`, no se
        * copia el de la factura. Las dos formas son distintas —la factura lleva `issueDate` y
@@ -861,6 +886,12 @@ export async function classifySheetRows(params: {
    */
   headerRow?: unknown[];
   /**
+   * `true` si esta hoja APUNTA a otra hoja del libro que ya registra los movimientos — una
+   * hoja de cobros contra la de ventas. Sus facturas no vuelven a reconocer el ingreso: ver
+   * la nota larga en `construirFilas`.
+   */
+  ventaYaRegistradaEnOtraHoja?: boolean;
+  /**
    * Fija el NOMBRE de la categoría al que ya usó esta hoja, cuando este lote la bautizó
    * distinto (`ventas` donde el lote 1 dijo `sales`).
    *
@@ -876,6 +907,12 @@ export async function classifySheetRows(params: {
     type: RowVerdict['type'],
     category: string | null,
   ) => string | null;
+  /**
+   * Sube la confianza de un lote cuyo número es UNIFORME al techo que el modelo ya le dio al
+   * mismo veredicto en esta hoja. Es un callback por el mismo motivo que `canonizarCategoria`:
+   * el estado que acumula es POR HOJA y la política vive en `lib/sheet-consensus.ts`.
+   */
+  nivelarConfianza?: (veredictos: VeredictoCrudo[]) => void;
 }): Promise<ClassifySheetResult> {
   assertZdrModel(anthropicIntakeModel);
   const anthropic = getClient();
@@ -971,6 +1008,14 @@ export async function classifySheetRows(params: {
       v.c = params.canonizarCategoria(v.e, v.t, v.c);
     }
   }
+
+  /*
+   * La confianza se nivela DESPUÉS de canonizar la categoría, y el orden no es casual: el
+   * techo se guarda por veredicto —(entidad, tipo, categoría)— así que con los nombres todavía
+   * sin unificar, `venta_vehiculos` y `vehicle_sales` serían dos veredictos distintos y ninguno
+   * heredaría el techo del otro. Es la misma dependencia que ya tiene el consenso de hoja.
+   */
+  params.nivelarConfianza?.([...porIndice.values()]);
 
   /** Los veredictos del modelo, ya canonicalizados: es lo que mide la homogeneidad de la hoja. */
   const veredictos = [...porIndice.values()].map((v) => ({

@@ -123,6 +123,67 @@ export function mapearColumnasDeInventario(headerRow: unknown[]): MapaDeInventar
   return mapa;
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * INVENTARIO SERIALIZADO: CADA FILA ES UNA UNIDAD, Y POR ESO NO HAY COLUMNA DE CANTIDAD
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `mapearColumnasDeInventario` exige una columna de CANTIDAD, y esa exigencia es correcta para
+ * el inventario que la vio nacer: el de una cafetería, donde una fila dice "café en grano,
+ * 40 kg". Fungible, contado por cantidad.
+ *
+ * Un negocio de inventario SERIALIZADO no tiene esa columna y no tiene por qué: cada fila es
+ * una unidad única identificada por su serie. Una concesionaria lista 260 vehículos con VIN;
+ * la cantidad de cada uno es 1 y escribirla sería redundante. Lo mismo una joyería con
+ * certificados, una inmobiliaria con matrículas, una distribuidora de maquinaria con números
+ * de serie.
+ *
+ * Sin este camino, esas hojas no mapean, no importan nada, y —peor— siguen de largo hacia el
+ * modelo, que ve costo + fecha + producto y concluye razonablemente que son costos de venta.
+ * Fue exactamente lo que pasó con CarsGT el 2026-08-24: 260 vehículos EN STOCK contabilizados
+ * como Q 36,4 M de costo de ventas, y el inventario del cliente en cero.
+ *
+ * ═══ QUIÉN DICE QUE LA HOJA ES SERIALIZADA ═══
+ *
+ * No este módulo, y no por vocabulario: lo dice el ESQUEMA del libro
+ * (`lib/sheet-relations.ts`). Una hoja cuya clave es única por fila y a la que otra hoja
+ * apunta es una tabla de entidades. Esa señal es la misma en todos los dominios y no exige
+ * conocer el negocio, que es justo lo que la lista de `PISTAS` no puede lograr.
+ */
+export function mapearInventarioSerializado(
+  headerRow: unknown[],
+  columnaDeSerie: number,
+): MapaDeInventario | null {
+  const normalizados = headerRow.map(normalizeHeader);
+  const buscar = (pistas: string[]): number | null => {
+    for (const pista of pistas) {
+      const idx = normalizados.indexOf(pista);
+      if (idx !== -1) return idx;
+    }
+    return null;
+  };
+
+  if (columnaDeSerie < 0 || columnaDeSerie >= headerRow.length) return null;
+
+  /*
+   * La serie ES el SKU: identifica la unidad sin ambigüedad y es lo que la hoja de movimientos
+   * usa para referirse a ella. `name` cae en la columna descriptiva si la hay (`Modelo`,
+   * `Marca`), y si no, se reutiliza la serie — `importarInventario` ya acepta eso.
+   *
+   * `quantity: null` marca este mapa como serializado. El llamador cuenta 1 por fila; no se
+   * inventa una columna que la hoja no tiene.
+   */
+  return {
+    sku: columnaDeSerie,
+    name: buscar(PISTAS.name),
+    quantity: null,
+    unitCost: buscar(PISTAS.unitCost),
+    reorderPoint: buscar(PISTAS.reorderPoint),
+    location: buscar(PISTAS.location),
+    supplier: buscar(PISTAS.supplier),
+  };
+}
+
 const celda = (row: unknown[], idx: number | null): unknown =>
   idx === null || idx < 0 || idx >= row.length ? null : row[idx];
 
@@ -169,6 +230,12 @@ export interface ImportarInventarioParams {
   headerRow: unknown[];
   rows: unknown[][];
   baseCurrency: Currency;
+  /**
+   * Mapa ya resuelto. Lo usa el camino de inventario SERIALIZADO, donde la hoja no se
+   * reconoce por sus encabezados sino por el esquema del libro. Omitirlo mantiene el
+   * comportamiento de siempre: se mapea por vocabulario.
+   */
+  mapa?: MapaDeInventario | null;
 }
 
 /**
@@ -183,7 +250,12 @@ export async function importarInventario(
   db: DB,
   params: ImportarInventarioParams,
 ): Promise<ResultadoDeImportacion> {
-  const mapa = mapearColumnasDeInventario(params.headerRow);
+  /*
+   * El mapa puede venir dado: una hoja de inventario SERIALIZADO no se reconoce por sus
+   * encabezados sino por el esquema del libro, y quien tiene esa información es el worker.
+   * Cuando no viene, se resuelve como siempre por vocabulario.
+   */
+  const mapa = params.mapa ?? mapearColumnasDeInventario(params.headerRow);
   const out: ResultadoDeImportacion = { creados: 0, ajustados: 0, sinCambio: 0, omitidas: 0 };
   if (!mapa) {
     out.omitidas = params.rows.length;
@@ -198,7 +270,13 @@ export async function importarInventario(
      */
     const skuCrudo = texto(celda(row, mapa.sku)) ?? texto(celda(row, mapa.name));
     const nombre = texto(celda(row, mapa.name)) ?? skuCrudo;
-    const contado = numero(celda(row, mapa.quantity));
+    /*
+     * Sin columna de cantidad la hoja es SERIALIZADA y cada fila vale UNA unidad. No es un
+     * valor por defecto para salir del paso: es lo que la fila dice — un VIN es un vehículo.
+     * El camino fungible sigue exigiendo el número, y una hoja sin cantidad NI serie no llega
+     * hasta acá porque su mapa es `null`.
+     */
+    const contado = mapa.quantity === null ? 1 : numero(celda(row, mapa.quantity));
 
     if (!skuCrudo || !nombre || contado === null || contado < 0) {
       out.omitidas++;

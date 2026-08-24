@@ -23,6 +23,7 @@ import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import {
   CanonizadorDeCategorias,
+  ConfianzaPorHoja,
   ConsensoDeHoja,
   elegirSonda,
   filaAptaParaCortocircuito,
@@ -33,7 +34,12 @@ import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
 import { canSkipSheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
-import { importarInventario } from '@/lib/inventory-import';
+import {
+  importarInventario,
+  mapearInventarioSerializado,
+  type MapaDeInventario,
+} from '@/lib/inventory-import';
+import { analizarEsquema, type EsquemaDelLibro } from '@/lib/sheet-relations';
 import { columnasEnPalabras, construirResumen, type HojaLeida } from '@/lib/read-summary';
 import type { Currency } from '@/lib/fx';
 import {
@@ -269,8 +275,13 @@ export function startExcelIngestWorker(): Promise<string> {
          * cliente que cancelara se quedaría con el inventario cambiado y sus movimientos sin
          * promover. Ver la nota del sitio donde se llenan.
          */
-        const hojasDeInventario: { sheetName: string; headerRow: unknown[]; filas: unknown[][] }[] =
-          [];
+        const hojasDeInventario: {
+          sheetName: string;
+          headerRow: unknown[];
+          filas: unknown[][];
+          /** Solo el camino serializado lo trae: su hoja no mapea por vocabulario. */
+          mapa?: MapaDeInventario | null;
+        }[] = [];
 
         /**
          * El consenso de cada hoja: qué veredicto dio el modelo en sus lotes de sonda.
@@ -288,6 +299,7 @@ export function startExcelIngestWorker(): Promise<string> {
          * un solo objeto deja el contador de reescrituras del archivo completo en un lugar.
          */
         const canonizador = new CanonizadorDeCategorias();
+        const confianzas = new ConfianzaPorHoja();
 
         /**
          * ═══ DICCIONARIO DE CATEGORÍAS DE ESTA EMPRESA (Keneth–Semi, 2026-08-20) ═══
@@ -387,6 +399,29 @@ export function startExcelIngestWorker(): Promise<string> {
           vivas.push({ nombre, rows: desdeEncabezado });
         }
         const detalleDuplicado = detectarDetalleDuplicado(vivas);
+
+        /*
+         * ═══ EL ESQUEMA RELACIONAL DEL LIBRO (2026-08-24) ═══
+         *
+         * Se calcula sobre las MISMAS hojas vivas que la detección de duplicados, y por el
+         * mismo motivo: contra todas las hojas, un catálogo de productos se relacionaría con
+         * la hoja de ventas por su SKU y quedaría marcado como tabla de entidades cuando el
+         * pre-filtro ya lo había descartado. Acá lo que queda son movimientos compitiendo
+         * contra movimientos.
+         *
+         * Lo que aporta y ningún filtro anterior podía ver: que dos hojas están unidas por
+         * IDENTIFICADORES. De ahí sale cuál registra hechos y cuál solo describe cosas. Ver
+         * `lib/sheet-relations.ts` para el archivo que lo motivó y lo que costó.
+         */
+        const esquema: EsquemaDelLibro = analizarEsquema(vivas);
+        if (esquema.referencias.length > 0) {
+          console.log(
+            `[excel-ingest] company=${companyId} esquema del libro: ` +
+              esquema.referencias
+                .map((r) => `${r.desde}→${r.hacia} (${Math.round(r.cobertura * 100)}%)`)
+                .join(', '),
+          );
+        }
 
         /** Filas que ya se habían ingerido antes y no vuelven a costar un token. */
         /*
@@ -490,6 +525,56 @@ export function startExcelIngestWorker(): Promise<string> {
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por forma ` +
                 `(${forma.motivo}): ${rows.length} filas no van al modelo`,
             );
+            continue;
+          }
+
+          /*
+           * ═══ UNA TABLA DE ENTIDADES NO PRODUCE MOVIMIENTOS DE DINERO (2026-08-24) ═══
+           *
+           * Va ANTES de la firma por vocabulario porque cubre justo lo que la firma no puede
+           * ver. `firmaDeCatalogo` reconoce el inventario FUNGIBLE de una cafetería (`stock`,
+           * `cantidad disponible`, `unidad de medida`); un inventario SERIALIZADO —vehículos
+           * por VIN, joyas por certificado, maquinaria por número de serie— no dice ninguna de
+           * esas palabras y se colaba entero hacia el modelo.
+           *
+           * Lo que pasaba entonces no era que la IA leyera mal: leía bien y el código hacía lo
+           * incorrecto con lo leído. El modelo veía costo + fecha + producto y concluía, con
+           * criterio, que eran costos de venta. CarsGT terminó con 260 vehículos EN STOCK
+           * contabilizados como Q 36,4 M de costo —240 de ellos por SEGUNDA vez, porque su
+           * costo ya venía en la hoja `Ventas`— y su inventario en cero.
+           *
+           * La señal es estructural: la clave de esta hoja es única por fila y otra hoja la
+           * referencia. Eso es lo mismo en cualquier rubro y no exige conocer el negocio.
+           */
+          if (esquema.entidades.has(sheetName)) {
+            const clave = esquema.referencias.find((r) => r.hacia === sheetName)?.haciaColumna;
+            const mapaSerie =
+              clave === undefined ? null : mapearInventarioSerializado(rows[0] ?? [], clave);
+
+            if (mapaSerie) {
+              hojasDeInventario.push({
+                sheetName,
+                headerRow: rows[0] ?? [],
+                filas: rows.slice(1),
+                mapa: mapaSerie,
+              });
+              console.log(
+                `[excel-ingest] company=${companyId} hoja "${sheetName}" es tabla de ` +
+                  `entidades (${rows.length - 1} filas): va a inventario, no a movimientos`,
+              );
+              continue;
+            }
+
+            /*
+             * Es tabla de entidades pero no se puede leer como inventario. NO se manda al
+             * modelo igual: eso es exactamente lo que producía el costo falso. Se descarta
+             * diciéndolo, que es el mismo trato que recibe cualquier hoja ilegible.
+             */
+            console.log(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" es tabla de entidades ` +
+                `pero no mapea como inventario: ${rows.length - 1} filas no se procesan`,
+            );
+            totalRowsSkippedPreFiltro += rows.length - 1;
             continue;
           }
 
@@ -857,6 +942,15 @@ export function startExcelIngestWorker(): Promise<string> {
             templateVersion,
             sheetName,
             rows: batch,
+            /*
+             * Esta hoja apunta a otra hoja de MOVIMIENTOS del mismo libro, o sea que sus
+             * facturas ya tienen su venta registrada allá. `!entidades.has` importa: apuntar a
+             * un catálogo (un vehículo, un producto) no significa que el ingreso esté contado
+             * — solo apuntar a algo que produce transacciones lo significa.
+             */
+            ventaYaRegistradaEnOtraHoja: esquema.referencias.some(
+              (r) => r.desde === sheetName && !esquema.entidades.has(r.hacia),
+            ),
             headerRow,
             baseCurrency,
             /*
@@ -907,6 +1001,12 @@ export function startExcelIngestWorker(): Promise<string> {
               }
               return canonizador.canonizar(sheetName, entity, type, category);
             },
+            /*
+             * Nivela la confianza que el modelo dio UNIFORME a todo un lote. Sobre filas
+             * indistinguibles de `Ventas` devolvió 0,92 · 0,75 · 0,60 según el lote, y con el
+             * umbral en 0,7 eso mandó 148 filas buenas a revisión interna. Ver `ConfianzaPorHoja`.
+             */
+            nivelarConfianza: (veredictos) => confianzas.registrarLote(sheetName, veredictos),
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -1380,6 +1480,14 @@ export function startExcelIngestWorker(): Promise<string> {
           );
         }
 
+        if (confianzas.filasElevadas > 0) {
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} ` +
+              `${confianzas.filasElevadas} fila(s) recuperaron la confianza que el modelo ya le ` +
+              `había dado a su mismo veredicto en esa hoja (el lote traía una nota uniforme).`,
+          );
+        }
+
         /*
          * ═══ APRENDER Y ADVERTIR (CU-868krmrcj) ═══
          *
@@ -1515,6 +1623,7 @@ export function startExcelIngestWorker(): Promise<string> {
               headerRow: hoja.headerRow,
               rows: hoja.filas,
               baseCurrency: baseCurrency as Currency,
+              mapa: hoja.mapa,
             }),
           ).catch((err) => {
             console.error(

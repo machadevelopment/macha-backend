@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  ConfianzaPorHoja,
   CanonizadorDeCategorias,
   ConsensoDeHoja,
   MAX_SKIP_EN_SONDA,
@@ -533,5 +534,99 @@ describe('filaAptaParaCortocircuito', () => {
     expect(filaAptaParaCortocircuito(FILAS_VENTAS[0]!, { ...MAPA_VENTAS, amount: null })).toBe(
       false,
     );
+  });
+});
+
+/**
+ * ═══ LOS TRES LOTES DE `Ventas` DE CarsGT (2026-08-24) ═══
+ *
+ * 240 filas indistinguibles entre sí, tres lotes, tres confianzas exactas y uniformes:
+ * 0,92 · 0,75 · 0,60. Con `CONFIDENCE_THRESHOLD` en 0,7 el tercer lote mandó 148 filas
+ * buenas a revisión interna — la misma venta pasaba o se marcaba según en qué lote cayó.
+ */
+describe('la confianza uniforme de un lote no decide el destino de una fila', () => {
+  const venta = (cf: number) => ({ e: 'transaction', t: 'revenue', c: 'venta_vehiculos', cf });
+
+  test('un lote uniforme hereda el techo que el modelo ya dio a ese veredicto', () => {
+    const c = new ConfianzaPorHoja();
+
+    const lote0 = [venta(0.92), venta(0.92), venta(0.92)];
+    const lote2 = [venta(0.6), venta(0.6), venta(0.6)];
+    c.registrarLote('Ventas', lote0);
+    c.registrarLote('Ventas', lote2);
+
+    // Sin esto, las tres del lote 2 caen bajo el umbral de 0,7 y van a revisión.
+    expect(lote2.map((v) => v.cf)).toEqual([0.92, 0.92, 0.92]);
+    expect(c.filasElevadas).toBe(3);
+  });
+
+  test('la variación DENTRO de un lote es juicio por fila y no se toca', () => {
+    /*
+     * Es la mitad que protege la red de seguridad: si el modelo distinguió una fila de sus
+     * vecinas, esa distinción es exactamente lo que el prompt le pide y no puede borrarse.
+     */
+    const c = new ConfianzaPorHoja();
+    c.registrarLote('Ventas', [venta(0.95), venta(0.95)]);
+
+    const mezclado = [venta(0.95), venta(0.4), venta(0.95)];
+    c.registrarLote('Ventas', mezclado);
+
+    expect(mezclado.map((v) => v.cf)).toEqual([0.95, 0.4, 0.95]);
+    expect(c.filasElevadas).toBe(0);
+  });
+
+  test('nunca se baja una confianza', () => {
+    const c = new ConfianzaPorHoja();
+    c.registrarLote('Ventas', [venta(0.6), venta(0.6)]);
+
+    const alto = [venta(0.95), venta(0.95)];
+    c.registrarLote('Ventas', alto);
+
+    expect(alto.map((v) => v.cf)).toEqual([0.95, 0.95]);
+  });
+
+  test('el techo NO cruza veredictos distintos', () => {
+    /*
+     * Un `opex` que el modelo entendió bien no dice nada sobre un `cogs` que no entendió. Si
+     * el techo se compartiera entre veredictos, una hoja heterogénea como `Gastos_Operativos`
+     * subiría todas sus filas al máximo de la más clara.
+     */
+    const c = new ConfianzaPorHoja();
+    c.registrarLote('Gastos', [
+      { e: 'transaction', t: 'opex', c: 'alquiler', cf: 0.95 },
+      { e: 'transaction', t: 'opex', c: 'alquiler', cf: 0.95 },
+    ]);
+
+    const dudoso = [
+      { e: 'transaction', t: 'opex', c: 'otros', cf: 0.5 },
+      { e: 'transaction', t: 'opex', c: 'otros', cf: 0.5 },
+    ];
+    c.registrarLote('Gastos', dudoso);
+
+    expect(dudoso.map((v) => v.cf)).toEqual([0.5, 0.5]);
+  });
+
+  test('el techo NO cruza hojas', () => {
+    const c = new ConfianzaPorHoja();
+    c.registrarLote('Ventas', [venta(0.95), venta(0.95)]);
+
+    const otraHoja = [venta(0.5), venta(0.5)];
+    c.registrarLote('Devoluciones', otraHoja);
+
+    expect(otraHoja.map((v) => v.cf)).toEqual([0.5, 0.5]);
+  });
+
+  test('los `skip` no cuentan para juzgar la uniformidad', () => {
+    // Una fila que el modelo declaró "esto no es un dato" no habla del criterio con que
+    // clasificó las demás; si contara, un solo skip haría ver mezclado un lote uniforme.
+    const c = new ConfianzaPorHoja();
+    c.registrarLote('Ventas', [venta(0.9), venta(0.9)]);
+
+    const conSkip = [venta(0.6), { e: 'skip', t: null, c: null, cf: 0 }, venta(0.6)];
+    c.registrarLote('Ventas', conSkip);
+
+    expect(conSkip[0]!.cf).toBe(0.9);
+    expect(conSkip[2]!.cf).toBe(0.9);
+    expect(conSkip[1]!.cf).toBe(0); // el skip queda intacto
   });
 });

@@ -42,15 +42,47 @@ Conventions & gotchas:
 - **Schema migrations auto-apply on deploy** (gated by manual promote to prod). Data/seed migrations run as separate manual scripts — never mix them.
 - **Las migraciones llevan registro (`schema_migrations`) y NO se reaplican todas en cada deploy** (2026-08-14). Antes sí, y la idempotencia bastaba para la corrección — pero **no cambiar nada igual cuesta LOCKS**. Un deploy que solo tocaba documentación murió con `deadlock detected` en `ALTER TABLE company_users FORCE ROW LEVEL SECURITY`: las migraciones corren mientras el contenedor **viejo** sigue atendiendo tráfico, el `ALTER` pide AccessExclusiveLock y la request viva tiene AccessShareLock. Postgres mató a la migración; **pudo haber matado la query del cliente**. Y `0012` hace DROP+CREATE de la política de cada tabla y de **cada partición por empresa**, así que el costo por deploy CRECÍA con la cantidad de clientes. El registro guarda `sha256` del contenido: editar una migración la vuelve a aplicar, no tocarla la salta. **Excepción única y explícita: `0010`, marcado `@reaplicar-siempre`**, porque su bloque GRANT/REVOKE es un no-op hasta que un operador crea `macha_app` a mano y el camino documentado para activarlo es redesplegar; por eso además sale temprano si los privilegios ya están puestos. **Toda migración nueva que active RLS usa `macha_asegurar_rls()`** (`0000_aa_rls_helpers.sql`), que no toca la tabla si ya está — el `ALTER` directo vuelve a poner la bomba en cada deploy a cambio de nada. `migrate.ts` corre con `lock_timeout` de 5 s y un reintento: mientras una migración ESPERA el lock, toda query nueva sobre esa tabla se encola detrás, así que el peor caso de esperar de más no es tardar, es congelar la tabla.
 - **Excel ingestion is async via pg-boss.** Rows land in a single staging table.
-  **Seis pasos ANTES del modelo, y el ORDEN importa** (2026-08-12/14) — cada uno existe porque
+  **Siete pasos ANTES del modelo, y el ORDEN importa** (2026-08-12/14, ampliado 2026-08-24) — cada uno existe porque
   el anterior no cubre su caso, y saltárselos es volver a pagar lo que ya se pagó:
-  1. **Encontrar el encabezado real** (`lib/sheet-header.ts`). Va PRIMERO porque todo lo demás
-     se indexa contra la fila 0: el pre-filtro la mira, el mapa de columnas se arma contra ella
-     y los índices que devuelve el modelo apuntan a ella. Un Excel hecho por una persona trae
-     dos líneas de título antes de la tabla, y leerlas como nombres de columna **no falla
-     nada visible**: los datos salen de las columnas equivocadas. El sesgo va a NO MOVERSE — un
-     candidato tiene que ganarle a la fila 0 y a las tres de abajo, porque elegir mal descarta
-     una fila real Y desplaza el mapa.
+  0. **El esquema relacional del libro** (`lib/sheet-relations.ts`, 2026-08-24). Se calcula
+     sobre las hojas que sobrevivieron a los pasos 2 y 3 —igual que la detección de
+     duplicados— y es lo único que mira el libro COMO CONJUNTO: qué columnas son
+     identificadores y **qué hoja apunta a qué otra**. De ahí salen dos decisiones que ningún
+     filtro por hoja podía tomar: una hoja cuya clave es única por fila y a la que otra
+     referencia es una **tabla de entidades** (no produce movimientos: va a inventario), y una
+     hoja que apunta a otra hoja de movimientos **no vuelve a reconocer su ingreso**. Ver el
+     punto de "una factura emitida" más abajo. Motivo: `Concesionaria_Guatemala` (CarsGT,
+     documento `bb769e8e`) puso Q 16 M de ingreso inventado en el dashboard de un cliente —
+     260 vehículos EN STOCK como costo de ventas (240 por segunda vez, su costo ya venía en
+     `Ventas`) más 81 cuentas por cobrar devengando un ingreso ya contado. **Es por
+     ESTRUCTURA y no por vocabulario a propósito**: la respuesta corta era agregar `vin` e
+     `idvehiculo` a la firma `existencias`, y eso arregla concesionarias mientras garantiza
+     que la joyería (`certificado`), la inmobiliaria (`matricula`) y la maquinaria
+     (`numeroserie`) vuelvan a fallar igual. La firma busca vocabulario de inventario
+     FUNGIBLE porque nació de una cafetería; un identificador único que otra hoja referencia
+     es la misma señal en todos los rubros. **No reemplaza a `sheet-duplication.ts`**: ese
+     detecta cabecera/detalle por SUMAS iguales, que es contar dos veces de otra forma.
+     `inventory-import.ts` gana el camino SERIALIZADO (`mapearInventarioSerializado`): sin
+     columna de cantidad, cada fila vale UNA unidad — un VIN es un vehículo.
+  1. **Encontrar el encabezado real** (`lib/sheet-header.ts`). Va PRIMERO de los que miran una
+     hoja sola porque todo lo demás se indexa contra la fila 0: el pre-filtro la mira, el mapa
+     de columnas se arma contra ella y los índices que devuelve el modelo apuntan a ella. Un
+     Excel hecho por una persona trae dos líneas de título antes de la tabla, y leerlas como
+     nombres de columna **no falla nada visible**: los datos salen de las columnas
+     equivocadas. El sesgo va a NO MOVERSE — un candidato tiene que ganarle a la fila 0 y a
+     las tres de abajo, porque elegir mal descarta una fila real Y desplaza el mapa.
+     **DOS FORMAS DE DESTACAR, no una** (2026-08-24): o el candidato se ve bastante más
+     encabezado que las filas de abajo, **o rompe el TIPO de sus propias columnas** (dice
+     "Fecha" donde su columna trae seriales). La segunda vía no es un refuerzo, es lo único
+     que funciona en una tabla con columnas descriptivas: ahí las filas de datos tienen
+     `unicos` y `cobertura` en 1,00 igual que el encabezado, el único discriminante que queda
+     pesa 0,35 y el margen exigido era 0,2 — **el encabezado necesitaba 1,014 sobre un máximo
+     de 1,00 y perdía por 0,014**. Medido en las CINCO hojas de `Concesionaria_Guatemala`: se
+     quedaba en la fila 0, o sea el título. Y como `classifySheet` recibía entonces un
+     encabezado de UNA celda y lo declaraba ilegible, **se cayeron a la vez el pre-filtro, la
+     firma de `existencias` y la forma de hoja**: las cinco hojas fueron al modelo y el
+     archivo costó USD 0,90 por mil filas, el más caro de la semana. Este paso no es uno de
+     seis: es el que decide si los otros cinco existen.
   2. **Forma de hoja** (`lib/sheet-shape.ts`): distingue una TABLA de un REPORTE. Cinco señales
      geométricas (encabezado con huecos + celdas vacías, ancho >40, columnas que son meses,
      nombres de columna repetidos). Los reportes con bloques a lo ancho —una fila = un cliente
@@ -234,6 +266,23 @@ Conventions & gotchas:
   en el worker. El worker tiene las credenciales de la base, y clasificar no es parsear — un
   script no sabe que "pago a Claro" es servicios. La idea de un sandbox sin red y efímero
   quedó como camino futuro, no como lo que se construyó.
+- **La CONFIANZA también se decide por lote, y era el tercer campo sin protección**
+  (`ConfianzaPorHoja`, 2026-08-24). El mapa de columnas lo cubre `assertMismoMapa` y la
+  categoría el canonizador; la confianza no la cubría nada. Medido en `Concesionaria_Guatemala`
+  (CarsGT): la hoja `Ventas`, 240 filas indistinguibles, en tres lotes con **0,92 · 0,75 ·
+  0,60 exactos y uniformes dentro de cada lote** — ni una fila difería de sus vecinas. Con
+  `CONFIDENCE_THRESHOLD` en 0,7, eso mandó **148 filas buenas a revisión interna**: la misma
+  venta pasaba o se marcaba según en qué lote cayó, y el staff que abría la cola veía "Mazda 3,
+  Q 200.400, venta_vehiculos" sin nada que revisar. **Una confianza uniforme en todo el lote es
+  un juicio sobre el LOTE, no sobre la fila**, y usarla para decidir el destino de filas
+  individuales es convertir ruido en señal. Se sube al techo que el modelo ya le dio a ESE
+  veredicto en ESA hoja — nunca se baja, nunca cruza veredictos ni hojas, y **si dentro del
+  lote hubo variación no se toca nada**: esa variación es el juicio por fila que el prompt
+  pide. Lo que sigue protegiendo a la fila es `staging-rules`, que valida fecha, monto y
+  categoría aparte de la confianza. Depende del ORDEN (se compara contra el máximo visto hasta
+  ese momento, porque las filas se insertan lote a lote): si el lote más confiado llega último
+  no arregla nada, o sea que el peor caso es lo que ya pasaba y no hay forma de quedar peor.
+  Es la misma concesión que el canonizador con "el primero que llegó gana".
 - **La categoría se unifica por hoja** (`CanonizadorDeCategorias`, mismo archivo). No es ahorro,
   es un bug de datos: cada lote pide su clasificación por separado y nada obligaba a que dos
   lotes de la misma hoja bautizaran igual el mismo concepto. En producción no lo hicieron —
@@ -247,7 +296,17 @@ Conventions & gotchas:
   mapea sobre uno que ya apareció en esa hoja—, así que si la tabla de sinónimos se queda corta
   el peor caso es no unificar, no unificar mal. Y **habilita el cortocircuito**: sin unificar,
   los tres lotes de `Ventas` contaban como tres veredictos y ninguno llegaba al 98 %.
-- **Una factura emitida produce SU INGRESO además de la cuenta por cobrar** (2026-08-19). Jose subió `U3TECH_Demo_Datos_Ampliado` y reportó "no logra reconocer los ingresos". Medido: `Facturacion_Clientes` —1.403 filas, **USD 4.840.744**, la facturación real de esa empresa— se clasificó `invoice`, se promovió entera, y el dashboard mostró **CERO ingresos**, porque `lib/rollups.ts` suma `revenue` únicamente de `transactions`. El dato estaba bien leído, bien clasificado y bien guardado, y aun así el cliente veía su negocio en cero. **No era un error de clasificación**: una factura pendiente sí es una cuenta por cobrar; lo que estaba mal era la premisa de que fuera SOLO eso — emitirla reconoce el ingreso (devengo) Y crea el derecho de cobro, dos caras del mismo hecho. Afectaba a **toda empresa que factura en vez de cobrar al mostrador** (servicios, consultoría, software); una cafetería no lo notaba porque sus ventas ya son transacciones. Es el mismo patrón que la venta con costo: una fila del archivo produce dos del ledger. El ingreso se devenga en la fecha de **emisión**, nunca en la de vencimiento —usarla lo movería de período, que es el error de la contabilidad de caja— y el payload se **arma de nuevo** con `targetEntity: 'transaction'` en vez de copiar el de la factura: las dos formas son distintas y un spread deja la fila sin `date`, marcada entera por `invalid_date` (pasó en el primer intento). Una `bill` NO produce ingreso: sería registrar como ingreso lo que la empresa debe.
+- **Una factura emitida produce SU INGRESO además de la cuenta por cobrar — UNA vez** (2026-08-19, acotado el 2026-08-24). Jose subió `U3TECH_Demo_Datos_Ampliado` y reportó "no logra reconocer los ingresos". Medido: `Facturacion_Clientes` —1.403 filas, **USD 4.840.744**, la facturación real de esa empresa— se clasificó `invoice`, se promovió entera, y el dashboard mostró **CERO ingresos**, porque `lib/rollups.ts` suma `revenue` únicamente de `transactions`. El dato estaba bien leído, bien clasificado y bien guardado, y aun así el cliente veía su negocio en cero. **No era un error de clasificación**: una factura pendiente sí es una cuenta por cobrar; lo que estaba mal era la premisa de que fuera SOLO eso — emitirla reconoce el ingreso (devengo) Y crea el derecho de cobro, dos caras del mismo hecho. Afectaba a **toda empresa que factura en vez de cobrar al mostrador** (servicios, consultoría, software); una cafetería no lo notaba porque sus ventas ya son transacciones. Es el mismo patrón que la venta con costo: una fila del archivo produce dos del ledger. El ingreso se devenga en la fecha de **emisión**, nunca en la de vencimiento —usarla lo movería de período, que es el error de la contabilidad de caja— y el payload se **arma de nuevo** con `targetEntity: 'transaction'` en vez de copiar el de la factura: las dos formas son distintas y un spread deja la fila sin `date`, marcada entera por `invalid_date` (pasó en el primer intento). Una `bill` NO produce ingreso: sería registrar como ingreso lo que la empresa debe.
+  **La acotación (2026-08-24)**: la regla se conserva entera y solo se le agrega "una vez".
+  `CuentasPorCobrar` de CarsGT trae 81 facturas que apuntan por `ID Venta` a ventas que la
+  hoja `Ventas` YA registró como ingreso, y devengarlas otra vez sumó **Q 3.039.680** que
+  nadie facturó dos veces. Una hoja de cobros es un ESTADO de la venta, no una venta más.
+  Quién lo decide es el esquema del libro (`ventaYaRegistradaEnOtraHoja`), **no el nombre de
+  la hoja** — "CuentasPorCobrar" es una convención y el próximo cliente la llamará "Cobros".
+  **El caso que motivó la regla sigue intacto y hay test que lo fija**: `Facturacion_Clientes`
+  de U3TECH no apunta a ninguna hoja de ventas, así que la condición es falsa y su ingreso se
+  devenga como debe. La factura devenga por defecto; solo deja de hacerlo cuando el mismo
+  libro demuestra que ese ingreso ya está contado.
 - **Ninguna fila desaparece en silencio** (auditoría 2026-08-12). Tres garantías que el código
   hace cumplir, cada una por un fallo que ya se observó o que no dejaría rastro:
   1. **Cobertura**: se compara lo devuelto contra lo enviado. `skip` es un veredicto EXPLÍCITO
