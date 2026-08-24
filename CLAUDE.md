@@ -294,7 +294,19 @@ Conventions & gotchas:
   por (entidad, tipo): las 13 categorías de `Gastos_Operativos` son todas `opex` y colapsarlas
   dejaría al cliente sin su pantalla de gastos. **El canonizador nunca inventa un nombre** —solo
   mapea sobre uno que ya apareció en esa hoja—, así que si la tabla de sinónimos se queda corta
-  el peor caso es no unificar, no unificar mal. Y **habilita el cortocircuito**: sin unificar,
+  el peor caso es no unificar, no unificar mal. **Y se unifica también por CONTENCIÓN**
+  (2026-08-24): si las palabras significativas de un nombre están todas dentro de las de otro,
+  es el mismo concepto con un matiz de más. Verificado en producción sobre una concesionaria
+  que produjo TRES nombres para el mismo gasto, uno por lote — `import_customs` (11 filas),
+  `importacion_aduanas` (8) e `import_customs_duties` (6) — y el daño fue doble: tres rubros
+  donde hay uno, y como contaban como veredictos distintos el tercero **no pudo heredar la
+  confianza** que el modelo ya le había dado al mismo concepto, así que sus 6 filas se fueron a
+  revisión. Hacen falta **≥2 lemas** compartidos (`gasto` está fuera de las genéricas a
+  propósito, y con uno solo absorbería a `gasto_ventas`) y **contención, no intersección**:
+  `servicios_publicos` y `servicios_profesionales_externos` comparten `utility` y NO se unen,
+  porque cada uno tiene una palabra propia. Hay test, y hubo que corregirlo: el primer caso que
+  escribí pasaba por la guarda de cardinalidad y dejaba la mutación "comparten alguna palabra"
+  en verde. Y **habilita el cortocircuito**: sin unificar,
   los tres lotes de `Ventas` contaban como tres veredictos y ninguno llegaba al 98 %.
 - **Una factura emitida produce SU INGRESO además de la cuenta por cobrar — UNA vez** (2026-08-19, acotado el 2026-08-24). Jose subió `U3TECH_Demo_Datos_Ampliado` y reportó "no logra reconocer los ingresos". Medido: `Facturacion_Clientes` —1.403 filas, **USD 4.840.744**, la facturación real de esa empresa— se clasificó `invoice`, se promovió entera, y el dashboard mostró **CERO ingresos**, porque `lib/rollups.ts` suma `revenue` únicamente de `transactions`. El dato estaba bien leído, bien clasificado y bien guardado, y aun así el cliente veía su negocio en cero. **No era un error de clasificación**: una factura pendiente sí es una cuenta por cobrar; lo que estaba mal era la premisa de que fuera SOLO eso — emitirla reconoce el ingreso (devengo) Y crea el derecho de cobro, dos caras del mismo hecho. Afectaba a **toda empresa que factura en vez de cobrar al mostrador** (servicios, consultoría, software); una cafetería no lo notaba porque sus ventas ya son transacciones. Es el mismo patrón que la venta con costo: una fila del archivo produce dos del ledger. El ingreso se devenga en la fecha de **emisión**, nunca en la de vencimiento —usarla lo movería de período, que es el error de la contabilidad de caja— y el payload se **arma de nuevo** con `targetEntity: 'transaction'` en vez de copiar el de la factura: las dos formas son distintas y un spread deja la fila sin `date`, marcada entera por `invalid_date` (pasó en el primer intento). Una `bill` NO produce ingreso: sería registrar como ingreso lo que la empresa debe.
   **La acotación (2026-08-24)**: la regla se conserva entera y solo se le agrega "una vez".
