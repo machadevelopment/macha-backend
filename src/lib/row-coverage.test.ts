@@ -409,3 +409,52 @@ describe('una venta que trae su costo produce DOS transacciones', () => {
     expect(armar('transaction', 'revenue', sinCosto)).toHaveLength(1);
   });
 });
+
+/**
+ * ═══ UNA FACTURA RECONOCE SU INGRESO UNA VEZ, NO DOS (CarsGT, 2026-08-24) ═══
+ *
+ * La regla del 19 de agosto —una factura emitida devenga su ingreso— es correcta y no se
+ * toca. Lo que faltaba decir es "una vez".
+ *
+ * Un libro real de concesionaria trae `Ventas` con las 240 ventas Y `CuentasPorCobrar` con
+ * las 81 pendientes de cobro, que apuntan por `ID Venta` a ventas ya registradas. Derivarles
+ * su ingreso otra vez le sumó Q 3.039.680 al dashboard del cliente.
+ *
+ * Estos dos tests son el par: si alguno pasa solo, el arreglo está mal hecho en una dirección
+ * o en la otra.
+ */
+describe('una factura no vuelve a reconocer un ingreso ya contado', () => {
+  const FACTURA: ColumnMap = {
+    date: 0, amount: 2, counterparty: 1, dueDate: 3,
+    product: null, productCategory: null, quantity: null, costTotal: null, costUnit: null,
+    currency: null, description: null, store: null,
+  }; // prettier-ignore
+  const FILA = [46174, 'Cliente S.A.', 50_000, 46_204]; // prettier-ignore
+
+  const armar = (ventaYaRegistradaEnOtraHoja?: boolean) =>
+    construirFilas(
+      new Map([[0, { i: 0, e: 'invoice', t: null, c: null, cf: 0.9 }]]) as never,
+      { rows: [FILA], baseCurrency: 'GTQ', ventaYaRegistradaEnOtraHoja },
+      FACTURA,
+    );
+
+  test('sin hoja de ventas que la respalde, SÍ devenga (el caso de U3TECH del 19/08)', () => {
+    /*
+     * `Facturacion_Clientes` era la ÚNICA fuente de ingreso de ese libro — USD 4.840.744 — y
+     * el dashboard mostraba cero. Si este test se pone en rojo, ese bug volvió.
+     */
+    const filas = armar(undefined);
+
+    expect(filas.map((f) => f.targetEntity).sort()).toEqual(['invoice', 'transaction']);
+    const ingreso = filas.find((f) => f.targetEntity === 'transaction');
+    expect((ingreso?.payload as { type?: string }).type).toBe('revenue');
+  });
+
+  test('si su venta ya está en otra hoja del libro, NO devenga otra vez', () => {
+    const filas = armar(true);
+
+    // La cuenta por cobrar se conserva entera: el derecho de cobro es real y el cliente
+    // quiere verlo. Lo único que no se repite es el ingreso.
+    expect(filas.map((f) => f.targetEntity)).toEqual(['invoice']);
+  });
+});

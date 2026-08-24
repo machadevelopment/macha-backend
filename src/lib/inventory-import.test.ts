@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mapearColumnasDeInventario } from './inventory-import';
+import { mapearColumnasDeInventario, mapearInventarioSerializado } from './inventory-import';
 import { firmaDeCatalogo, canSkipSheet } from './sheet-classifier';
 
 /**
@@ -103,5 +103,43 @@ describe('mapearColumnasDeInventario', () => {
     expect(mapa.sku).toBeNull();
     expect(mapa.name).toBe(0);
     expect(mapa.quantity).toBe(1);
+  });
+});
+
+/**
+ * ═══ INVENTARIO SERIALIZADO (CarsGT, 2026-08-24) ═══
+ *
+ * La hoja de una concesionaria no tiene columna de cantidad porque cada fila ES una unidad.
+ * Sin este camino no mapeaba, no importaba nada, y seguía de largo hacia el modelo — que
+ * razonablemente concluía que 260 vehículos en stock eran Q 36,4 M de costo de ventas.
+ */
+describe('inventario serializado: una fila, una unidad', () => {
+  const encabezado = [
+    'ID Vehiculo',
+    'VIN',
+    'Marca',
+    'Modelo',
+    'Costo Adquisicion (Q)',
+    'Sucursal',
+  ];
+
+  test('mapea usando la columna de serie que da el esquema del libro', () => {
+    const mapa = mapearInventarioSerializado(encabezado, 0);
+
+    expect(mapa).not.toBeNull();
+    expect(mapa!.sku).toBe(0);
+    // `quantity: null` es la marca de "serializado": el llamador cuenta 1 por fila.
+    expect(mapa!.quantity).toBeNull();
+  });
+
+  test('la MISMA hoja no mapea por vocabulario — que es justo el agujero que tapa', () => {
+    // Si algún día `mapearColumnasDeInventario` la reconociera, este camino sobraría. Mientras
+    // devuelva null, la vía serializada es la única que salva estas filas.
+    expect(mapearColumnasDeInventario(encabezado)).toBeNull();
+  });
+
+  test('una columna de serie fuera de rango no inventa un mapa', () => {
+    expect(mapearInventarioSerializado(encabezado, 99)).toBeNull();
+    expect(mapearInventarioSerializado(encabezado, -1)).toBeNull();
   });
 });
