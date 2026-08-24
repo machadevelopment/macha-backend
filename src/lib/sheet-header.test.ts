@@ -103,3 +103,77 @@ describe('el sesgo va hacia NO moverse', () => {
     expect(detectarFilaDeEncabezado(filas)).toBe(0);
   });
 });
+
+/**
+ * ═══ LA REGRESIÓN QUE DESACTIVÓ LOS SEIS FILTROS (CarsGT, 2026-08-24) ═══
+ *
+ * Este es el caso que el puntaje solo no podía resolver, y no por poco margen conceptual sino
+ * por 0,014 de aritmética. Una tabla con columnas descriptivas —cliente, vendedor, VIN, marca,
+ * modelo— tiene filas de datos con `unicos` = 1,00 y `cobertura` = 1,00, iguales a las del
+ * encabezado. El único discriminante que queda es `proporcionTexto`, que pesa 0,35, y el
+ * margen exigido sobre las filas de abajo era 0,2: el encabezado necesitaba más de 1,00 sobre
+ * un máximo de 1,00.
+ *
+ * Lo que costó no fue una columna mal leída. Al quedarse en la fila 0 —el título de la hoja—
+ * `classifySheet` recibía un encabezado de UNA celda, lo declaraba ilegible y mandaba la hoja
+ * al modelo; con eso se cayeron a la vez el pre-filtro de catálogos, la firma de `existencias`
+ * y la forma de hoja. Las cinco hojas del libro fueron al modelo y el archivo costó USD 0,90
+ * por mil filas, el más caro de la semana.
+ */
+describe('una tabla con columnas descriptivas encuentra su encabezado', () => {
+  /** `Ventas` de `Concesionaria_Guatemala`: dos líneas de título y datos ricos en texto. */
+  const hojaDeConcesionaria = (): unknown[][] => {
+    const rows: unknown[][] = [
+      ['Ventas'],
+      ['Registro de ventas de vehiculos'],
+      [
+        'ID Venta',
+        'Fecha',
+        'Cliente',
+        'Vendedor',
+        'ID Vehiculo',
+        'VIN',
+        'Marca',
+        'Modelo',
+        'Tipo',
+        'Sucursal',
+        'Precio Venta (Q)',
+        'Costo Vehiculo (Q)',
+      ],
+    ];
+    for (let i = 0; i < 8; i++) {
+      rows.push([
+        `V-000${i}`,
+        45_800 + i,
+        `Cliente ${i}`,
+        `Vendedor ${i}`,
+        `VH-00${i}`,
+        `3N1AB7AP${i}KY123456`,
+        'Mazda',
+        'CX-5',
+        'Sedan',
+        'Vista Hermosa',
+        200_400 + i,
+        162_552 + i,
+      ]);
+    }
+    return rows;
+  };
+
+  test('elige la fila de encabezados y no el título', () => {
+    expect(detectarFilaDeEncabezado(hojaDeConcesionaria())).toBe(2);
+  });
+
+  test('el sesgo se conserva: en una hoja de puro texto no se mueve', () => {
+    /*
+     * Es la contraparte y el motivo por el que la señal nueva mira TIPOS y no texto: si ninguna
+     * columna cambia de tipo hacia abajo, no hay evidencia, y mover el corte descartaría una
+     * fila real del cliente. Un catálogo de nombres se queda en 0.
+     */
+    const rows: unknown[][] = [['Nombre', 'Ciudad', 'Pais', 'Contacto']];
+    for (let i = 0; i < 8; i++) {
+      rows.push([`Empresa ${i}`, 'Guatemala', 'Guatemala', `Contacto ${i}`]);
+    }
+    expect(detectarFilaDeEncabezado(rows)).toBe(0);
+  });
+});

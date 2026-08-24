@@ -77,6 +77,79 @@ function puntaje(fila: unknown[], anchoMaximo: number): number {
 }
 
 /**
+ * ¿La fila `i` es TEXTO justo donde su propia columna es NÚMERO más abajo?
+ *
+ * ═══ LA SEÑAL QUE FALTABA, Y POR QUÉ EL PUNTAJE SOLO NO ALCANZA ═══
+ *
+ * `puntaje()` compara filas por sus rasgos ABSOLUTOS (cuánto texto, cuánta unicidad, cuánto
+ * ancho). Eso funciona mientras las filas de datos sean pobres en texto, y se cae en cuanto la
+ * tabla tiene columnas descriptivas. Caso real que lo destapó — `Concesionaria_Guatemala`,
+ * CarsGT, 2026-08-24, las CINCO hojas del libro:
+ *
+ *   [0] ["Ventas"]                                              ← título, puntaje 0
+ *   [2] ["ID Venta","Fecha","Cliente","Vendedor","ID Vehiculo",...]  ← el real, puntaje 1,00
+ *   [3] ["V-0001", 45678, "Ana Lopez", "Luis Paz", "VH-001", ...]    ← datos,  puntaje 0,81
+ *
+ * Las filas de datos traen cliente, vendedor, VIN, marca, modelo, tipo y sucursal: siete
+ * columnas de texto único. Su `unicos` y su `cobertura` dan 1,00 igual que las del encabezado,
+ * así que el ÚNICO discriminante es `proporcionTexto`, que pesa 0,35. Con el margen de 0,2
+ * exigido sobre las filas siguientes, el encabezado necesitaba 1,014 sobre un máximo de 1,00:
+ * era imposible que ganara. Perdía por 0,014 y la hoja se quedaba con el título como
+ * encabezado.
+ *
+ * El costo no fue leer mal una columna. Fue que TODO lo que se indexa contra la fila 0 dejó de
+ * funcionar a la vez: `classifySheet` recibía `["Ventas"]` —una celda—, lo declaraba ilegible
+ * y mandaba la hoja al modelo; con ella se cayeron el pre-filtro de catálogos, la firma de
+ * `existencias` y la forma de hoja. Las cinco hojas del libro fueron al modelo, el inventario
+ * no se reconoció, y el archivo costó USD 0,90 por cada mil filas: el más caro de la semana.
+ *
+ * ═══ POR QUÉ ESTA SEÑAL ES DISTINTA ═══
+ *
+ * No mide la fila contra un ideal de encabezado: la mide contra SUS PROPIOS DATOS. Un
+ * encabezado dice "Fecha" donde su columna trae seriales, y "Precio Venta (Q)" donde trae
+ * montos. Da igual cuánto texto tenga el resto de la tabla — lo que importa es que el
+ * encabezado ROMPE el tipo de la columna, y una fila de datos no lo hace.
+ *
+ * Y conserva el sesgo de la casa: en una hoja donde todo es texto (un catálogo de nombres)
+ * ninguna columna cambia de tipo, esto devuelve 0, y la detección se queda en la fila 0 sin
+ * descartar un dato real.
+ */
+function rompeElTipoDeSusColumnas(rows: unknown[][], i: number, anchoMaximo: number): number {
+  /*
+   * Cinco filas y no una: un archivo real mete un subtotal o una fila a medio llenar justo
+   * debajo del encabezado, y juzgar con una sola la convertiría en la referencia.
+   */
+  const siguientes = rows.slice(i + 1, i + 6);
+  if (siguientes.length < 2) return 0;
+
+  let rompe = 0;
+  let comparables = 0;
+
+  for (let c = 0; c < anchoMaximo; c++) {
+    // Solo se juzgan las columnas donde el candidato dice algo: un hueco no es evidencia.
+    if (!esTexto(rows[i]?.[c])) continue;
+
+    const valores = siguientes.map((f) => f?.[c]).filter((v) => !vacia(v));
+    // Una columna casi vacía abajo no distingue nada.
+    if (valores.length < 2) continue;
+
+    comparables++;
+    if (valores.every((v) => !esTexto(v))) rompe++;
+  }
+
+  return comparables === 0 ? 0 : rompe / comparables;
+}
+
+/**
+ * Cuántas de las columnas del candidato tienen que cambiar de tipo hacia abajo.
+ *
+ * Medido sobre las cinco hojas del archivo que motivó esto: 0,33 · 0,38 · 0,29 · 0,60 · 0,55.
+ * El corte queda debajo de la más floja con margen, y bien lejos del 0 que da una hoja de puro
+ * texto — que es el caso que NO debe disparar.
+ */
+const MIN_COLUMNAS_QUE_CAMBIAN_DE_TIPO = 0.25;
+
+/**
  * Índice de la fila de encabezados. `0` si no hay evidencia clara de otra cosa.
  *
  * El desempate no es solo "el mejor puntaje": el candidato tiene que verse claramente MÁS
@@ -108,9 +181,21 @@ export function detectarFilaDeEncabezado(rows: unknown[][]): number {
     const promedioSiguientes =
       siguientes.reduce((n, f) => n + puntaje(f, anchoMaximo), 0) / siguientes.length;
 
-    // Tiene que ganarle a lo que ya teníamos Y destacar sobre lo que viene abajo. Los dos
-    // márgenes son deliberados: sin ellos, cualquier fila un poco mejor movería el corte.
-    if (p > mejorPuntaje + 0.15 && p > promedioSiguientes + 0.2) {
+    /*
+     * Tiene que ganarle a lo que ya teníamos Y destacar sobre lo que viene abajo. Los dos
+     * márgenes son deliberados: sin ellos, cualquier fila un poco mejor movería el corte.
+     *
+     * La segunda condición se cumple de DOS formas, y la alternativa no la debilita: o el
+     * candidato se ve bastante más encabezado que las filas de abajo (el camino original), o
+     * ROMPE EL TIPO de sus propias columnas, que es evidencia más fuerte y no depende de
+     * cuánto texto tenga la tabla. Sin la segunda vía, ninguna hoja con columnas descriptivas
+     * podía encontrar su encabezado — ver la nota de `rompeElTipoDeSusColumnas`.
+     */
+    const destaca =
+      p > promedioSiguientes + 0.2 ||
+      rompeElTipoDeSusColumnas(rows, i, anchoMaximo) >= MIN_COLUMNAS_QUE_CAMBIAN_DE_TIPO;
+
+    if (p > mejorPuntaje + 0.15 && destaca) {
       mejor = i;
       mejorPuntaje = p;
     }
