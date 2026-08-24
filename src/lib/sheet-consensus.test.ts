@@ -630,3 +630,63 @@ describe('la confianza uniforme de un lote no decide el destino de una fila', ()
     expect(conSkip[1]!.cf).toBe(0); // el skip queda intacto
   });
 });
+
+/**
+ * ═══ TRES NOMBRES PARA EL MISMO GASTO (CarsGT, verificado en producción 2026-08-24) ═══
+ *
+ * Una concesionaria produjo, un nombre por lote:
+ *
+ *     import_customs         11 filas
+ *     importacion_aduanas     8 filas
+ *     import_customs_duties   6 filas   ← estas fueron A REVISIÓN INTERNA
+ *
+ * Y el daño fue doble: el cliente vio tres rubros donde hay uno, y como los tres contaban
+ * como veredictos distintos, el tercero no pudo heredar la confianza que el modelo ya le
+ * había dado al mismo concepto — sus 6 filas se marcaron.
+ */
+describe('el mismo concepto con un matiz de más se unifica', () => {
+  test('los tres nombres reales de "importación y aduanas" son uno solo', () => {
+    expect(sonElMismoConcepto('import_customs', 'importacion_aduanas')).toBe(true);
+    expect(sonElMismoConcepto('import_customs', 'import_customs_duties')).toBe(true);
+    expect(sonElMismoConcepto('importacion_aduanas', 'import_customs_duties')).toBe(true);
+  });
+
+  test('los tres nombres reales de "venta de vehículos" también', () => {
+    expect(sonElMismoConcepto('venta_vehiculos', 'vehicle_sales')).toBe(true);
+    expect(sonElMismoConcepto('venta_vehiculos', 'car_sales')).toBe(true);
+  });
+
+  /**
+   * La otra mitad, y la que importa más: compartir UNA palabra no puede bastar. Estos dos son
+   * ambos `opex`, comparten `utility`, y colapsarlos le quita al cliente su pantalla de
+   * gastos. Con CONTENCIÓN no se tocan: cada uno tiene una palabra que el otro no tiene.
+   */
+  test('dos gastos distintos que comparten una palabra NO se unifican', () => {
+    expect(sonElMismoConcepto('servicios_publicos', 'servicios_profesionales')).toBe(false);
+    expect(sonElMismoConcepto('alquiler', 'nomina')).toBe(false);
+    expect(sonElMismoConcepto('costo_de_ventas', 'venta_vehiculos')).toBe(false);
+
+    /*
+     * ESTE es el caso que de verdad fija la regla, y los de arriba no lo hacían: ahí los dos
+     * conceptos tienen el MISMO tamaño, así que la guarda de cardinalidad los separa antes de
+     * llegar a comparar palabras. Con tamaños distintos, "comparten alguna palabra" y
+     * "contención" dan resultados OPUESTOS — y solo la contención da el correcto.
+     *
+     * Verificado por mutación: sin este caso, cambiar la contención por "comparten alguna"
+     * dejaba la suite entera en verde.
+     */
+    expect(sonElMismoConcepto('servicios_publicos', 'servicios_profesionales_externos')).toBe(
+      false,
+    );
+    expect(sonElMismoConcepto('gasto_alquiler', 'gasto_nomina_extra')).toBe(false);
+  });
+
+  test('un nombre de UNA sola palabra no absorbe a otro', () => {
+    /*
+     * `gasto` está fuera de `PALABRAS_GENERICAS` a propósito —"gasto_ventas no es ventas"— y
+     * sin el mínimo de dos lemas la contención lo uniría con todo lo que empiece por gasto.
+     */
+    expect(sonElMismoConcepto('gasto', 'gasto_ventas')).toBe(false);
+    expect(sonElMismoConcepto('venta', 'venta_vehiculos')).toBe(false);
+  });
+});

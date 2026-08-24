@@ -166,6 +166,21 @@ const LEMAS: Record<string, string> = {
   mercaderia: 'merchandise',
   mercancia: 'merchandise',
   inventario: 'inventory',
+  /*
+   * Vocabulario que faltó en archivos reales y cada ausencia costó un rubro partido en el
+   * dashboard del cliente. Se agregan por MEDICIÓN, no por imaginación — ver la nota de
+   * `conceptoDeCategoria` sobre por qué esta tabla nunca va a estar completa y qué la
+   * respalda.
+   */
+  vehiculo: 'vehicle',
+  auto: 'vehicle',
+  automovil: 'vehicle',
+  carro: 'vehicle',
+  car: 'vehicle',
+  importacion: 'import',
+  aduana: 'customs',
+  aduanas: 'customs',
+  arancel: 'customs',
   nomina: 'payroll',
   salario: 'payroll',
   sueldo: 'payroll',
@@ -251,9 +266,61 @@ export function conceptoDeCategoria(nombre: string): string {
   return [...new Set(significativas)].sort().join('|');
 }
 
+/**
+ * Cuántos lemas significativos hacen falta para que un subconjunto cuente como el mismo
+ * concepto.
+ *
+ * DOS y no uno, y el uno rompe algo concreto: `gasto` está deliberadamente FUERA de
+ * `PALABRAS_GENERICAS` porque "gasto_ventas no es ventas", y con un solo lema compartido
+ * `{gasto}` sería subconjunto de `{gasto, sale}` y los uniría. Exigiendo dos, un nombre de una
+ * sola palabra nunca absorbe a otro.
+ */
+const MIN_LEMAS_PARA_SUBCONJUNTO = 2;
+
+/**
+ * ¿El concepto de `a` está CONTENIDO en el de `b`?
+ *
+ * ═══ EL CASO QUE LO MOTIVA, MEDIDO EN PRODUCCIÓN (2026-08-24) ═══
+ *
+ * Un mismo gasto de una concesionaria salió con TRES nombres, uno por lote:
+ *
+ *     import_customs         11 filas   {custom, import}
+ *     importacion_aduanas     8 filas   {custom, import}   ← ya lo une la tabla de lemas
+ *     import_customs_duties   6 filas   {custom, dutie, import}
+ *
+ * El tercero no lo une ningún diccionario razonable: `duties` es un matiz que el modelo
+ * agregó en ese lote y nada más. Pero sus palabras significativas CONTIENEN enteras a las del
+ * primero, y eso es una señal estructural: nombran el mismo concepto con un detalle de más.
+ *
+ * Y no era solo cosmético. Como los tres contaban como veredictos distintos, el lote de
+ * `import_customs_duties` no pudo heredar la confianza que el modelo ya le había dado al
+ * mismo concepto en otro lote, y sus 6 filas se fueron a revisión interna.
+ *
+ * ═══ POR QUÉ ESTO SÍ Y NO "COMPARTEN ALGUNA PALABRA" ═══
+ *
+ * Compartir una palabra es barato y uniría cosas distintas: `servicios_publicos` y
+ * `servicios_profesionales` comparten `utility`, son ambos `opex`, y colapsarlos le quitaría
+ * al cliente la pantalla de gastos que este archivo ya defiende en otro test. Con la regla de
+ * CONTENCIÓN ninguno de los dos contiene al otro —cada uno tiene una palabra propia que el
+ * otro no tiene— así que siguen separados.
+ *
+ * La contención es asimétrica a propósito: dice "esto es aquello, con más detalle", que es
+ * exactamente lo que un lote hace cuando agrega un matiz al nombre del anterior.
+ */
+function conceptoContenidoEn(a: string, b: string): boolean {
+  const la = new Set(a.split('|').filter(Boolean));
+  const lb = new Set(b.split('|').filter(Boolean));
+  if (la.size < MIN_LEMAS_PARA_SUBCONJUNTO) return false;
+  if (la.size >= lb.size) return false; // igual tamaño ya lo cubre la comparación exacta
+  for (const t of la) if (!lb.has(t)) return false;
+  return true;
+}
+
 /** ¿Dos nombres de categoría nombran lo mismo? */
 export function sonElMismoConcepto(a: string, b: string): boolean {
-  return conceptoDeCategoria(a) === conceptoDeCategoria(b);
+  const ca = conceptoDeCategoria(a);
+  const cb = conceptoDeCategoria(b);
+  return ca === cb || conceptoContenidoEn(ca, cb) || conceptoContenidoEn(cb, ca);
 }
 
 /**
