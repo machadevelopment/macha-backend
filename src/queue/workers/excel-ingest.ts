@@ -280,8 +280,7 @@ export function startExcelIngestWorker(): Promise<string> {
           filas: unknown[][];
           /** Solo el camino serializado lo trae: su hoja no mapea por vocabulario. */
           mapa?: MapaDeInventario | null;
-        }[] =
-          [];
+        }[] = [];
 
         /**
          * El consenso de cada hoja: qué veredicto dio el modelo en sus lotes de sonda.

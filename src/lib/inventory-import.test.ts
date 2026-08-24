@@ -114,14 +114,7 @@ describe('mapearColumnasDeInventario', () => {
  * razonablemente concluía que 260 vehículos en stock eran Q 36,4 M de costo de ventas.
  */
 describe('inventario serializado: una fila, una unidad', () => {
-  const encabezado = [
-    'ID Vehiculo',
-    'VIN',
-    'Marca',
-    'Modelo',
-    'Costo Adquisicion (Q)',
-    'Sucursal',
-  ];
+  const encabezado = ['ID Vehiculo', 'VIN', 'Marca', 'Modelo', 'Costo Adquisicion (Q)', 'Sucursal'];
 
   test('mapea usando la columna de serie que da el esquema del libro', () => {
     const mapa = mapearInventarioSerializado(encabezado, 0);
