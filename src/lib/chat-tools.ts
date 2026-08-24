@@ -1,18 +1,12 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { and, desc, eq, gte, isNotNull, isNull, lte, sql as rawSql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte } from 'drizzle-orm';
 import type { DB } from '@/db/client';
-import {
-  alertEvents,
-  alertRules,
-  reports,
-  reportVersions,
-  stores,
-  transactions,
-} from '@/db/schema';
+import { alertEvents, alertRules, reports, reportVersions, transactions } from '@/db/schema';
 import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
 import { alertCatalog } from '@/config/alert-catalog';
 import { productPerformance, type ProductOrderBy } from '@/modules/metrics/products';
 import { rangoConDatos } from '@/modules/metrics/period';
+import { storeBreakdown } from '@/modules/metrics/stores';
 
 /**
  * CU-868kfvabq: tool-use jerárquico (narrativa → drill-down por rollup → transacciones
@@ -177,50 +171,41 @@ async function toolLatestReportNarrative(ctx: ChatToolContext): Promise<string> 
  * trabajo que el resto del producto ("la IA narra, nunca calcula") y acá además ahorra
  * tokens: la alternativa era devolverle cientos de ventas para que las sumara.
  *
- * `store_id IS NOT NULL` deja fuera las filas sin tienda en vez de agruparlas bajo una
- * etiqueta inventada: mezclar "lo que no sabemos de qué local es" con un local real
- * produciría un ranking donde el primer puesto podría ser el desconocido.
+ * Las filas sin tienda quedan fuera del ranking en vez de agruparse bajo una etiqueta
+ * inventada: mezclar "lo que no sabemos de qué local es" con un local real produciría un
+ * ranking donde el primer puesto podría ser el desconocido.
  *
  * El mensaje del caso vacío DICE POR QUÉ está vacío. Si el asesor solo viera una lista sin
  * filas, volvería a contestar "no tengo esa información" — que es exactamente el reporte
  * del ticket. Distinguir "tu archivo no traía tiendas" de "no puedo consultarlo" es lo que
  * convierte una respuesta inútil en una accionable.
+ *
+ * ═══ CU-868kuw1e3 · LA AGREGACIÓN YA NO VIVE ACÁ ═══
+ *
+ * La consulta estaba escrita a mano en esta función. La tarjeta de "Ventas por tienda" de la
+ * pantalla de Ventas por producto necesita exactamente lo mismo, y copiarla habría dejado dos
+ * definiciones de "ventas por tienda": el día que una cambie, el asesor y la pantalla le dan
+ * al MISMO dueño dos cifras distintas para la misma pregunta, sin que nada falle.
+ *
+ * Lo único que se queda acá es lo que es del asesor: el tope de 20 locales (una respuesta de
+ * chat no lista cien) y la redacción del caso vacío.
  */
 async function toolSalesByStore(
   ctx: ChatToolContext,
   input: { dateFrom?: string; dateTo?: string },
 ): Promise<string> {
-  const condiciones = [
-    eq(transactions.companyId, ctx.companyId),
-    isNull(transactions.deletedAt),
-    eq(transactions.type, 'revenue'),
-    isNotNull(transactions.storeId),
-  ];
-  if (input.dateFrom) condiciones.push(gte(transactions.date, input.dateFrom));
-  if (input.dateTo) condiciones.push(lte(transactions.date, input.dateTo));
+  const { rows } = await storeBreakdown(ctx.db, ctx.companyId, input.dateFrom, input.dateTo);
 
-  const filas = await ctx.db
-    .select({
-      tienda: stores.name,
-      total: rawSql<string>`sum(${transactions.amountBase})`,
-      ventas: rawSql<string>`count(*)`,
-    })
-    .from(transactions)
-    .innerJoin(stores, eq(stores.id, transactions.storeId))
-    .where(and(...condiciones))
-    .groupBy(stores.name)
-    .orderBy(desc(rawSql`sum(${transactions.amountBase})`))
-    .limit(20);
-
-  if (filas.length === 0) {
+  if (rows.length === 0) {
     return 'No hay ventas con tienda asociada. El archivo que subió el cliente no traía una columna de tienda o sucursal, así que no se puede comparar por local. Dilo así: el dato no está en su archivo, no es que no se pueda consultar.';
   }
 
+  // Veinte locales alcanzan para una respuesta de chat; las filas ya vienen de mayor a menor.
   return JSON.stringify(
-    filas.map((f) => ({
-      tienda: f.tienda,
-      ventas: Number(f.total),
-      transacciones: Number(f.ventas),
+    rows.slice(0, 20).map((f) => ({
+      tienda: f.name,
+      ventas: f.total,
+      transacciones: f.transactionCount,
     })),
   );
 }
