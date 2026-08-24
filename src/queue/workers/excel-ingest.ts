@@ -23,6 +23,7 @@ import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import {
   CanonizadorDeCategorias,
+  ConfianzaPorHoja,
   ConsensoDeHoja,
   elegirSonda,
   filaAptaParaCortocircuito,
@@ -298,6 +299,7 @@ export function startExcelIngestWorker(): Promise<string> {
          * un solo objeto deja el contador de reescrituras del archivo completo en un lugar.
          */
         const canonizador = new CanonizadorDeCategorias();
+        const confianzas = new ConfianzaPorHoja();
 
         /**
          * ═══ DICCIONARIO DE CATEGORÍAS DE ESTA EMPRESA (Keneth–Semi, 2026-08-20) ═══
@@ -999,6 +1001,12 @@ export function startExcelIngestWorker(): Promise<string> {
               }
               return canonizador.canonizar(sheetName, entity, type, category);
             },
+            /*
+             * Nivela la confianza que el modelo dio UNIFORME a todo un lote. Sobre filas
+             * indistinguibles de `Ventas` devolvió 0,92 · 0,75 · 0,60 según el lote, y con el
+             * umbral en 0,7 eso mandó 148 filas buenas a revisión interna. Ver `ConfianzaPorHoja`.
+             */
+            nivelarConfianza: (veredictos) => confianzas.registrarLote(sheetName, veredictos),
           });
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
@@ -1469,6 +1477,14 @@ export function startExcelIngestWorker(): Promise<string> {
             `[excel-ingest] company=${companyId} document=${documentId} ` +
               `${canonizador.nombresUnificados} categoría(s) renombradas al nombre que ya usaba ` +
               `su hoja (lotes distintos bautizaron el mismo concepto de formas distintas).`,
+          );
+        }
+
+        if (confianzas.filasElevadas > 0) {
+          console.info(
+            `[excel-ingest] company=${companyId} document=${documentId} ` +
+              `${confianzas.filasElevadas} fila(s) recuperaron la confianza que el modelo ya le ` +
+              `había dado a su mismo veredicto en esa hoja (el lote traía una nota uniforme).`,
           );
         }
 

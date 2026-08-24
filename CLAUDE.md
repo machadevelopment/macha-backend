@@ -266,6 +266,23 @@ Conventions & gotchas:
   en el worker. El worker tiene las credenciales de la base, y clasificar no es parsear — un
   script no sabe que "pago a Claro" es servicios. La idea de un sandbox sin red y efímero
   quedó como camino futuro, no como lo que se construyó.
+- **La CONFIANZA también se decide por lote, y era el tercer campo sin protección**
+  (`ConfianzaPorHoja`, 2026-08-24). El mapa de columnas lo cubre `assertMismoMapa` y la
+  categoría el canonizador; la confianza no la cubría nada. Medido en `Concesionaria_Guatemala`
+  (CarsGT): la hoja `Ventas`, 240 filas indistinguibles, en tres lotes con **0,92 · 0,75 ·
+  0,60 exactos y uniformes dentro de cada lote** — ni una fila difería de sus vecinas. Con
+  `CONFIDENCE_THRESHOLD` en 0,7, eso mandó **148 filas buenas a revisión interna**: la misma
+  venta pasaba o se marcaba según en qué lote cayó, y el staff que abría la cola veía "Mazda 3,
+  Q 200.400, venta_vehiculos" sin nada que revisar. **Una confianza uniforme en todo el lote es
+  un juicio sobre el LOTE, no sobre la fila**, y usarla para decidir el destino de filas
+  individuales es convertir ruido en señal. Se sube al techo que el modelo ya le dio a ESE
+  veredicto en ESA hoja — nunca se baja, nunca cruza veredictos ni hojas, y **si dentro del
+  lote hubo variación no se toca nada**: esa variación es el juicio por fila que el prompt
+  pide. Lo que sigue protegiendo a la fila es `staging-rules`, que valida fecha, monto y
+  categoría aparte de la confianza. Depende del ORDEN (se compara contra el máximo visto hasta
+  ese momento, porque las filas se insertan lote a lote): si el lote más confiado llega último
+  no arregla nada, o sea que el peor caso es lo que ya pasaba y no hay forma de quedar peor.
+  Es la misma concesión que el canonizador con "el primero que llegó gana".
 - **La categoría se unifica por hoja** (`CanonizadorDeCategorias`, mismo archivo). No es ahorro,
   es un bug de datos: cada lote pide su clasificación por separado y nada obligaba a que dos
   lotes de la misma hoja bautizaran igual el mismo concepto. En producción no lo hicieron —

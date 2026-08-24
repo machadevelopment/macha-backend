@@ -519,3 +519,111 @@ export function filaAptaParaCortocircuito(row: unknown[], columns: ColumnMap): b
 
   return asDate(row[columns.date]) !== null;
 }
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA CONFIANZA UNIFORME EN UN LOTE ES UN JUICIO SOBRE EL LOTE, NO SOBRE LA FILA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Tercer campo que el modelo decide por lote, después del mapa de columnas (lo cubre
+ * `assertMismoMapa`) y de la categoría (lo cubre `CanonizadorDeCategorias`). Era el único de
+ * los tres sin protección, y se vio en producción.
+ *
+ * `Concesionaria_Guatemala`, CarsGT, 2026-08-24 — la hoja `Ventas`, 240 filas indistinguibles
+ * entre sí, en tres lotes:
+ *
+ *     lote 0   87 filas   cf 0,92   → pasan
+ *     lote 1   83 filas   cf 0,75   → pasan
+ *     lote 2   74 filas   cf 0,60   → LAS 148 FILAS MARCADAS DEL REPORTE
+ *
+ * Los tres números son EXACTOS y uniformes dentro de su lote: ni una fila difiere de sus
+ * vecinas. Eso no es el modelo dudando de 74 ventas concretas — es el modelo poniéndole una
+ * nota al lote. Con `CONFIDENCE_THRESHOLD` en 0,7, esa nota decidió el destino de filas
+ * individuales: **la misma venta pasa o va a revisión interna según en qué lote cayó.**
+ *
+ * El staff que abría esa cola veía "Mazda 3, Sucursal Vista Hermosa, 2026-06-10, Q 200.400,
+ * venta_vehiculos" y no encontraba qué revisar, porque no había nada que revisar.
+ *
+ * ═══ LA REGLA, Y POR QUÉ NO DESACTIVA LA RED DE SEGURIDAD ═══
+ *
+ * Solo se unifica cuando la confianza es UNIFORME en todo el lote. Si el modelo dio números
+ * distintos dentro del mismo lote, esa variación SÍ distingue filas —es exactamente el juicio
+ * por fila que el prompt pide— y se respeta tal cual, sin tocarla.
+ *
+ * Y solo se SUBE, nunca se baja, hasta el máximo que el modelo ya le dio a ESE MISMO veredicto
+ * en ESTA MISMA hoja. No es un número inventado: es el propio modelo diciendo, sobre filas
+ * indistinguibles, que las entiende bien. Si nunca dio uno más alto, la confianza queda como
+ * está y la fila se marca igual que hoy.
+ *
+ * ═══ LO QUE SIGUE PROTEGIENDO A LA FILA ═══
+ *
+ * `staging-rules` valida fecha, monto y categoría POR SEPARADO de la confianza. Una fila sin
+ * fecha legible se marca por `invalid_date` aunque su confianza sea 1,0, así que subirla no
+ * mete basura en la contabilidad: lo único que deja de pasar es que una fila buena vaya a
+ * revisión por el lote en que le tocó viajar.
+ *
+ * ═══ DEPENDE DEL ORDEN, Y ESO ES ACEPTABLE — PERO HAY QUE DECIRLO ═══
+ *
+ * Se compara contra el máximo visto HASTA AHORA, porque las filas se insertan lote a lote y
+ * no hay forma de consultar el futuro sin retener la carga entera en memoria. Si el lote más
+ * confiado llega último, los anteriores ya se marcaron. El peor caso es entonces exactamente
+ * lo que pasa hoy, y el mejor lo arregla del todo: no hay forma de quedar peor. Es la misma
+ * concesión que hace el canonizador con "el primero que llegó gana", y por la misma razón.
+ */
+/** Lo mínimo que este ajuste necesita de un veredicto; `cf` se modifica en el sitio. */
+export interface VeredictoDeFila {
+  e: string;
+  t: string | null;
+  c: string | null;
+  cf: number;
+}
+
+export class ConfianzaPorHoja {
+  /** `hoja\0entidad\0tipo\0categoría` → la mayor confianza vista para ese veredicto. */
+  private readonly techos = new Map<string, number>();
+
+  /** Cuántas filas se elevaron. Solo para el log: es la prueba de que sirve. */
+  private elevadas = 0;
+
+  private clave(sheetName: string, v: { e: string; t: string | null; c: string | null }): string {
+    return `${sheetName}\u0000${v.e}\u0000${v.t ?? ''}\u0000${v.c ?? ''}`;
+  }
+
+  /**
+   * Ajusta las confianzas de un lote YA CANONICALIZADO, en el sitio.
+   *
+   * Recibe el lote entero y no fila por fila porque la pregunta que decide —"¿es uniforme?"—
+   * no se puede contestar mirando una sola fila.
+   */
+  registrarLote(sheetName: string, veredictos: VeredictoDeFila[]): void {
+    const utiles = veredictos.filter((v) => v.e !== 'skip');
+    if (utiles.length === 0) return;
+
+    /*
+     * Los `skip` quedan fuera del juicio de uniformidad: son filas que el modelo declaró que
+     * no son datos, y su confianza no habla del criterio con que clasificó las demás.
+     */
+    const uniforme = utiles.every((v) => v.cf === utiles[0]!.cf);
+
+    for (const v of utiles) {
+      const k = this.clave(sheetName, v);
+      const techo = this.techos.get(k);
+
+      if (techo === undefined || v.cf > techo) {
+        this.techos.set(k, v.cf);
+        continue;
+      }
+
+      // Solo se eleva lo que el modelo no distinguió. Una variación dentro del lote es juicio
+      // por fila y se deja intacta.
+      if (uniforme && techo > v.cf) {
+        v.cf = techo;
+        this.elevadas++;
+      }
+    }
+  }
+
+  get filasElevadas(): number {
+    return this.elevadas;
+  }
+}
