@@ -380,6 +380,20 @@ Conventions & gotchas:
   salida/min, 2M de entrada/min, 1.000 requests/min. Un archivo completo usa ~33k de salida
   por minuto — el 8 %. Por eso 10 y no 5; el tope duro de 46 está en el config porque el
   límite es de CUENTA y varias empresas subiendo a la vez lo comparten.
+- **El crédito de la ingesta se cobra UNA vez por CARGA, no por lote** (reporte de Jose,
+  2026-08-24). Se debitaba dentro de `procesarLote`, así que con la regla activa —`fixed`, 25
+  créditos— un archivo de 77 lotes cobraba **1.925 créditos por una sola carga** y dejaba a la
+  empresa en **-1.675**. Medido en producción: Electro Hogar 77 lotes, Prueba Modo Test 22,
+  CarsGT 14. Una empresa nueva con 250 créditos incluidos quedaba en negativo con su PRIMER
+  upload. **La regla ya decía lo correcto**: `estimateRequiredCredits` con `ruleType: 'fixed'`
+  devuelve 25 sin mirar las unidades — lo que estaba mal era llamarla una vez por lote. El
+  débito vive ahora ANTES del bucle de lotes concurrentes, que es el único punto donde se sabe
+  que la carga va a procesarse y donde la comprobación de idempotencia no compite con los diez
+  lotes en vuelo. **`cargaYaDebitada` es una consulta y no un `ON CONFLICT`** porque
+  `credit_transactions` es append-only: la idempotencia por lote la daba el índice único de
+  `document_ingest_batches`, y un débito por documento necesita la suya. ⚠️ **La columna `unit`
+  de `credit_rules` no la lee nadie** (`estimateRequiredCredits` solo mira `ruleType` y
+  `creditsPerUnit`): es declarativa, y en producción está en NULL para las cuatro reglas.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.

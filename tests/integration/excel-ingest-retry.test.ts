@@ -208,11 +208,18 @@ beforeAll(async () => {
   `;
   await owner`update industry_templates set current_version_id = ${tv!.id} where id = ${t!.id}`;
 
-  // Regla `excel` variable, 1 crédito por lote — la del seed. Sin ella el débito no
-  // ocurre y el test no podría comprobar el cobro doble.
+  /*
+   * La regla REAL de producción: `fixed`, 25 créditos. No la del seed (`variable`, 1 por
+   * lote), y la diferencia es justamente lo que ocultaba el bug — con 1 crédito, cobrar por
+   * lote y cobrar por carga se distinguen por un número que se lee como redondeo.
+   *
+   * Y `fixed` deja el defecto a la vista: `estimateRequiredCredits` devuelve 25 SIEMPRE, sin
+   * mirar cuántas unidades se le pasen. O sea que la regla ya decía "25 por carga"; lo que
+   * estaba mal era llamarla una vez por lote. Un archivo de 77 lotes cobraba 1.925.
+   */
   await owner`
-    insert into credit_rules (action_kind, rule_type, credits_per_unit, unit, version, active)
-    values ('excel', 'variable', 1, 'batch', 1, true)
+    insert into credit_rules (action_kind, rule_type, credits_per_unit, version, active)
+    values ('excel', 'fixed', 25, 1, true)
   `;
 
   const [d] = await owner`
@@ -274,12 +281,24 @@ describe('reintento de excel.ingest tras un fallo a media ejecución', () => {
     expect(await contar('staging_rows')).toBe(2); // una por hoja, no tres
     expect(await contar('document_ingest_batches')).toBe(2);
 
+    /*
+     * ═══ UN DÉBITO POR CARGA, NO POR LOTE (reporte de Jose, 2026-08-24) ═══
+     *
+     * Este test afirmaba `n = 2` —"un débito por lote"— y pasaba porque el código hacía lo que
+     * el código hacía: fijaba la implementación, no lo que el cliente debe pagar. Con la regla
+     * real de 25 créditos, ese "por lote" cobraba 1.925 por un archivo de 77 lotes y dejaba a
+     * Electro Hogar en -1.675 con su primera carga.
+     *
+     * El documento tiene DOS lotes y aun así paga UNA vez. Y el reintento, que es lo que este
+     * archivo prueba, tampoco vuelve a cobrar: la idempotencia por lote la daba
+     * `document_ingest_batches`; ahora la da `cargaYaDebitada`.
+     */
     const [cred] = await owner`
       select count(*)::int as n, coalesce(sum(delta), 0)::int as total
       from credit_transactions where ref_id = ${documentId}
     `;
-    expect(cred!.n).toBe(2); // un débito por lote, no uno extra por el reintento
-    expect(cred!.total).toBe(-2);
+    expect(cred!.n).toBe(1);
+    expect(cred!.total).toBe(-25);
 
     const [ia] = await owner`
       select count(*)::int as n from ai_usage_events where ref_id = ${documentId}
