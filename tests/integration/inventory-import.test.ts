@@ -341,4 +341,63 @@ describe('importación de inventario desde el Excel', () => {
       expect(f!.saldo).toBe(f!.suma);
     });
   });
+
+  /**
+   * ═══ UN SKU EN VARIAS TIENDAS SE SUMA, NO SE PISA (auditoría 2026-08-24) ═══
+   *
+   * El archivo de una joyería trae 210 filas de inventario para 42 productos: una por cada
+   * combinación de producto y tienda. Cada fila se trataba como un CONTEO nuevo del mismo
+   * artículo y cada una pisaba a la anterior:
+   *
+   *     JYL-ANI-0001   130 · 42 · 35 · 1 · 0   →  quedaba en 0, donde hay 208
+   *
+   * El rastro lo dejaba escrito y nadie lo leía: "Conteo importado del archivo (24 → 9)",
+   * cuatro veces seguidas para el mismo artículo. Afectaba a empresas reales: 55 artículos de
+   * Electro Hogar.
+   */
+  describe('un mismo SKU repetido por tienda', () => {
+    test('las cantidades se SUMAN en vez de pisarse', async () => {
+      // Las cinco cantidades reales del archivo de la joyería, para el mismo producto.
+      const r = await importar([
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 130, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 42, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 35, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 1, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 0, 5],
+      ]);
+
+      // UN artículo, no cinco, y con el total de las cinco tiendas.
+      expect(r.creados).toBe(1);
+      expect(await existencia('JYL-ANI-0001')).toBe(208);
+    });
+
+    test('y resubir el mismo archivo no lo duplica ni lo mueve', async () => {
+      /*
+       * La otra mitad, y la que de verdad protege al cliente: el archivo se resube cada
+       * semana. Si el agrupado sumara sobre lo que YA está en el sistema en vez de tratarse
+       * como un conteo, el stock se duplicaría en cada carga.
+       */
+      const r = await importar([
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 130, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 42, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 35, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 1, 5],
+        ['JYL-ANI-0001', 'Anillo Aurora', 'unidad', 0, 5],
+      ]);
+
+      expect(r.sinCambio).toBe(1);
+      expect(await existencia('JYL-ANI-0001')).toBe(208);
+    });
+
+    test('una fila ilegible del grupo se omite sin arrastrar a las demás', async () => {
+      const r = await importar([
+        ['JYL-COL-0002', 'Collar Luna', 'unidad', 10, 2],
+        ['JYL-COL-0002', 'Collar Luna', 'unidad', 'no es un número', 2],
+        ['JYL-COL-0002', 'Collar Luna', 'unidad', 5, 2],
+      ]);
+
+      expect(r.omitidas).toBe(1);
+      expect(await existencia('JYL-COL-0002')).toBe(15);
+    });
+  });
 });
