@@ -33,7 +33,7 @@ import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
-import { canSkipSheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
+import { canSkipSheet, classifySheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
 import {
   importarInventario,
   mapearInventarioSerializado,
@@ -551,7 +551,34 @@ export function startExcelIngestWorker(): Promise<string> {
            * La señal es estructural: la clave de esta hoja es única por fila y otra hoja la
            * referencia. Eso es lo mismo en cualquier rubro y no exige conocer el negocio.
            */
-          if (esquema.entidades.has(sheetName)) {
+          /*
+           * ═══ Y NUNCA SOBRE UNA HOJA QUE ES UN LIBRO DE MOVIMIENTOS (2026-08-24) ═══
+           *
+           * Esta condición se agregó el MISMO día, unas horas después, porque el esquema
+           * relacional se comió las ventas de un cliente. Jose subió el archivo de HeladosGT y
+           * reportó "ninguna información pasó bien": su hoja `Ventas` —435 filas— se registró
+           * como INVENTARIO y su dashboard quedó con Q 58.334 de ingreso contra Q 1.797.772 de
+           * gasto. Una heladería con treinta veces más gasto que venta.
+           *
+           * El agujero es exacto y vale entenderlo, porque el test que lo cubría pasaba: una
+           * hoja cuenta como tabla de entidades si otra la referencia y ella no referencia a
+           * nadie. En el archivo que motivó el mecanismo eso separaba bien —`Ventas` apuntaba a
+           * `Inventario`, así que quedaba excluida— pero ese enlace es una CASUALIDAD de ese
+           * libro. En cuanto el libro no tiene hoja de inventario, `Ventas` es terminal en el
+           * grafo: nadie la salva y sus ventas se van al stock.
+           *
+           * La forma del grafo sola no puede distinguirlas, y hay que decirlo: en los dos casos
+           * la hoja referenciada es la que CONTIENE a la otra (el inventario contiene lo
+           * vendido; las ventas contienen lo que quedó por cobrar). Hace falta una segunda
+           * señal, y `classifySheet` ya la tiene medida: `Ventas` da `financial` y el
+           * `Inventario` de una concesionaria da `unknown`.
+           *
+           * Por eso el candado NO es una heurística más: una hoja con columna de fecha Y de
+           * monto es un libro de movimientos, y ninguna señal estructural debería poder
+           * silenciarla. El costo de equivocarse acá es perder la contabilidad del cliente
+           * entera y en silencio — que es exactamente lo que pasó.
+           */
+          if (esquema.entidades.has(sheetName) && classifySheet(rows[0] ?? []) !== 'financial') {
             const clave = esquema.referencias.find((r) => r.hacia === sheetName)?.haciaColumna;
             const mapaSerie =
               clave === undefined ? null : mapearInventarioSerializado(rows[0] ?? [], clave);
