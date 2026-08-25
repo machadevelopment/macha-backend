@@ -190,6 +190,103 @@ export function classifySheet(headerRow: unknown[]): SheetKind {
   return 'unknown';
 }
 
+/**
+ * Nombres de columna que nombran a la CONTRAPARTE de un movimiento: a quién se le vendió o a
+ * quién se le compró. Ver `pareceLibroDeMovimientos`.
+ */
+const CONTRAPARTE_HINTS = [
+  'cliente',
+  'idcliente',
+  'nombrecliente',
+  'proveedor',
+  'idproveedor',
+  'nombreproveedor',
+  'vendedor',
+  'customer',
+  'client',
+  'supplier',
+  'vendor',
+  'contraparte',
+  'counterparty',
+];
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ¿ESTA HOJA ES UN LIBRO DE MOVIMIENTOS? — LA PREGUNTA CUYO ERROR CUESTA LA CONTABILIDAD
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Existe para UNA decisión: el worker manda una hoja a inventario cuando el esquema del libro
+ * la marca como tabla de entidades, y necesita una segunda señal que impida que eso le pase a
+ * un libro de ventas. Ya pasó — HeladosGT perdió sus 435 ventas al stock (2026-08-24).
+ *
+ * ═══ POR QUÉ NO ALCANZA `classifySheet(...) === 'financial'` ═══
+ *
+ * Fue el primer arreglo y funcionaba por CASUALIDAD. `MONEY_HINTS` compara el encabezado
+ * normalizado por IGUALDAD, así que de las quince columnas de la hoja `Ventas` de una
+ * concesionaria:
+ *
+ *     'Precio Venta (Q)'    → precioventa      NO está en la lista (está `precio`)
+ *     'Costo Vehiculo (Q)'  → costovehiculo    NO está en la lista (está `costo`)
+ *     'Utilidad Bruta (Q)'  → utilidadbruta    SÍ está
+ *
+ * O sea que esa hoja se salvaba por una sola columna que da la casualidad de llamarse
+ * exactamente "Utilidad Bruta". Con "Utilidad" o "Margen" —dos nombres igual de normales— la
+ * hoja daba `unknown` y sus ventas se iban al inventario en silencio.
+ *
+ * ═══ QUÉ HACE DISTINTO ═══
+ *
+ * Compara por PREFIJO contra raíces de dinero, y exige además una columna de fecha: un libro de
+ * movimientos registra hechos, y un hecho tiene cuándo. Es deliberadamente más generoso que el
+ * pre-filtro, porque los dos errores no cuestan lo mismo:
+ *
+ *   · de más → una hoja de inventario no se detecta como tal y va al modelo: se paga de más;
+ *   · de menos → las ventas del cliente se registran como stock y su dashboard queda en cero.
+ *
+ * `classifySheet` NO se toca: su comparación exacta gobierna el pre-filtro de catálogos, que
+ * ahorra ~31 % de las filas de cada archivo, y aflojarla ahí sería pagar de más en todas las
+ * cargas para arreglar un caso.
+ */
+export function pareceLibroDeMovimientos(headerRow: unknown[]): boolean {
+  const headers = new Set(headerRow.map(normalizeHeader).filter(Boolean));
+
+  /*
+   * ═══ LA CONTRAPARTE ES LA SEÑAL, Y COSTÓ DOS INTENTOS LLEGAR A ELLA ═══
+   *
+   * Los dos primeros candidatos fallaron por el mismo motivo, y vale dejarlo escrito:
+   *
+   *   1. `classifySheet(...) === 'financial'` — funcionaba por CASUALIDAD. Ese veredicto exige
+   *      una columna de dinero que coincida EXACTO con la lista de pistas, y de las quince
+   *      columnas de la hoja `Ventas` de una concesionaria la única que coincide es
+   *      `Utilidad Bruta`. Con "Utilidad" o "Margen" —dos nombres igual de normales— la hoja
+   *      daba `unknown` y sus ventas se iban al inventario en silencio.
+   *
+   *   2. "tiene fecha Y dinero", comparando por prefijo. Más robusto para las ventas, pero se
+   *      come el caso que el mecanismo vino a resolver: el inventario de una concesionaria
+   *      trae `Costo Adquisicion` y `Fecha Ingreso`, así que también tiene fecha y dinero. Un
+   *      inventario legítimamente los tiene, y por eso NINGUNA señal de dinero puede separarlos.
+   *
+   * Lo que sí los separa es semántico y no de formato: un MOVIMIENTO involucra a alguien —se le
+   * vende a un cliente, se le compra a un proveedor— y una lista de existencias no. Un vehículo
+   * en el patio no tiene contraparte hasta que se vende, y ese día la fila que la registra vive
+   * en la hoja de ventas, no en la de stock.
+   *
+   * Medido sobre los dos archivos que motivaron esto:
+   *
+   *     CarsGT · Ventas        Cliente, Vendedor   → movimientos
+   *     CarsGT · Inventario    —                   → puede ser catálogo
+   *     Helados · Ventas       Cliente, Vendedor   → movimientos
+   *     Helados · Inventario   —                   → puede ser catálogo
+   *
+   * ═══ ALCANCE: ESTO NO ES UN CLASIFICADOR GENERAL ═══
+   *
+   * Solo se le pregunta por hojas que el esquema del libro YA marcó como tabla de entidades, o
+   * sea referenciadas por otra y terminales en el grafo. No sirve para decidir si una hoja
+   * cualquiera es de movimientos —la de gastos de una PYME no nombra proveedor y lo es— y por
+   * eso no reemplaza a `classifySheet`, que sigue gobernando el pre-filtro.
+   */
+  return CONTRAPARTE_HINTS.some((h) => headers.has(h));
+}
+
 /** `true` si la hoja se puede saltar sin llamar al modelo. */
 export function canSkipSheet(headerRow: unknown[]): boolean {
   return classifySheet(headerRow) === 'catalog';

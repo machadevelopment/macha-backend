@@ -33,7 +33,7 @@ import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
-import { canSkipSheet, classifySheet, firmaDeCatalogo } from '@/lib/sheet-classifier';
+import { canSkipSheet, firmaDeCatalogo, pareceLibroDeMovimientos } from '@/lib/sheet-classifier';
 import {
   importarInventario,
   mapearInventarioSerializado,
@@ -419,6 +419,33 @@ export function startExcelIngestWorker(): Promise<string> {
          * `lib/sheet-relations.ts` para el archivo que lo motivó y lo que costó.
          */
         const esquema: EsquemaDelLibro = analizarEsquema(vivas);
+
+        /*
+         * ═══ EL SET DE ENTIDADES SE CORRIGE UNA VEZ, NO EN CADA CONSUMIDOR ═══
+         *
+         * `analizarEsquema` mira la forma del grafo y nada más: marca como tabla de entidades
+         * a toda hoja referenciada que no referencia a nadie. Eso incluye a un libro de
+         * VENTAS cuando el archivo no trae hoja de inventario — la hoja queda terminal y el
+         * grafo no puede distinguirla de un catálogo (en los dos casos la referenciada es la
+         * que CONTIENE a la otra).
+         *
+         * La primera versión de este arreglo puso el candado `classifySheet !== 'financial'`
+         * en el sitio donde se enruta a inventario, y con eso las ventas dejaron de perderse.
+         * Pero `esquema.entidades` tiene DOS consumidores, y el otro quedó leyendo el valor
+         * equivocado: la regla de "una factura no devenga si su venta ya está registrada"
+         * consulta este mismo set, así que en HeladosGT siguió creyendo que `Ventas` era un
+         * catálogo y volvió a sumar sus 43 cuentas por cobrar como ingreso — Q 58.334 de más,
+         * medido en producción DESPUÉS del primer arreglo.
+         *
+         * Parchar al consumidor y no a la fuente arregla el caso que uno está mirando y deja
+         * al otro roto. Acá se corrige una vez y los dos leen lo mismo.
+         */
+        const esLibroDeMovimientos = new Map(
+          vivas.map((h) => [h.nombre, pareceLibroDeMovimientos(h.rows[0] ?? [])]),
+        );
+        const entidades = new Set(
+          [...esquema.entidades].filter((nombre) => !esLibroDeMovimientos.get(nombre)),
+        );
         if (esquema.referencias.length > 0) {
           console.log(
             `[excel-ingest] company=${companyId} esquema del libro: ` +
@@ -578,7 +605,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * silenciarla. El costo de equivocarse acá es perder la contabilidad del cliente
            * entera y en silencio — que es exactamente lo que pasó.
            */
-          if (esquema.entidades.has(sheetName) && classifySheet(rows[0] ?? []) !== 'financial') {
+          if (entidades.has(sheetName)) {
             const clave = esquema.referencias.find((r) => r.hacia === sheetName)?.haciaColumna;
             const mapaSerie =
               clave === undefined ? null : mapearInventarioSerializado(rows[0] ?? [], clave);
@@ -966,7 +993,7 @@ export function startExcelIngestWorker(): Promise<string> {
              * — solo apuntar a algo que produce transacciones lo significa.
              */
             ventaYaRegistradaEnOtraHoja: esquema.referencias.some(
-              (r) => r.desde === sheetName && !esquema.entidades.has(r.hacia),
+              (r) => r.desde === sheetName && !entidades.has(r.hacia),
             ),
             headerRow,
             baseCurrency,

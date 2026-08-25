@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { canSkipSheet, classifySheet } from './sheet-classifier';
+import { canSkipSheet, classifySheet, pareceLibroDeMovimientos } from './sheet-classifier';
 
 /**
  * Los encabezados son los REALES de los tres archivos de prueba que entregó el cliente el
@@ -175,5 +175,85 @@ describe('financial vs catálogo: el candado del enrutado a inventario', () => {
         'Estado',
       ]),
     ).not.toBe('financial');
+  });
+});
+
+/**
+ * ═══ EL SET DE ENTIDADES TIENE DOS CONSUMIDORES Y AMBOS DEBEN LEER LO MISMO ═══
+ *
+ * `analizarEsquema` marca como tabla de entidades a toda hoja referenciada que no referencia a
+ * nadie — y eso incluye a un libro de VENTAS cuando el archivo no trae inventario. El worker
+ * corrige ese set con `classifySheet !== 'financial'`, UNA vez, porque el veredicto lo
+ * consultan dos decisiones distintas:
+ *
+ *   1. si la hoja va a inventario en vez de a movimientos;
+ *   2. si las facturas de OTRA hoja ya tienen su venta registrada (y no deben devengar).
+ *
+ * La primera versión del arreglo puso el candado solo en (1). Medido en producción DESPUÉS de
+ * ese arreglo, en el archivo de HeladosGT: las ventas ya no se perdían, pero (2) seguía leyendo
+ * el set sin corregir, así que las 43 cuentas por cobrar volvieron a sumar Q 58.334 de ingreso
+ * que la hoja `Ventas` ya había registrado.
+ *
+ * Este test fija la ÚNICA condición de la que dependen las dos: que una hoja de ventas se
+ * distinga de un catálogo de inventario.
+ */
+describe('la señal que corrige el set de entidades', () => {
+  /*
+   * Encabezados COMPLETOS de los archivos que pasaron por producción. Recortarlos cambia el
+   * veredicto —lo comprobé escribiendo la primera versión con cinco columnas— y es el mismo
+   * modo de fallo que ya documenta el corpus de hojas reales.
+   */
+  const VENTAS_CONCESIONARIA = [
+    'ID Venta', 'Fecha', 'Cliente', 'Vendedor', 'ID Vehiculo', 'VIN', 'Marca', 'Modelo',
+    'Anio Modelo', 'Tipo', 'Precio Venta (Q)', 'Costo Vehiculo (Q)', 'Forma de Pago',
+    'Sucursal', 'Utilidad Bruta (Q)',
+  ]; // prettier-ignore
+  const INVENTARIO_CONCESIONARIA = [
+    'ID Vehiculo', 'VIN', 'Marca', 'Modelo', 'Anio Modelo', 'Tipo', 'Color',
+    'Costo Adquisicion (Q)', 'Precio Lista (Q)', 'Fecha Ingreso', 'Sucursal', 'Estado',
+    'Dias en Inventario',
+  ]; // prettier-ignore
+  const VENTAS_HELADERIA = [
+    'ID Venta', 'Fecha', 'Cliente', 'Vendedor', 'ID Producto', 'Producto', 'Categoría',
+    'Presentación', 'Unidades', 'Precio Unitario (Q)', 'Ventas Netas (Q)', 'Costo Venta (Q)',
+    'Forma de Pago', 'Sucursal', 'Utilidad Bruta (Q)',
+  ]; // prettier-ignore
+  const INVENTARIO_HELADERIA = [
+    'ID Producto', 'Producto', 'Categoría', 'Presentación', 'Sabor', 'Stock Actual',
+    'Costo Unitario (Q)', 'Precio Lista (Q)',
+  ]; // prettier-ignore
+
+  test('un libro de ventas es de movimientos, decida lo que decida el grafo', () => {
+    expect(pareceLibroDeMovimientos(VENTAS_CONCESIONARIA)).toBe(true);
+    expect(pareceLibroDeMovimientos(VENTAS_HELADERIA)).toBe(true);
+  });
+
+  test('una lista de existencias NO lo es, así que puede ir a inventario', () => {
+    expect(pareceLibroDeMovimientos(INVENTARIO_CONCESIONARIA)).toBe(false);
+    expect(pareceLibroDeMovimientos(INVENTARIO_HELADERIA)).toBe(false);
+  });
+
+  /**
+   * El caso que descarta los dos candidatos anteriores, y por eso vale como test.
+   *
+   * El inventario de una concesionaria trae `Costo Adquisicion` y `Fecha Ingreso`: tiene
+   * dinero y fecha igual que una hoja de ventas. Cualquier regla basada en "tiene columna de
+   * dinero" lo clasifica mal, y con él se pierde el caso que el mecanismo vino a resolver.
+   */
+  test('tener dinero y fecha NO alcanza: un inventario también los tiene', () => {
+    const conDineroYFecha = ['Costo Adquisicion (Q)', 'Fecha Ingreso'];
+    expect(pareceLibroDeMovimientos(conDineroYFecha)).toBe(false);
+  });
+
+  /**
+   * Y el que descarta el PRIMER candidato (`classifySheet === 'financial'`), que funcionaba de
+   * casualidad: la hoja de ventas de la concesionaria se salvaba por tener una columna llamada
+   * exactamente "Utilidad Bruta". Con otro nombre igual de normal, se perdía.
+   */
+  test('la hoja de ventas se reconoce aunque ninguna columna de dinero coincida exacto', () => {
+    const sinNombresExactos = VENTAS_CONCESIONARIA.map((c) =>
+      c === 'Utilidad Bruta (Q)' ? 'Margen (Q)' : c,
+    );
+    expect(pareceLibroDeMovimientos(sinNombresExactos)).toBe(true);
   });
 });
