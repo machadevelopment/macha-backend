@@ -30,6 +30,7 @@ import {
   type VeredictoDominante,
 } from '@/lib/sheet-consensus';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
+import { medirFilas } from '@/lib/reconciliation';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
@@ -271,6 +272,20 @@ export function startExcelIngestWorker(): Promise<string> {
          * necesita el número real: "de tu hoja Ventas leímos 520 movimientos".
          */
         const filasPorHoja = new Map<string, number>();
+
+        /**
+         * Las mismas filas que se enviaron a clasificar, agrupadas por hoja.
+         *
+         * Guarda REFERENCIAS a los arrays que el parser ya tiene en memoria, no copias: el
+         * costo es una entrada de Map por lote. Sirven para medir cuánto dinero traía la hoja
+         * y enseñárselo al cliente en el resumen (`lib/reconciliation.ts`).
+         *
+         * Se miden al FINAL y no lote a lote a propósito, por el mismo motivo por el que el
+         * resumen de columnas se arma al final: `fusionarMapaDeColumnas` completa el mapa lote
+         * a lote, así que el mapa del primer lote puede no saber todavía cuál es la columna de
+         * monto. Medir con un mapa provisional daría un total que no es el de ninguna columna.
+         */
+        const filasCrudasPorHoja = new Map<string, unknown[][]>();
 
         /**
          * Hojas de existencias que van al inventario (CU-868krkfrh), anotadas durante la
@@ -780,6 +795,9 @@ export function startExcelIngestWorker(): Promise<string> {
             });
             encabezadosPorHoja.set(sheetName, headerRow);
             filasPorHoja.set(sheetName, (filasPorHoja.get(sheetName) ?? 0) + batch.length);
+            const crudas = filasCrudasPorHoja.get(sheetName);
+            if (crudas) crudas.push(...batch);
+            else filasCrudasPorHoja.set(sheetName, [...batch]);
           }
         }
 
@@ -1602,12 +1620,35 @@ export function startExcelIngestWorker(): Promise<string> {
            * tercero rellena. Enseñarle al cliente el mapa del primer lote sería enseñarle una
            * versión provisional de lo que entendimos.
            */
+          /*
+           * Cuánto dinero traía la hoja, con el mapa ya definitivo. Es la cifra que el dueño
+           * reconoce o desmiente de un vistazo — ver `lib/reconciliation.ts` para el caso que
+           * la motivó y para por qué esto MIDE y no bloquea la promoción.
+           */
+          const medicion = medirFilas(
+            filasCrudasPorHoja.get(sheetName) ?? [],
+            mapaFinal,
+            baseCurrency,
+          );
+
           hojasLeidas.push({
             estado: 'movimientos',
             nombre: sheetName,
             filas: filasPorHoja.get(sheetName) ?? 0,
             columnas: columnasEnPalabras(mapaFinal, headerRow),
+            // Vacío se omite: una hoja sin columna de monto no tiene un total que enseñar, y
+            // un `[]` en el resumen se leería como "leí Q 0".
+            ...(medicion.montos.length > 0 ? { montos: medicion.montos } : {}),
+            ...(medicion.costos.length > 0 ? { costos: medicion.costos } : {}),
           });
+
+          if (medicion.montos.length > 0) {
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}": ` +
+                medicion.montos.map((m) => `${m.moneda} ${m.total.toFixed(2)}`).join(' · ') +
+                ` en ${medicion.filasEnviadas} filas leídas del archivo`,
+            );
+          }
 
           const perfil = perfilesPorHoja.get(sheetName);
           if (perfil) {
