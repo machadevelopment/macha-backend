@@ -59,6 +59,13 @@ export interface MapaDeInventario {
   reorderPoint: number | null;
   location: number | null;
   supplier: number | null;
+  /**
+   * Columna de ESTADO de la unidad (`Vendido` / `Disponible` / `Reservado`).
+   *
+   * Solo la usa el camino SERIALIZADO, y ahí no es un adorno: es la única señal de si la
+   * unidad sigue en existencia. Ver `cuentaComoExistencia`.
+   */
+  status: number | null;
 }
 
 /**
@@ -84,7 +91,65 @@ const PISTAS: Record<keyof MapaDeInventario, string[]> = {
   reorderPoint: ['puntoreorden', 'stockminimo', 'cantidadreorden', 'existenciaminima', 'minimo'],
   location: ['ubicacion', 'bodega', 'almacen'],
   supplier: ['proveedor'],
+  status: ['estado', 'status', 'situacion', 'condicion', 'disponibilidad', 'estatus'],
 };
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA UNIDAD VENDIDA NO ES EXISTENCIA — Y EL SESGO VA HACIA CONTARLA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El camino serializado cuenta 1 por fila porque cada fila es una unidad. Correcto para una
+ * hoja de lo que HAY, y equivocado para la hoja que manda una concesionaria: su inventario
+ * es el histórico completo del lote, con el estado de cada vehículo al lado.
+ *
+ * Medido sobre el archivo real de CarsGT (260 filas): 240 `Vendido`, 18 `Disponible`, 2
+ * `Reservado`. Sin mirar el estado, el inventario del cliente decía **260 unidades donde hay
+ * 20**, y en valor Q 33,4 M de vehículos que ya no están en el lote. Es el mismo error que
+ * `mapearInventarioSerializado` vino a evitar del lado de la contabilidad —los vehículos en
+ * stock contados como costo de ventas— cometido en el otro sentido.
+ *
+ * ═══ SOLO SE RESTA LO QUE SE RECONOCE, NUNCA AL REVÉS ═══
+ *
+ * La lista es de palabras de SALIDA, y todo lo que no está en ella cuenta como existencia.
+ * El sesgo es deliberado y va hacia el comportamiento viejo:
+ *
+ *   · Si no entendemos el estado y contamos de más, el peor caso es el inventario inflado que
+ *     ya teníamos — visible, y el cliente lo reporta.
+ *   · Si no entendemos el estado y contamos de menos, le borramos inventario real de la
+ *     pantalla sin que nada falle. Eso no lo reporta nadie: se ve como "todavía no cargó".
+ *
+ * Por eso `Activo`, `Inactivo`, `Nuevo`, `Usado` o cualquier palabra ajena cuentan como
+ * existencia. `Estado` es un nombre de columna demasiado común para asumir que siempre habla
+ * de disponibilidad.
+ *
+ * `Reservado` SÍ es existencia: el vehículo está físicamente en el lote, apartado pero sin
+ * vender. La pantalla puede querer distinguirlo algún día; el conteo no.
+ */
+const ESTADOS_FUERA_DE_EXISTENCIA = [
+  'vendido',
+  'vendida',
+  'entregado',
+  'entregada',
+  'facturado',
+  'facturada',
+  'despachado',
+  'despachada',
+  'baja',
+  'dadodebaja',
+  'retirado',
+  'retirada',
+  'sold',
+  'delivered',
+];
+
+/** ¿Esta unidad sigue en el inventario? Ver el bloque de arriba para el porqué del sesgo. */
+export function cuentaComoExistencia(valor: unknown): boolean {
+  const s = texto(valor);
+  if (!s) return true;
+  const n = normalizeHeader(s);
+  return !ESTADOS_FUERA_DE_EXISTENCIA.includes(n);
+}
 
 /**
  * Mapea las columnas de una hoja de existencias, o `null` si no se puede.
@@ -116,6 +181,7 @@ export function mapearColumnasDeInventario(headerRow: unknown[]): MapaDeInventar
     reorderPoint: buscar(PISTAS.reorderPoint),
     location: buscar(PISTAS.location),
     supplier: buscar(PISTAS.supplier),
+    status: buscar(PISTAS.status),
   };
 
   if (mapa.quantity === null) return null;
@@ -181,6 +247,9 @@ export function mapearInventarioSerializado(
     reorderPoint: buscar(PISTAS.reorderPoint),
     location: buscar(PISTAS.location),
     supplier: buscar(PISTAS.supplier),
+    // La hoja serializada es la única que consulta el estado: su cantidad la pone el
+    // importador (1 por fila), así que sin esto una unidad vendida contaría como existencia.
+    status: buscar(PISTAS.status),
   };
 }
 
@@ -298,7 +367,21 @@ export async function importarInventario(
   const porSku = new Map<string, { row: unknown[]; cantidad: number }>();
   for (const row of params.rows) {
     const skuCrudo = texto(celda(row, mapa.sku)) ?? texto(celda(row, mapa.name));
-    const contado = mapa.quantity === null ? 1 : numero(celda(row, mapa.quantity));
+    /*
+     * Serializada: la fila ES la unidad, así que vale 1 — salvo que su estado diga que ya
+     * salió del inventario, y entonces vale 0. El artículo se da de alta igual con existencia
+     * 0: el vehículo existió y su ficha sigue siendo cierta; lo que ya no es cierto es que
+     * esté en el lote. Ver `cuentaComoExistencia`.
+     *
+     * El camino fungible NO consulta el estado a propósito: ahí la cantidad la dice el
+     * archivo y es la fuente de verdad, no algo que este importador infiera.
+     */
+    const contado =
+      mapa.quantity === null
+        ? cuentaComoExistencia(celda(row, mapa.status))
+          ? 1
+          : 0
+        : numero(celda(row, mapa.quantity));
     if (!skuCrudo || contado === null || contado < 0) {
       // Se cuenta acá y no en el bucle de abajo: una fila ilegible no llega a agruparse.
       out.omitidas++;

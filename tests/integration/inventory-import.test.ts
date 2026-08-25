@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { setupTestDatabase, ownerConnection } from './setup';
 import * as schema from '@/db/schema';
-import { importarInventario } from '@/lib/inventory-import';
+import { importarInventario, mapearInventarioSerializado } from '@/lib/inventory-import';
 import { revertDocument } from '@/lib/promotion';
 import { recordMovement } from '@/modules/inventory/service';
 
@@ -398,6 +398,105 @@ describe('importación de inventario desde el Excel', () => {
 
       expect(r.omitidas).toBe(1);
       expect(await existencia('JYL-COL-0002')).toBe(15);
+    });
+  });
+
+  /**
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   * CONCESIONARIA: UN VEHÍCULO VENDIDO NO ES EXISTENCIA (2026-08-25)
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Reporte de Keneth ("el inventario no estaba jalando bien") sobre el archivo real de
+   * CarsGT. El detector de esquema SÍ reconocía la hoja —`Ventas[ID Vehiculo] →
+   * Inventario[ID Vehiculo]`, cobertura 100 %— y el camino serializado la importaba. El
+   * defecto estaba un paso después: cada fila valía 1 sin mirar el estado, así que los
+   * vehículos VENDIDOS entraban como stock.
+   *
+   * En el archivo real, 260 filas: 240 `Vendido`, 18 `Disponible`, 2 `Reservado`. El
+   * inventario decía 260 unidades donde hay 20.
+   *
+   * Va contra Postgres y no en unitario porque lo que hay que comprobar es el SALDO, y el
+   * saldo lo calcula la base a partir de los movimientos.
+   */
+  describe('inventario serializado con estado (CarsGT)', () => {
+    const HEADER_CARS = [
+      'ID Vehiculo',
+      'VIN',
+      'Marca',
+      'Modelo',
+      'Costo Adquisicion (Q)',
+      'Sucursal',
+      'Estado',
+    ];
+
+    const importarCars = (rows: unknown[][]) =>
+      importarInventario(db(), {
+        companyId: empresa,
+        documentId: docBase,
+        userId: usuario,
+        headerRow: HEADER_CARS,
+        rows,
+        baseCurrency: 'GTQ',
+        // El worker resuelve el mapa por el ESQUEMA del libro, no por vocabulario.
+        mapa: mapearInventarioSerializado(HEADER_CARS, 0),
+      });
+
+    test('lo vendido queda en CERO y lo disponible en uno', async () => {
+      const r = await importarCars([
+        ['CAR-0001', 'VIN0001', 'Toyota', 'Corolla', 99384, 'Mixco', 'Disponible'],
+        ['CAR-0002', 'VIN0002', 'Nissan', 'Sentra', 121793, 'Mixco', 'Vendido'],
+        ['CAR-0003', 'VIN0003', 'Kia', 'Sportage', 150000, 'Zona 10', 'Reservado'],
+      ]);
+
+      expect(r.creados).toBe(3);
+      // Los tres vehículos EXISTEN como ficha: el vendido también fue real.
+      expect(await existencia('CAR-0001')).toBe(1);
+      expect(await existencia('CAR-0003')).toBe(1);
+      // Lo que ya no es cierto es que el vendido esté en el lote.
+      expect(await existencia('CAR-0002')).toBe(0);
+    });
+
+    test('el vehículo que SE VENDE entre dos cargas baja a cero, con su movimiento', async () => {
+      // Estaba disponible en la carga de arriba; esta semana ya se vendió.
+      const r = await importarCars([
+        ['CAR-0001', 'VIN0001', 'Toyota', 'Corolla', 99384, 'Mixco', 'Vendido'],
+      ]);
+
+      expect(r.ajustados).toBe(1);
+      expect(await existencia('CAR-0001')).toBe(0);
+
+      // El saldo sigue siendo el doblez de su ledger: nadie escribió la columna a mano.
+      const [suma] = await owner`
+        select coalesce(sum(m.quantity), 0)::float8 as q
+        from inventory_movements m
+        join inventory_items i on i.id = m.item_id
+        where i.company_id = ${empresa} and lower(i.sku) = 'car-0001'
+      `;
+      expect(suma!.q).toBe(0);
+    });
+
+    test('RESUBIR el archivo de la concesionaria no mueve nada', async () => {
+      const filas: unknown[][] = [
+        ['CAR-0001', 'VIN0001', 'Toyota', 'Corolla', 99384, 'Mixco', 'Vendido'],
+        ['CAR-0003', 'VIN0003', 'Kia', 'Sportage', 150000, 'Zona 10', 'Reservado'],
+      ];
+      const r = await importarCars(filas);
+
+      expect(r).toEqual({ creados: 0, ajustados: 0, sinCambio: 2, omitidas: 0 });
+      expect(await existencia('CAR-0001')).toBe(0);
+      expect(await existencia('CAR-0003')).toBe(1);
+    });
+
+    /*
+     * El sesgo: solo se resta lo que se reconoce. Un estado que no entendemos cuenta como
+     * existencia, porque contar de más se ve y se reporta, y contar de menos le borra
+     * inventario al cliente sin que nada falle.
+     */
+    test('un estado desconocido cuenta como existencia', async () => {
+      await importarCars([
+        ['CAR-0009', 'VIN0009', 'Mazda', 'CX-5', 180000, 'Mixco', 'En tránsito aduanal'],
+      ]);
+      expect(await existencia('CAR-0009')).toBe(1);
     });
   });
 });

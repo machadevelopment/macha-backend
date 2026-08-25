@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { mapearColumnasDeInventario, mapearInventarioSerializado } from './inventory-import';
+import {
+  cuentaComoExistencia,
+  mapearColumnasDeInventario,
+  mapearInventarioSerializado,
+} from './inventory-import';
 import { firmaDeCatalogo, canSkipSheet } from './sheet-classifier';
 
 /**
@@ -66,6 +70,8 @@ describe('mapearColumnasDeInventario', () => {
       unitCost: 4,
       location: 5,
       supplier: 6,
+      // Esa hoja no trae columna de estado; el camino fungible tampoco la consulta.
+      status: null,
     });
   });
 
@@ -174,5 +180,80 @@ describe('el mapa reconoce una hoja de (SKU, tienda)', () => {
      * cuánto hay en cada una, y a cambio el total que ve el cliente es el correcto.
      */
     expect(mapa!.location).not.toBe(1);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA UNIDAD VENDIDA NO ES EXISTENCIA (CarsGT, 2026-08-25)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Reporte de Keneth: "el inventario no estaba jalando bien". El detector de esquema SÍ
+ * reconocía la hoja —`Ventas[ID Vehiculo] → Inventario[ID Vehiculo]`, cobertura 100 %— y el
+ * camino serializado la importaba. El defecto estaba en el conteo: cada fila valía 1 sin
+ * mirar el estado, así que los vehículos VENDIDOS entraban como existencia.
+ *
+ * Medido sobre el archivo real (260 filas): 240 `Vendido`, 18 `Disponible`, 2 `Reservado`.
+ * El inventario del cliente decía 260 unidades donde hay 20, y Q 33,4 M de vehículos que ya
+ * no están en el lote.
+ */
+describe('el estado decide si la unidad sigue en existencia', () => {
+  const encabezadoCarsGT = [
+    'ID Vehiculo',
+    'VIN',
+    'Marca',
+    'Modelo',
+    'Anio Modelo',
+    'Tipo',
+    'Color',
+    'Costo Adquisicion (Q)',
+    'Precio Lista (Q)',
+    'Fecha Ingreso',
+    'Sucursal',
+    'Estado',
+    'Dias en Inventario',
+  ];
+
+  test('la hoja de la concesionaria expone su columna de estado', () => {
+    const mapa = mapearInventarioSerializado(encabezadoCarsGT, 0)!;
+    expect(mapa.status).toBe(11);
+    // Sigue siendo serializada: la cantidad la pone el importador, no la hoja.
+    expect(mapa.quantity).toBeNull();
+  });
+
+  test('lo vendido, entregado o dado de baja NO cuenta', () => {
+    for (const v of ['Vendido', 'vendida', 'ENTREGADO', 'Facturado', 'Baja', 'Sold']) {
+      expect(cuentaComoExistencia(v)).toBe(false);
+    }
+  });
+
+  test('lo disponible y lo reservado SÍ cuentan', () => {
+    // Reservado está físicamente en el lote: apartado, no vendido.
+    for (const v of ['Disponible', 'En existencia', 'Reservado', 'Apartado']) {
+      expect(cuentaComoExistencia(v)).toBe(true);
+    }
+  });
+
+  /**
+   * El sesgo, que es la mitad del diseño: solo se RESTA lo que se reconoce.
+   *
+   * `Estado` es un nombre de columna demasiado común para asumir que siempre habla de
+   * disponibilidad. Contar de más deja un inventario inflado, que se ve y se reporta; contar
+   * de menos le borra inventario real al cliente sin que nada falle, y eso no lo reporta
+   * nadie porque se ve igual que "todavía no cargó".
+   */
+  test('un estado desconocido o vacío cuenta como existencia', () => {
+    for (const v of [
+      'Activo',
+      'Inactivo',
+      'Nuevo',
+      'Usado',
+      'cualquier cosa',
+      '',
+      null,
+      undefined,
+    ]) {
+      expect(cuentaComoExistencia(v)).toBe(true);
+    }
   });
 });
