@@ -76,6 +76,18 @@ Conventions & gotchas:
      referenciada es la que CONTIENE a la otra (el inventario contiene lo vendido, las ventas
      contienen lo que quedó por cobrar). Una hoja con columna de fecha Y de monto es un libro de
      movimientos y ninguna señal estructural debería poder silenciarla.
+     **LA SEÑAL ES LA CONTRAPARTE, y costó tres intentos** (`pareceLibroDeMovimientos`, mismo
+     día): (1) `classifySheet === 'financial'` funcionaba de CASUALIDAD — ese veredicto exige
+     una columna de dinero que coincida EXACTO, y de las quince de `Ventas` la única que
+     coincide es `Utilidad Bruta`; con "Margen" la hoja daba `unknown` y se perdía igual.
+     (2) "tiene fecha Y dinero" por prefijo es robusto para las ventas pero se come el caso
+     original: un inventario de concesionaria trae `Costo Adquisicion` y `Fecha Ingreso`, así
+     que **ninguna señal de dinero puede separarlos**. (3) Lo que sí los separa es semántico:
+     un MOVIMIENTO involucra a alguien —se le vende a un cliente, se le compra a un proveedor—
+     y una lista de existencias no. **Y el set corregido se calcula UNA vez**: `esquema.entidades`
+     tiene DOS consumidores (el enrutado a inventario y la regla de "la factura no devenga si su
+     venta ya está registrada") y parchar solo el primero dejó a HeladosGT sumando Q 58.334 de
+     ingreso duplicado — medido en producción DESPUÉS de ese primer arreglo.
   1. **Encontrar el encabezado real** (`lib/sheet-header.ts`). Va PRIMERO de los que miran una
      hoja sola porque todo lo demás se indexa contra la fila 0: el pre-filtro la mira, el mapa
      de columnas se arma contra ella y los índices que devuelve el modelo apuntan a ella. Un
