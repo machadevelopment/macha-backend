@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { canSkipSheet, classifySheet, pareceLibroDeMovimientos } from './sheet-classifier';
+import {
+  canSkipSheet,
+  classifySheet,
+  firmaDeCatalogo,
+  pareceLibroDeMovimientos,
+} from './sheet-classifier';
 
 /**
  * Los encabezados son los REALES de los tres archivos de prueba que entregó el cliente el
@@ -255,5 +260,109 @@ describe('la señal que corrige el set de entidades', () => {
       c === 'Utilidad Bruta (Q)' ? 'Margen (Q)' : c,
     );
     expect(pareceLibroDeMovimientos(sinNombresExactos)).toBe(true);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LO QUE ROMPIÓ UN CORPUS DE DIEZ LIBROS DE RUBROS DISTINTOS (2026-08-25)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Corriendo el pipeline determinista contra diez archivos reales, siete salían mal. Estos son
+ * los dos ejes que fallaban, con las hojas exactas que los destaparon.
+ */
+describe('la contraparte también se llama paciente, huésped o alumno', () => {
+  /*
+   * `Consultas` son los 214 INGRESOS de una clínica dental — `Precio (Q)` y `Forma de Pago`.
+   * `CuentasPorCobrar` la referencia, así que el esquema la declaró tabla de entidades y se
+   * registró como INVENTARIO: 210 unidades en existencia y CERO ingresos en el dashboard.
+   *
+   * Lo único que podía desmentirlo era la lista de contrapartes, que decía `cliente` mientras
+   * la hoja decía `Paciente`. Es el mismo fallo que se llevó las ventas de HeladosGT.
+   */
+  test('la hoja de consultas de una clínica ES un libro de movimientos', () => {
+    expect(
+      pareceLibroDeMovimientos([
+        'ID Consulta',
+        'Fecha',
+        'Paciente',
+        'Odontologo',
+        'Tratamiento',
+        'Precio (Q)',
+        'Forma de Pago',
+        'Sucursal',
+      ]),
+    ).toBe(true);
+  });
+
+  test('y un inventario de concesionaria sigue SIN serlo', () => {
+    // La contraparte aparece el día que se vende, y esa fila vive en la hoja de ventas.
+    expect(
+      pareceLibroDeMovimientos([
+        'ID Vehiculo',
+        'VIN',
+        'Marca',
+        'Costo Adquisicion (Q)',
+        'Fecha Ingreso',
+        'Estado',
+      ]),
+    ).toBe(false);
+  });
+});
+
+describe('un inventario de mostrador no usa vocabulario de bodega', () => {
+  /*
+   * La firma de existencias nació de una cafetería y busca `stock`, `punto de reorden`,
+   * `unidad de medida`. Un inventario de ferretería o de boutique no usa ninguna de esas
+   * palabras: daban 0 coincidencias y se iban a MOVIMIENTOS — 154 artículos de la ferretería
+   * como transacciones, sumando Q 9.438.823 de costo que nadie gastó.
+   *
+   * Lo que los separa de una hoja de ventas por producto —que también trae producto y
+   * cantidad— no es otra palabra: es que una lista de existencias es un conteo en un MOMENTO
+   * y NO TIENE FECHA por fila. Un movimiento siempre la tiene.
+   */
+  test('ferretería y boutique se reconocen como existencias', () => {
+    expect(
+      firmaDeCatalogo([
+        'SKU',
+        'Producto',
+        'Categoria',
+        'Cantidad',
+        'Costo Unitario (Q)',
+        'Precio Lista (Q)',
+        'Sucursal',
+      ]),
+    ).toBe('existencias');
+    expect(
+      firmaDeCatalogo([
+        'SKU',
+        'Prenda',
+        'Talla',
+        'Cantidad',
+        'Costo Unitario (Q)',
+        'Precio Venta (Q)',
+      ]),
+    ).toBe('existencias');
+  });
+
+  /*
+   * El error simétrico y PEOR: capturar una hoja de ventas como inventario le borraría los
+   * ingresos al cliente. La fecha es lo que lo impide.
+   */
+  test('una hoja de ventas por producto NO se captura como inventario', () => {
+    expect(
+      firmaDeCatalogo(['Fecha', 'Producto', 'Cantidad', 'Total (Q)', 'Costo (Q)', 'Area']),
+    ).toBe(null);
+    expect(firmaDeCatalogo(['ID Orden', 'Producto', 'Cantidad', 'Monto Linea (Q)'])).toBe(null);
+  });
+
+  /*
+   * `costo` y `precio` a secas eran demasiado genéricos: capturaban una hoja de análisis de
+   * márgenes con columnas "PRECIO INDIVIDUAL MENSUAL - ENERO". Lo atrapó el corpus de hojas
+   * reales antes de llegar a producción, que es exactamente para lo que existe.
+   */
+  test('exige un costo POR UNIDAD y un identificador de artículo', () => {
+    expect(firmaDeCatalogo(['Cantidad', 'Precio'])).toBe(null);
+    expect(firmaDeCatalogo(['Cantidad', 'Costo Unitario'])).toBe(null); // sin identificador
   });
 });

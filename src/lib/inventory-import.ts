@@ -182,13 +182,13 @@ export function cuentaComoExistencia(valor: unknown): boolean {
  */
 export function mapearColumnasDeInventario(headerRow: unknown[]): MapaDeInventario | null {
   const normalizados = headerRow.map(normalizeHeader);
-  const buscar = (pistas: string[], soloExacto = false) =>
-    buscarColumna(normalizados, pistas, soloExacto);
+  const buscar = (pistas: string[], esCantidad = false) =>
+    buscarColumna(normalizados, pistas, esCantidad);
 
   const mapa: MapaDeInventario = {
     sku: buscar(PISTAS.sku),
     name: buscar(PISTAS.name),
-    // Exacta y nada más: ver `buscarColumna`. Una cantidad mal leída es un inventario falso.
+    // Con lista negra: ver `buscarColumna`. Una cantidad mal leída es un inventario falso.
     quantity: buscar(PISTAS.quantity, true),
     unitCost: buscar(PISTAS.unitCost),
     reorderPoint: buscar(PISTAS.reorderPoint),
@@ -234,8 +234,8 @@ export function mapearInventarioSerializado(
   columnaDeSerie: number,
 ): MapaDeInventario | null {
   const normalizados = headerRow.map(normalizeHeader);
-  const buscar = (pistas: string[], soloExacto = false) =>
-    buscarColumna(normalizados, pistas, soloExacto);
+  const buscar = (pistas: string[], esCantidad = false) =>
+    buscarColumna(normalizados, pistas, esCantidad);
 
   if (columnaDeSerie < 0 || columnaDeSerie >= headerRow.length) return null;
 
@@ -273,23 +273,45 @@ export function mapearInventarioSerializado(
  * El orden se conserva: TODAS las exactas antes que cualquier prefijo, así que una hoja que
  * traiga `Costo Unitario` y `Costo Adquisición` sigue eligiendo la unitaria.
  *
- * `soloExacto` es para CANTIDAD, y es la excepción importante: por prefijo, `cantidad` también
- * captura `Cantidad Vendida` o `Cantidad Pedida`, y ahí el falso positivo no deja una celda
- * vacía — mete el número equivocado como existencia del cliente. Un costo mal leído se ve en
- * la pantalla; una cantidad mal leída se ve como un inventario plausible y falso.
+ * La CANTIDAD acepta prefijo pero pasa por una lista NEGRA, y esa asimetría es deliberada. Por
+ * prefijo, `cantidad` captura `Cantidad en Bodega` —que es existencia y hay que leer— y también
+ * `Cantidad Vendida` o `Cantidad Facturada`, que no lo son. Ahí el falso positivo no deja una
+ * celda vacía: mete el número equivocado como existencia del cliente. Un costo mal leído se ve
+ * en la pantalla; una cantidad mal leída se ve como un inventario plausible y falso.
+ *
+ * La primera versión resolvía eso exigiendo nombre EXACTO, y el precio fue el inventario del
+ * restaurante del corpus: `Cantidad en Bodega` no es igual a `cantidad`, la hoja se reconocía
+ * como existencias y no importaba una sola fila — 89 insumos perdidos en silencio. La lista
+ * negra conserva la protección sin pagar eso: lo que se rechaza es lo que nombra un MOVIMIENTO,
+ * y ese conjunto sí es corto y cerrado.
  */
+const CANTIDAD_QUE_NO_ES_EXISTENCIA = [
+  'vendid',
+  'compra',
+  'pedid',
+  'factur',
+  'despach',
+  'devuelt',
+  'entregad',
+  'recibid',
+  'sold',
+  'ordered',
+];
 function buscarColumna(
   normalizados: string[],
   pistas: string[],
-  soloExacto = false,
+  esCantidad = false,
 ): number | null {
   for (const pista of pistas) {
     const idx = normalizados.indexOf(pista);
     if (idx !== -1) return idx;
   }
-  if (soloExacto) return null;
   for (const pista of pistas) {
-    const idx = normalizados.findIndex((h) => h.startsWith(pista));
+    const idx = normalizados.findIndex(
+      (h) =>
+        h.startsWith(pista) &&
+        !(esCantidad && CANTIDAD_QUE_NO_ES_EXISTENCIA.some((mala) => h.includes(mala))),
+    );
     if (idx !== -1) return idx;
   }
   return null;
