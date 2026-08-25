@@ -64,6 +64,18 @@ Conventions & gotchas:
      detecta cabecera/detalle por SUMAS iguales, que es contar dos veces de otra forma.
      `inventory-import.ts` gana el camino SERIALIZADO (`mapearInventarioSerializado`): sin
      columna de cantidad, cada fila vale UNA unidad — un VIN es un vehículo.
+     **Y EL VEREDICTO DEL ESQUEMA NUNCA BASTA SOLO** (mismo día, unas horas después): una hoja
+     va a inventario si el esquema la marca como entidad **Y** `classifySheet` NO la ve como
+     `financial`. Sin esa segunda condición el mecanismo se comió las ventas de un cliente —
+     Jose subió el archivo de HeladosGT y su hoja `Ventas` (435 filas) se registró como stock,
+     dejando el dashboard con Q 58.334 de ingreso contra Q 1.797.772 de gasto. El agujero es
+     exacto: una hoja es entidad si otra la referencia y ella no referencia a nadie, y en el
+     archivo que motivó el mecanismo `Ventas → Inventario` la excluía — pero **ese enlace es
+     una casualidad de ESE libro**. Sin hoja de inventario, `Ventas` queda terminal en el
+     grafo. La forma del grafo no puede distinguirlas ni en principio: en los dos casos la hoja
+     referenciada es la que CONTIENE a la otra (el inventario contiene lo vendido, las ventas
+     contienen lo que quedó por cobrar). Una hoja con columna de fecha Y de monto es un libro de
+     movimientos y ninguna señal estructural debería poder silenciarla.
   1. **Encontrar el encabezado real** (`lib/sheet-header.ts`). Va PRIMERO de los que miran una
      hoja sola porque todo lo demás se indexa contra la fila 0: el pre-filtro la mira, el mapa
      de columnas se arma contra ella y los índices que devuelve el modelo apuntan a ella. Un

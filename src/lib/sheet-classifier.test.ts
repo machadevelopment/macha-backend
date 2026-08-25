@@ -142,3 +142,38 @@ describe('el ahorro sobre los archivos reales', () => {
     expect(ahorro / total).toBeGreaterThan(0.3);
   });
 });
+
+/**
+ * ═══ EL CANDADO QUE SALVA UN LIBRO DE MOVIMIENTOS (HeladosGT, 2026-08-24) ═══
+ *
+ * El worker manda una hoja a inventario cuando el esquema del libro la marca como tabla de
+ * entidades Y `classifySheet` NO la ve como `financial`. Esta segunda condición es lo único
+ * que evita que una hoja de ventas se registre como stock cuando su libro no trae inventario
+ * — pasó en producción y dejó a una heladería con Q 58.334 de ingreso contra Q 1.797.772 de
+ * gasto.
+ *
+ * Estos dos casos son los REALES de los dos archivos, y tienen que dar distinto.
+ */
+describe('financial vs catálogo: el candado del enrutado a inventario', () => {
+  test('una hoja de ventas es financial, así que nunca va a inventario', () => {
+    expect(classifySheet(['IDVenta', 'Fecha', 'Cliente', 'Monto (Q)'])).toBe('financial');
+  });
+
+  test('el inventario de una concesionaria NO es financial, así que puede ir', () => {
+    // Trae dinero y fecha, pero también las señales de catálogo: el desempate lo saca de
+    // `financial`, que es justo lo que lo habilita como tabla de entidades.
+    expect(
+      classifySheet([
+        'ID Vehiculo',
+        'VIN',
+        'Marca',
+        'Modelo',
+        'Costo Adquisicion (Q)',
+        'Precio Lista (Q)',
+        'Fecha Ingreso',
+        'Sucursal',
+        'Estado',
+      ]),
+    ).not.toBe('financial');
+  });
+});
