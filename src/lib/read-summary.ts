@@ -61,6 +61,28 @@ export type HojaLeida =
        * campo, que es información legítima y distinta de "no lo encontré".
        */
       columnas: Record<string, string | null>;
+      /**
+       * CUÁNTO DINERO TRAÍA LA HOJA, separado por moneda.
+       *
+       * Es la cifra que el dueño puede desmentir de un vistazo, y por eso es la más útil del
+       * resumen: reconoce sus propias ventas. Un cliente subió 19 meses de contabilidad, el
+       * dashboard abrió en "este mes" y el reporte fue "esta data no tiene nada que ver con
+       * el Excel" — las cifras estaban bien al quetzal, pero no había dónde comprobarlo.
+       *
+       * Opcional porque los resúmenes guardados antes de 2026-08-25 no lo traen. Ausente no
+       * significa cero: significa que esa carga es anterior a la medición. Ver
+       * `lib/reconciliation.ts`.
+       */
+      montos?: { moneda: string; total: number; filas: number }[];
+      /**
+       * El COSTO que la hoja declaraba en su propia columna, cuando la trae.
+       *
+       * Va aparte del monto y nunca sumado: en un libro de PYME el costo vive al lado del
+       * precio en la misma fila, y mezclarlos daría un número que no es ni la venta ni el
+       * costo. Es además lo que explica que el ledger tenga más filas que el archivo — esa
+       * columna produce una segunda transacción.
+       */
+      costos?: { moneda: string; total: number; filas: number }[];
     }
   | {
       estado: 'inventario';
