@@ -262,7 +262,58 @@ export async function importarInventario(
     return out;
   }
 
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * LAS FILAS SE AGRUPAN POR SKU ANTES DE APLICARSE — LA FILA ES (SKU, TIENDA)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Encontrado auditando producción (2026-08-24). El archivo de una joyería trae 210 filas de
+   * inventario para 42 productos: una por cada combinación de producto y tienda.
+   *
+   *     JYL-ANI-0001   tienda 1: 130 · tienda 2: 42 · tienda 3: 35 · tienda 4: 1 · tienda 5: 0
+   *
+   * Cada fila se trataba como un CONTEO nuevo del mismo artículo, y cada una pisaba a la
+   * anterior: 130 → 42 → 35 → 1 → 0. El producto terminaba con **0 unidades donde hay 208**, y
+   * el rastro de movimientos lo dejaba escrito sin que nadie lo leyera ("Conteo importado del
+   * archivo (24 → 9)", cuatro veces seguidas para el mismo artículo).
+   *
+   * Afectaba a empresas reales: 55 artículos de Electro Hogar, 84 en tres empresas de prueba.
+   *
+   * ═══ POR QUÉ SUMAR Y NO QUEDARSE CON UNA ═══
+   *
+   * `inventory_items` tiene un artículo por SKU, no por (SKU, tienda) — no hay dónde guardar el
+   * desglose. Y la pregunta que la pantalla contesta es "cuánto tengo", que sobre cinco tiendas
+   * es la suma. Quedarse con la última fila es lo que hacía hasta ahora, y quedarse con la
+   * mayor sería igual de arbitrario.
+   *
+   * Se pierde saber cuánto hay en cada tienda. Es una pérdida real y hay que decirla: a cambio,
+   * el total que ve el cliente es el correcto. La alternativa —un artículo por tienda— cambia
+   * el modelo de datos y es decisión de producto, no de este importador.
+   *
+   * ═══ EL CAMINO SERIALIZADO NO SE VE AFECTADO ═══
+   *
+   * Ahí cada fila trae una serie ÚNICA (un VIN, un certificado), así que cada grupo tiene una
+   * sola fila y agrupar no cambia nada. Sale gratis y sin condicional.
+   */
+  const porSku = new Map<string, { row: unknown[]; cantidad: number }>();
   for (const row of params.rows) {
+    const skuCrudo = texto(celda(row, mapa.sku)) ?? texto(celda(row, mapa.name));
+    const contado = mapa.quantity === null ? 1 : numero(celda(row, mapa.quantity));
+    if (!skuCrudo || contado === null || contado < 0) {
+      // Se cuenta acá y no en el bucle de abajo: una fila ilegible no llega a agruparse.
+      out.omitidas++;
+      continue;
+    }
+    const clave = skuCrudo.toLowerCase();
+    const previo = porSku.get(clave);
+    // La PRIMERA fila del SKU aporta los atributos (nombre, costo, ubicación); las demás solo
+    // suman su cantidad. Tomar los de la última haría que el nombre del producto dependiera
+    // del orden de las tiendas en el archivo.
+    if (previo) previo.cantidad += contado;
+    else porSku.set(clave, { row, cantidad: contado });
+  }
+
+  for (const { row, cantidad: contadoAgrupado } of porSku.values()) {
     /*
      * El SKU es la identidad; si la hoja no trae columna de SKU se usa el nombre. Es lo que
      * hace el cliente que lleva su bodega por nombre de producto, que es común en una PYME —
@@ -271,14 +322,14 @@ export async function importarInventario(
     const skuCrudo = texto(celda(row, mapa.sku)) ?? texto(celda(row, mapa.name));
     const nombre = texto(celda(row, mapa.name)) ?? skuCrudo;
     /*
-     * Sin columna de cantidad la hoja es SERIALIZADA y cada fila vale UNA unidad. No es un
-     * valor por defecto para salir del paso: es lo que la fila dice — un VIN es un vehículo.
-     * El camino fungible sigue exigiendo el número, y una hoja sin cantidad NI serie no llega
-     * hasta acá porque su mapa es `null`.
+     * La cantidad viene SUMADA sobre todas las filas de este SKU. Sin columna de cantidad la
+     * hoja es serializada y cada fila valió 1 — un VIN es un vehículo — y como su serie es
+     * única, el grupo tiene una sola fila y la suma es 1.
      */
-    const contado = mapa.quantity === null ? 1 : numero(celda(row, mapa.quantity));
-
-    if (!skuCrudo || !nombre || contado === null || contado < 0) {
+    const contado = contadoAgrupado;
+    // El SKU y la cantidad ya se validaron al agrupar; solo falta el nombre, que puede caer
+    // en null si la fila no trae ni nombre ni SKU legible.
+    if (!skuCrudo || !nombre) {
       out.omitidas++;
       continue;
     }
