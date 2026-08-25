@@ -125,6 +125,19 @@ Conventions & gotchas:
      no como un movimiento: SKU nuevo → alta con existencia inicial, SKU conocido → ajuste por
      la diferencia, sin diferencia → no se escribe nada. Por eso resubir el archivo semanal no
      duplica el stock. Todo pasa por `recordMovement`, nunca se escribe `quantity_on_hand`.
+     **LAS FILAS SE AGRUPAN POR SKU ANTES DE APLICARSE** (auditoría 2026-08-24): la fila del
+     archivo es **(SKU, tienda)** y el artículo del inventario es el SKU. El de una joyería trae
+     210 filas para 42 productos —una por tienda— y cada una se trataba como un CONTEO nuevo que
+     pisaba al anterior: `JYL-ANI-0001` con 130·42·35·1·0 quedaba en **0 unidades donde hay
+     208**. El rastro lo dejaba escrito y nadie lo leía ("Conteo importado del archivo (24 → 9)",
+     cuatro veces para el mismo artículo). Tocaba a empresas reales: 55 artículos de Electro
+     Hogar. Se SUMA porque `inventory_items` tiene un artículo por SKU y no por (SKU, tienda) —
+     no hay dónde guardar el desglose— y la pregunta que contesta la pantalla es "cuánto tengo".
+     **Se pierde el detalle por tienda y hay que decirlo**; la alternativa cambia el modelo de
+     datos y es decisión de producto. La primera fila del grupo aporta los atributos (nombre,
+     costo) y las demás solo su cantidad: tomar los de la última haría que el nombre dependiera
+     del orden de las tiendas. El camino serializado no se ve afectado — cada serie es única, así
+     que cada grupo tiene una sola fila.
   4. **Cabecera y detalle del mismo dinero** (`lib/sheet-duplication.ts`, 2026-08-14). Un archivo
      real trae `OrdenesCompra` (60 filas, Q 2.707.318) y `LineasOC` (220 filas, Q 2.707.318):
      **la misma plata a dos granularidades**. Si las dos producen movimientos, las compras del

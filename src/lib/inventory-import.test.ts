@@ -136,3 +136,43 @@ describe('inventario serializado: una fila, una unidad', () => {
     expect(mapearInventarioSerializado(encabezado, -1)).toBeNull();
   });
 });
+
+/**
+ * ═══ UN SKU EN VARIAS TIENDAS SE SUMA, NO SE PISA (auditoría 2026-08-24) ═══
+ *
+ * El archivo de una joyería trae 210 filas de inventario para 42 productos: una por cada
+ * combinación de producto y tienda. Cada fila se trataba como un conteo nuevo del mismo
+ * artículo y cada una pisaba a la anterior:
+ *
+ *     JYL-ANI-0001   130 · 42 · 35 · 1 · 0   →  quedaba en 0, donde hay 208
+ *
+ * El rastro de movimientos lo dejaba escrito y nadie lo leía: "Conteo importado del archivo
+ * (24 → 9)", cuatro veces seguidas para el mismo artículo. Afectaba a empresas reales — 55
+ * artículos de Electro Hogar.
+ *
+ * Estos tests fijan el mapeo de columnas; el agrupado en sí se comprueba end-to-end en
+ * `tests/integration`, que es donde hay base de datos.
+ */
+describe('el mapa reconoce una hoja de (SKU, tienda)', () => {
+  test('la hoja de la joyería mapea, con SKU repetido por tienda', () => {
+    const mapa = mapearColumnasDeInventario([
+      'SKU',
+      'IDTienda',
+      'CantidadDisponible',
+      'PuntoReorden',
+      'CantidadReorden',
+      'FechaÚltimoReabasto',
+    ]);
+
+    expect(mapa).not.toBeNull();
+    expect(mapa!.sku).toBe(0);
+    expect(mapa!.quantity).toBe(2);
+    /*
+     * La tienda NO entra en la identidad del artículo, y ahí está el nudo: `inventory_items`
+     * tiene un artículo por SKU y no por (SKU, tienda), así que no hay dónde guardar el
+     * desglose. Por eso la cantidad se suma en vez de conservarse por tienda — se pierde saber
+     * cuánto hay en cada una, y a cambio el total que ve el cliente es el correcto.
+     */
+    expect(mapa!.location).not.toBe(1);
+  });
+});
