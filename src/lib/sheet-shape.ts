@@ -64,11 +64,44 @@ export interface FormaDeHoja {
  */
 export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
   const ok: FormaDeHoja = { esReporte: false, motivo: '' };
-  // Con pocas filas no hay geometría que juzgar, y una hoja chica tampoco cuesta.
-  if (rows.length < 8) return ok;
 
   const encabezado = rows[0] ?? [];
   const datos = rows.slice(1);
+  const nombradosTodos = encabezado.filter((c) => !vacia(c));
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * LAS DOS SEÑALES DE PERÍODO SE JUZGAN ANTES DEL MÍNIMO DE FILAS
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * El corte de abajo ("con pocas filas no hay geometría que juzgar, y una hoja chica tampoco
+   * cuesta") vale para las señales GEOMÉTRICAS, que necesitan masa para significar algo. No
+   * vale para estas dos: un encabezado con doce meses es un reporte tenga tres filas o
+   * trescientas, y la premisa de que una hoja chica "no cuesta" resultó falsa.
+   *
+   * Medido sobre un corpus de diez libros reales (2026-08-25). Las dos hojas que se colaban
+   * tenían DIEZ filas cada una:
+   *
+   *   · `ReporteMensualGastos` — `Categoria · Enero · Febrero · … · Diciembre`. Doce columnas
+   *     que son meses, y se leía como tabla de movimientos.
+   *   · `ResumenGerencial` — `Mes · Ingresos Totales · Gastos Totales · Utilidad Estimada`,
+   *     una fila por mes. Sus Q 324.562 se sumaban ENCIMA de los Q 304.310 de la hoja de
+   *     ingresos real: el hotel veía su facturación duplicada.
+   *
+   * Lo que cuesta una hoja chica no son tokens: es contar el mismo dinero dos veces.
+   */
+  const periodosEnColumnas = nombradosTodos.filter(pareceNombreDePeriodo).length;
+  if (periodosEnColumnas >= 4 && periodosEnColumnas / Math.max(nombradosTodos.length, 1) > 0.25) {
+    return {
+      esReporte: true,
+      motivo:
+        `tiene ${periodosEnColumnas} columnas que son meses o períodos: los datos están a lo ancho ` +
+        '(una fila por cliente o producto, con un valor por mes) en vez de un movimiento por fila',
+    };
+  }
+
+  // Con pocas filas no hay geometría que juzgar, y una hoja chica tampoco cuesta.
+  if (rows.length < 8) return ok;
 
   const nombrados = encabezado.filter((c) => !vacia(c));
   const anchoEncabezado = nombrados.length;
@@ -102,25 +135,6 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
       esReporte: true,
       motivo:
         'parece un reporte con bloques y títulos sueltos, no un listado de movimientos fila por fila',
-    };
-  }
-
-  /*
-   * 4. COLUMNAS QUE SON PERÍODOS. La firma inconfundible de los datos a lo ancho:
-   *    `["Cliente","ene-25","feb-25",...,"dic-26","Tipo de cliente"]`. Cada fila es un
-   *    cliente con veinticuatro meses al lado — no es un movimiento, son veinticuatro.
-   *
-   *    Se exige un MÍNIMO ABSOLUTO además de la proporción: una tabla de movimientos puede
-   *    tener una columna "Mes" o "Periodo" perfectamente legítima, y con solo la proporción
-   *    una hoja angosta con dos columnas así se descartaría sin motivo.
-   */
-  const periodos = nombrados.filter(pareceNombreDePeriodo).length;
-  if (periodos >= 4 && periodos / Math.max(nombrados.length, 1) > 0.25) {
-    return {
-      esReporte: true,
-      motivo:
-        `tiene ${periodos} columnas que son meses o períodos: los datos están a lo ancho ` +
-        '(una fila por cliente o producto, con un valor por mes) en vez de un movimiento por fila',
     };
   }
 

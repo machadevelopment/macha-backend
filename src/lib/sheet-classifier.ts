@@ -115,7 +115,17 @@ const DATE_HINTS = [
  * puede traer el nombre del cliente— así que se exige un conjunto que solo tiene sentido en
  * un maestro: datos de contacto, de ubicación física, o de existencias.
  */
-const CATALOG_SIGNATURES: { name: string; needed: string[]; min: number }[] = [
+const CATALOG_SIGNATURES: {
+  name: string;
+  needed: string[];
+  min: number;
+  /** Además de `needed`, la hoja tiene que traer AL MENOS UNA de estas. */
+  ademas?: string[];
+  /** Y al menos una de estas otras. */
+  yTambien?: string[];
+  /** Si trae alguna de estas, la firma NO aplica. Ver la firma de existencias sin bodega. */
+  prohibidas?: string[];
+}[] = [
   {
     // Clientes / Proveedores: contacto de una persona o empresa.
     name: 'contactos',
@@ -150,6 +160,51 @@ const CATALOG_SIGNATURES: { name: string; needed: string[]; min: number }[] = [
     min: 2,
   },
   {
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * EXISTENCIAS SIN VOCABULARIO DE BODEGA: LA SEÑAL ES QUE NO HAY FECHA
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * La firma de arriba busca cómo una BODEGA nombra sus columnas (`stock`, `punto de
+     * reorden`, `unidad de medida`), y nació de una cafetería. Un inventario de mostrador no
+     * usa ninguna de esas palabras:
+     *
+     *     Ferretería   SKU · Producto · Categoria · Cantidad · Costo Unitario · Precio Lista
+     *     Boutique     SKU · Prenda · Talla · Cantidad · Costo Unitario · Precio Venta
+     *
+     * Las dos daban 0 coincidencias y se iban a MOVIMIENTOS: 154 artículos de la ferretería
+     * como si fueran transacciones, sumando Q 9.438.823 de costo que nadie gastó. Es el bug
+     * de CarsGT otra vez —el inventario contado como costo de ventas— por otra puerta.
+     *
+     * ═══ POR QUÉ NO ALCANZA "CANTIDAD + COSTO + PRODUCTO" ═══
+     *
+     * Porque una hoja de ventas por producto tiene exactamente eso. El restaurante del mismo
+     * corpus trae `Fecha · Producto · Cantidad · Total · Costo · Area`, y capturarla como
+     * inventario le borraría las ventas — el error simétrico y peor.
+     *
+     * Lo que sí los separa no es una palabra más: es que **una lista de existencias es un
+     * conteo en un MOMENTO y no tiene fecha por fila**. Un movimiento siempre la tiene, porque
+     * un hecho ocurre en el tiempo. Por eso `prohibidas` y no otra pista: la ausencia de la
+     * dimensión temporal es la señal, y funciona en cualquier rubro y en cualquier idioma.
+     *
+     * `Fecha Ingreso` del inventario de una concesionaria SÍ es una fecha, y por eso esa hoja
+     * no cae acá — se resuelve por el esquema del libro, que es su camino.
+     */
+    name: 'existencias',
+    needed: ['cantidad', 'existencias', 'unidades', 'piezas'],
+    min: 1,
+    /*
+     * Un COSTO POR UNIDAD, no un costo cualquiera. `costo` y `precio` a secas son demasiado
+     * genéricos: capturaban una hoja de análisis de márgenes con columnas como
+     * "PRECIO INDIVIDUAL MENSUAL - ENERO", que el corpus de hojas reales espera como `unknown`
+     * — y ese test es justamente lo que lo atrapó antes de llegar a producción.
+     */
+    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa', 'preciounitario'],
+    /* Y algo que identifique al ARTÍCULO: sin eso no hay a qué atribuir la existencia. */
+    yTambien: ['sku', 'codigo', 'producto', 'articulo', 'insumo', 'idproducto', 'idinsumo'],
+    prohibidas: DATE_HINTS,
+  },
+  {
     // Catálogo de productos: ficha del artículo. `sku` solo NO basta — las líneas de venta
     // también lo traen.
     name: 'productos',
@@ -173,9 +228,14 @@ export function classifySheet(headerRow: unknown[]): SheetKind {
 
   const looksFinancial = has(headers, MONEY_HINTS) && has(headers, DATE_HINTS);
 
-  const catalogMatch = CATALOG_SIGNATURES.find(
-    (sig) => sig.needed.filter((h) => headers.has(h)).length >= sig.min,
-  );
+  const cumple = (sig: (typeof CATALOG_SIGNATURES)[number]): boolean => {
+    if (sig.needed.filter((h) => headers.has(h)).length < sig.min) return false;
+    if (sig.ademas && !sig.ademas.some((h) => headers.has(h))) return false;
+    if (sig.yTambien && !sig.yTambien.some((h) => headers.has(h))) return false;
+    if (sig.prohibidas && sig.prohibidas.some((h) => headers.has(h))) return false;
+    return true;
+  };
+  const catalogMatch = CATALOG_SIGNATURES.find(cumple);
 
   /*
    * EL EMPATE SE RESUELVE A FAVOR DEL MODELO, y es el caso que más importa.
@@ -191,8 +251,32 @@ export function classifySheet(headerRow: unknown[]): SheetKind {
 }
 
 /**
- * Nombres de columna que nombran a la CONTRAPARTE de un movimiento: a quién se le vendió o a
- * quién se le compró. Ver `pareceLibroDeMovimientos`.
+ * Nombres de columna que nombran a la CONTRAPARTE de un movimiento: a quién se le vendió, a
+ * quién se le compró, a quién se le prestó el servicio. Ver `pareceLibroDeMovimientos`.
+ *
+ * ═══ POR QUÉ ACÁ EL VOCABULARIO SÍ ES ACEPTABLE, Y NO EN OTRAS LISTAS ═══
+ *
+ * Este módulo tiene varias listas de palabras y casi todas son deuda: las de columnas de dinero
+ * o de existencias intentan adivinar cómo un negocio bautiza un CONCEPTO, y ese conjunto no
+ * termina nunca — `Costo Adquisicion`, `Costo Importacion`, `Costo Flete`, uno nuevo por
+ * cliente. Ahí la lista siempre va perdiendo y hay que buscar la señal estructural.
+ *
+ * Esta lista es de otra naturaleza: enumera cómo se le dice a UNA PERSONA que está del otro
+ * lado de una transacción. Ese conjunto sí es acotado y cerrado — el español de negocios tiene
+ * un puñado de palabras para eso y no inventa una nueva por cada PYME. Un rubro nuevo trae un
+ * término nuevo (una clínica dice paciente, un hotel huésped, un colegio alumno), pero el
+ * término es del RUBRO y no del cliente, así que la lista converge en vez de crecer.
+ *
+ * ═══ LO QUE COSTÓ NO TENERLA COMPLETA (2026-08-25) ═══
+ *
+ * La hoja `Consultas` de una clínica dental —sus 214 INGRESOS, con `Precio (Q)` y
+ * `Forma de Pago`— se registró como INVENTARIO: 210 unidades en existencia y cero ingresos en
+ * el dashboard. `CuentasPorCobrar` la referencia, así que el esquema la declaró tabla de
+ * entidades, y lo único que podía desmentirlo era esta lista. Decía `cliente` y la hoja decía
+ * `Paciente`.
+ *
+ * Es el mismo fallo que se llevó las ventas de HeladosGT, con otra palabra. Encontrado
+ * corriendo el pipeline contra un corpus de diez libros de rubros distintos.
  */
 const CONTRAPARTE_HINTS = [
   'cliente',
@@ -208,6 +292,28 @@ const CONTRAPARTE_HINTS = [
   'vendor',
   'contraparte',
   'counterparty',
+  // Servicios: la contraparte es una persona atendida, no un comprador de mercadería.
+  'paciente',
+  'idpaciente',
+  'huesped',
+  'alumno',
+  'estudiante',
+  'socio',
+  'afiliado',
+  'asegurado',
+  'beneficiario',
+  'inquilino',
+  'arrendatario',
+  'pasajero',
+  'comprador',
+  'destinatario',
+  'remitente',
+  'patient',
+  'guest',
+  'student',
+  'member',
+  'tenant',
+  'buyer',
 ];
 
 /**
@@ -312,7 +418,12 @@ export function firmaDeCatalogo(headerRow: unknown[]): string | null {
   if (classifySheet(headerRow) !== 'catalog') return null;
   const headers = new Set(headerRow.map(normalizeHeader).filter(Boolean));
   return (
-    CATALOG_SIGNATURES.find((sig) => sig.needed.filter((h) => headers.has(h)).length >= sig.min)
-      ?.name ?? null
+    CATALOG_SIGNATURES.find((sig) => {
+      if (sig.needed.filter((h) => headers.has(h)).length < sig.min) return false;
+      if (sig.ademas && !sig.ademas.some((h) => headers.has(h))) return false;
+      if (sig.yTambien && !sig.yTambien.some((h) => headers.has(h))) return false;
+      if (sig.prohibidas && sig.prohibidas.some((h) => headers.has(h))) return false;
+      return true;
+    })?.name ?? null
   );
 }
