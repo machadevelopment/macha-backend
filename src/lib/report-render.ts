@@ -1,7 +1,7 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import { svgBarrasDeCosto, svgTendencia } from '@/lib/report-charts';
 import * as XLSX from 'xlsx';
-import type { ReportData, ReportSection } from '@/lib/report-sections';
+import type { ReportData, ReportSection, ReportType } from '@/lib/report-sections';
 import { isotipoPngBytes, ISOTIPO_ASPECTO } from '@/lib/brand-asset';
 
 /**
@@ -82,6 +82,31 @@ export const SECTION_LABELS: Record<ReportSection, { es: string; en: string }> =
   top_products: { es: 'Productos principales', en: 'Top products' },
   risks: { es: 'Riesgos', en: 'Risks' },
   recommendations: { es: 'Recomendaciones', en: 'Recommendations' },
+};
+
+/**
+ * El nombre del reporte según su tipo.
+ *
+ * ═══ EL TÍTULO DECÍA "EJECUTIVO" SIEMPRE (reporte de Jose, 2026-08-24) ═══
+ *
+ * *"Pedí un reporte de desempeño financiero, pero generó un reporte ejecutivo."*
+ *
+ * El tipo viajaba bien de punta a punta —la pantalla lo manda, el BFF lo reenvía, el worker lo
+ * pasa al prompt y `TYPE_INTRO` cambia lo que la IA escribe— pero el encabezado del documento
+ * estaba escrito a mano: `'Reporte ejecutivo'`, sin mirar `data.reportType`.
+ *
+ * O sea que el contenido SÍ era el pedido y el título decía otra cosa. Es la peor forma de
+ * este defecto: no hay nada roto que arreglar, hay un documento que se contradice a sí mismo, y
+ * quien lo abre no tiene por qué creerle al contenido si el encabezado le miente.
+ *
+ * Los cuatro nombres salen de `REPORT_TYPES`, así que agregar un tipo sin nombrarlo acá deja
+ * de compilar en vez de volver a titularlo "ejecutivo" en silencio.
+ */
+const TITULO_POR_TIPO: Record<ReportType, { es: string; en: string }> = {
+  executive_summary: { es: 'Reporte ejecutivo', en: 'Executive report' },
+  financial_performance: { es: 'Desempeño financiero', en: 'Financial performance' },
+  cost_analysis: { es: 'Análisis de costos', en: 'Cost analysis' },
+  sales_performance: { es: 'Desempeño de ventas', en: 'Sales performance' },
 };
 
 export interface RenderInput {
@@ -283,7 +308,7 @@ export function renderReportHtml(input: RenderInput): string {
     );
   }
 
-  const titulo = L({ es: 'Reporte ejecutivo', en: 'Executive report' });
+  const titulo = L(TITULO_POR_TIPO[data.reportType] ?? TITULO_POR_TIPO.executive_summary);
   return `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><title>${escapeHtml(
     `${titulo} ${data.periodStart} — ${data.periodEnd}`,
   )}</title><style>
@@ -560,7 +585,7 @@ export async function renderReportPdf(input: RenderInput): Promise<Uint8Array> {
   const xTexto = PAGE.margin + LOGO_ANCHO + LOGO_SEPARACION;
   page.drawText(
     sanitizeWinAnsi(
-      `${L({ es: 'Reporte ejecutivo', en: 'Executive report' })} — ${input.companyName}`,
+      `${L(TITULO_POR_TIPO[data.reportType] ?? TITULO_POR_TIPO.executive_summary)} — ${input.companyName}`,
     ),
     { x: xTexto, y, size: 16, font: bold, color: TINTA },
   );
@@ -825,7 +850,7 @@ export function renderReportXlsx(input: RenderInput): Buffer {
 
   const k = data.kpis;
   const resumen: (string | number | null)[][] = [
-    [L({ es: 'Reporte ejecutivo', en: 'Executive report' }), input.companyName],
+    [L(TITULO_POR_TIPO[data.reportType] ?? TITULO_POR_TIPO.executive_summary), input.companyName],
     [L({ es: 'Período', en: 'Period' }), `${data.periodStart} — ${data.periodEnd}`],
     [L({ es: 'Moneda base', en: 'Base currency' }), baseCurrency],
     [L({ es: 'Secciones', en: 'Sections' }), data.sections.join(', ')],
