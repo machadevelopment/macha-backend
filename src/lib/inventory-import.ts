@@ -77,7 +77,19 @@ export interface MapaDeInventario {
  */
 const PISTAS: Record<keyof MapaDeInventario, string[]> = {
   sku: ['sku', 'codigo', 'codigoproducto', 'codigoarticulo', 'idinsumo', 'idproducto', 'clave'],
-  name: ['nombreproducto', 'nombre', 'producto', 'insumo', 'articulo', 'descripcion'],
+  // `modelo` y `marca` son para el inventario SERIALIZADO: un vehículo no tiene "nombre de
+  // producto", tiene modelo. Van al final para que una hoja con las dos columnas prefiera la
+  // descriptiva. Sin esto el nombre caía al SKU y el cliente veía "INV-0001" en cada fila.
+  name: [
+    'nombreproducto',
+    'nombre',
+    'producto',
+    'insumo',
+    'articulo',
+    'descripcion',
+    'modelo',
+    'marca',
+  ],
   quantity: [
     'cantidaddisponible',
     'stockactual',
@@ -89,7 +101,7 @@ const PISTAS: Record<keyof MapaDeInventario, string[]> = {
   ],
   unitCost: ['costounitario', 'costopromedio', 'costo'],
   reorderPoint: ['puntoreorden', 'stockminimo', 'cantidadreorden', 'existenciaminima', 'minimo'],
-  location: ['ubicacion', 'bodega', 'almacen'],
+  location: ['ubicacion', 'bodega', 'almacen', 'sucursal', 'tienda'],
   supplier: ['proveedor'],
   status: ['estado', 'status', 'situacion', 'condicion', 'disponibilidad', 'estatus'],
 };
@@ -165,18 +177,14 @@ export function cuentaComoExistencia(valor: unknown): boolean {
  */
 export function mapearColumnasDeInventario(headerRow: unknown[]): MapaDeInventario | null {
   const normalizados = headerRow.map(normalizeHeader);
-  const buscar = (pistas: string[]): number | null => {
-    for (const pista of pistas) {
-      const idx = normalizados.indexOf(pista);
-      if (idx !== -1) return idx;
-    }
-    return null;
-  };
+  const buscar = (pistas: string[], soloExacto = false) =>
+    buscarColumna(normalizados, pistas, soloExacto);
 
   const mapa: MapaDeInventario = {
     sku: buscar(PISTAS.sku),
     name: buscar(PISTAS.name),
-    quantity: buscar(PISTAS.quantity),
+    // Exacta y nada más: ver `buscarColumna`. Una cantidad mal leída es un inventario falso.
+    quantity: buscar(PISTAS.quantity, true),
     unitCost: buscar(PISTAS.unitCost),
     reorderPoint: buscar(PISTAS.reorderPoint),
     location: buscar(PISTAS.location),
@@ -221,13 +229,8 @@ export function mapearInventarioSerializado(
   columnaDeSerie: number,
 ): MapaDeInventario | null {
   const normalizados = headerRow.map(normalizeHeader);
-  const buscar = (pistas: string[]): number | null => {
-    for (const pista of pistas) {
-      const idx = normalizados.indexOf(pista);
-      if (idx !== -1) return idx;
-    }
-    return null;
-  };
+  const buscar = (pistas: string[], soloExacto = false) =>
+    buscarColumna(normalizados, pistas, soloExacto);
 
   if (columnaDeSerie < 0 || columnaDeSerie >= headerRow.length) return null;
 
@@ -251,6 +254,40 @@ export function mapearInventarioSerializado(
     // importador (1 por fila), así que sin esto una unidad vendida contaría como existencia.
     status: buscar(PISTAS.status),
   };
+}
+
+/**
+ * Busca la columna de un concepto: primero por nombre EXACTO, después por PREFIJO.
+ *
+ * La segunda pasada existe por `Costo Adquisicion (Q)`, que normaliza a `costoadquisicion` y
+ * no era igual a ninguna pista. El inventario de CarsGT quedó entero con costo unitario 0 y el
+ * valor del stock en Q 0,00 teniendo Q 3.016.924 — la cifra que la pantalla existe para dar.
+ * Listar cada variante (`costoadquisicion`, `costocompra`, `costoimportacion`…) es la carrera
+ * que este módulo ya perdió una vez; el prefijo cubre la familia entera.
+ *
+ * El orden se conserva: TODAS las exactas antes que cualquier prefijo, así que una hoja que
+ * traiga `Costo Unitario` y `Costo Adquisición` sigue eligiendo la unitaria.
+ *
+ * `soloExacto` es para CANTIDAD, y es la excepción importante: por prefijo, `cantidad` también
+ * captura `Cantidad Vendida` o `Cantidad Pedida`, y ahí el falso positivo no deja una celda
+ * vacía — mete el número equivocado como existencia del cliente. Un costo mal leído se ve en
+ * la pantalla; una cantidad mal leída se ve como un inventario plausible y falso.
+ */
+function buscarColumna(
+  normalizados: string[],
+  pistas: string[],
+  soloExacto = false,
+): number | null {
+  for (const pista of pistas) {
+    const idx = normalizados.indexOf(pista);
+    if (idx !== -1) return idx;
+  }
+  if (soloExacto) return null;
+  for (const pista of pistas) {
+    const idx = normalizados.findIndex((h) => h.startsWith(pista));
+    if (idx !== -1) return idx;
+  }
+  return null;
 }
 
 const celda = (row: unknown[], idx: number | null): unknown =>

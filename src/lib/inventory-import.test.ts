@@ -214,9 +214,22 @@ describe('el estado decide si la unidad sigue en existencia', () => {
     'Dias en Inventario',
   ];
 
-  test('la hoja de la concesionaria expone su columna de estado', () => {
+  /**
+   * El mapa COMPLETO, no solo la columna que se acaba de tocar.
+   *
+   * La primera versión de este arreglo comprobó `status` y `quantity` y dio el trabajo por
+   * bueno. En producción el inventario quedó con el nombre en "INV-0001", el costo unitario en
+   * 0 y el valor del stock en Q 0,00 teniendo Q 3.016.924 — porque `Modelo`, `Costo Adquisicion
+   * (Q)` y `Sucursal` no estaban en ninguna lista de pistas. Afirmar el mapa entero es lo que
+   * habría hecho visible eso antes de desplegarlo.
+   */
+  test('la hoja de la concesionaria mapea TODAS sus columnas', () => {
     const mapa = mapearInventarioSerializado(encabezadoCarsGT, 0)!;
-    expect(mapa.status).toBe(11);
+    expect(mapa.sku).toBe(0); // ID Vehiculo — la serie, que es la identidad
+    expect(mapa.name).toBe(3); // Modelo, no el SKU repetido
+    expect(mapa.unitCost).toBe(7); // "Costo Adquisicion (Q)", por PREFIJO
+    expect(mapa.location).toBe(10); // Sucursal
+    expect(mapa.status).toBe(11); // Estado
     // Sigue siendo serializada: la cantidad la pone el importador, no la hoja.
     expect(mapa.quantity).toBeNull();
   });
@@ -242,6 +255,16 @@ describe('el estado decide si la unidad sigue en existencia', () => {
    * de menos le borra inventario real al cliente sin que nada falle, y eso no lo reporta
    * nadie porque se ve igual que "todavía no cargó".
    */
+  /**
+   * La CANTIDAD se busca solo por nombre exacto, y es la excepción a la búsqueda por prefijo.
+   *
+   * Por prefijo, `cantidad` también captura `Cantidad Vendida`. Un costo mal leído se ve en la
+   * pantalla; una cantidad mal leída se ve como un inventario plausible y falso.
+   */
+  test('una columna de "Cantidad Vendida" NO se toma como existencia', () => {
+    expect(mapearColumnasDeInventario(['SKU', 'Producto', 'Cantidad Vendida', 'Costo'])).toBeNull();
+  });
+
   test('un estado desconocido o vacío cuenta como existencia', () => {
     for (const v of [
       'Activo',
