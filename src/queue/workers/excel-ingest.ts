@@ -54,7 +54,12 @@ import { runWithConcurrency } from '@/lib/concurrency';
 import { insertAiUsageEvent } from '@/lib/ai-usage';
 import { promoteDocument } from '@/lib/promotion';
 import { refreshExistingRollups } from '@/lib/rollups';
-import { getActiveCreditRule, estimateRequiredCredits, debitCredits } from '@/lib/credits';
+import {
+  getActiveCreditRule,
+  estimateRequiredCredits,
+  debitCredits,
+  cargaYaDebitada,
+} from '@/lib/credits';
 
 type ExcelIngestPayload = { documentId: string; companyId: string };
 
@@ -894,29 +899,14 @@ export function startExcelIngestWorker(): Promise<string> {
                 });
             }
 
-            // Débito por lote (CU-868kfvaa6): la regla `excel` es variable, 1
-            // crédito/lote (scripts/seed.ts). Sin regla activa = sin cap, per v1
-            // (no bloquea ni descuenta) — mismo comportamiento que antes de F0.
-            //
-            // SE DEBITA IGUAL AUNQUE EL LOTE NO HAYA IDO AL MODELO, y es deliberado. Los
-            // créditos miden el trabajo hecho PARA el cliente (filas procesadas), no nuestro
-            // costo con el proveedor, y el cortocircuito no cambia cuántos lotes tiene su
-            // archivo. Cobrar distinto según por dónde se resolvió el lote movería el precio
-            // del producto sin que nadie lo haya decidido — y eso es de Jose, no de este
-            // worker. Si algún día se quiere pasar el ahorro al cliente, se cambia acá.
-            //
-            // Concurrente sin riesgo: `credit_transactions` es append-only y `debitCredits`
-            // es un INSERT sin lectura de saldo previa, así que dos débitos en vuelo no se
-            // pisan ni pueden leer un saldo obsoleto.
-            if (creditRule) {
-              await debitCredits(db, {
-                companyId,
-                actionKind: 'excel',
-                credits: estimateRequiredCredits(creditRule, 1),
-                creditRuleId: creditRule.id,
-                refId: documentId,
-              });
-            }
+            /*
+             * ═══ EL CRÉDITO NO SE COBRA ACÁ: SE COBRA UNA VEZ POR CARGA ═══
+             *
+             * Hasta el 2026-08-24 este bloque debitaba por LOTE. Con la regla activa en 25
+             * créditos, un archivo de 77 lotes cobraba 1.925 por una sola carga y dejaba a la
+             * empresa en negativo con su primer upload. Ver `cargaYaDebitada` para el detalle
+             * medido y por qué el débito se movió antes del bucle de lotes.
+             */
           });
 
           totalRowsProcessed += batch.length;
@@ -1284,6 +1274,34 @@ export function startExcelIngestWorker(): Promise<string> {
             const enSonda = new Set(elegirSonda(lista.length));
             lista.forEach((p, i) => (enSonda.has(i) ? sonda : resto).push(p));
           }
+        }
+
+        /*
+         * ═══ UN DÉBITO POR CARGA, NO POR LOTE (reporte de Jose, 2026-08-24) ═══
+         *
+         * Va acá y no dentro de `procesarLote` por dos motivos que se refuerzan: es el único
+         * punto donde se sabe que la carga SÍ va a procesarse —la planificación ya decidió qué
+         * hojas quedan vivas— y es código de una sola línea de ejecución, así que la
+         * comprobación de idempotencia no compite con los diez lotes concurrentes.
+         *
+         * `unidades = 1`: la unidad de cobro es la CARGA. La regla sigue siendo `variable`
+         * para no cambiar el catálogo, pero su multiplicador ya no es la cantidad de lotes —
+         * que era el número que hacía a un archivo grande costar setenta veces uno chico sin
+         * que nadie lo hubiera decidido.
+         *
+         * Sin regla activa no se debita ni se bloquea, igual que antes.
+         */
+        if (creditRule) {
+          await withCompanyScope(companyId, async (db) => {
+            if (await cargaYaDebitada(db, documentId)) return;
+            await debitCredits(db, {
+              companyId,
+              actionKind: 'excel',
+              credits: estimateRequiredCredits(creditRule, 1),
+              creditRuleId: creditRule.id,
+              refId: documentId,
+            });
+          });
         }
 
         const { errors: erroresSonda } = await runWithConcurrency(

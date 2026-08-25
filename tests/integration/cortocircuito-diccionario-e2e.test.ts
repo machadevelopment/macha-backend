@@ -458,13 +458,18 @@ describe('hoja heterogénea con conceptos ya conocidos: se salta la llamada', ()
      * CLIENTE, no nuestro costo con Anthropic. Un lote resuelto en código le entrega
      * exactamente el mismo resultado, así que cobrarlo distinto movería el precio del
      * producto — y eso no lo decide un mecanismo de ahorro.
+     *
+     * Lo que SÍ cambió (2026-08-24): la unidad de cobro es la CARGA, no el lote. Este test
+     * afirmaba `> SONDA_LOTES + 1`, o sea que esperaba MÁS débitos cuantos más lotes tuviera
+     * el archivo — que es exactamente el defecto que dejó a una empresa en -1.675 créditos.
+     * Lo que hay que fijar es que la carga se pagó, no cuántas veces.
      */
     const n = await unNumero(
       owner`select count(*)::int as n from credit_transactions
             where company_id = ${companyId} and reason = 'consumption'
               and action_kind = 'excel' and delta < 0`,
     );
-    expect(n).toBeGreaterThan(SONDA_LOTES + 1);
+    expect(n).toBe(1);
   });
 
   test('11) el documento quedó promovido, no atascado', async () => {
