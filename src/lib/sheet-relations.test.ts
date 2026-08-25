@@ -173,3 +173,55 @@ describe('tolerancias', () => {
     expect(e.entidades.has('Inventario')).toBe(true);
   });
 });
+
+/**
+ * ═══ EL AGUJERO QUE SE COMIÓ LAS VENTAS DE UN CLIENTE (HeladosGT, 2026-08-24) ═══
+ *
+ * Unas horas después de desplegar el esquema relacional, Jose subió el archivo de una
+ * heladería y reportó "ninguna información pasó bien": la hoja `Ventas` —435 filas— se
+ * registró como INVENTARIO, y su dashboard quedó con Q 58.334 de ingreso contra Q 1.797.772
+ * de gasto.
+ *
+ * El defecto es exacto: una hoja cuenta como tabla de entidades si otra la referencia y ella
+ * no referencia a nadie. En el archivo que motivó el mecanismo eso separaba bien —`Ventas`
+ * apuntaba a `Inventario`, así que quedaba excluida— pero **ese enlace es una casualidad de
+ * ese libro**. Sin hoja de inventario, `Ventas` queda terminal en el grafo.
+ *
+ * El test de arriba ("el libro de ventas NO") pasaba, porque su fixture tiene las tres hojas.
+ * Este cubre el libro de DOS hojas, que es donde el grafo solo no alcanza.
+ */
+describe('un libro sin hoja de inventario', () => {
+  /** Ventas referenciada por CuentasPorCobrar, y nada más. La forma de HeladosGT. */
+  const libroSinInventario = (): HojaParaComparar[] => {
+    const ventas: unknown[][] = [['IDVenta', 'Fecha', 'Cliente', 'Monto (Q)']];
+    for (let i = 0; i < 40; i++) ventas.push([`V-${i}`, 45_800 + i, `Cliente ${i}`, 100 + i]);
+
+    const cxc: unknown[][] = [['IDCxC', 'IDVenta', 'Fecha Factura', 'Monto Total (Q)']];
+    for (let i = 0; i < 12; i++) cxc.push([`C-${i}`, `V-${i}`, 45_810 + i, 50 + i]);
+
+    return [
+      { nombre: 'Ventas', rows: ventas },
+      { nombre: 'CuentasPorCobrar', rows: cxc },
+    ];
+  };
+
+  test('el grafo SOLO no alcanza: la hoja de ventas queda terminal', () => {
+    /*
+     * Se afirma el comportamiento REAL, no el deseado, y a propósito: este módulo lee la
+     * forma del libro y no sabe de contabilidad. Quien tiene que salvar a `Ventas` es el
+     * worker, con la segunda señal (`classifySheet`). Si algún día alguien "arregla" esto
+     * acá, este test le avisa que está tocando la capa equivocada.
+     */
+    const e = analizarEsquema(libroSinInventario());
+    expect(e.entidades.has('Ventas')).toBe(true);
+  });
+
+  test('y por eso el veredicto del esquema NUNCA basta solo', () => {
+    // La contraparte del test de arriba: en los dos libros la hoja referenciada es la que
+    // CONTIENE a la otra —el inventario contiene lo vendido, las ventas contienen lo que
+    // quedó por cobrar— así que la forma del grafo no puede distinguirlas ni en principio.
+    const e = analizarEsquema(libroSinInventario());
+    const r = e.referencias.find((x) => x.desde === 'CuentasPorCobrar');
+    expect(r?.hacia).toBe('Ventas');
+  });
+});
