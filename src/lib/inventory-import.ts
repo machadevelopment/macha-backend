@@ -2,7 +2,12 @@ import { and, eq, isNull, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { inventoryItems } from '@/db/schema';
 import { normalizeHeader } from './sheet-classifier';
-import { createItem, recordMovement, InventoryError } from '@/modules/inventory/service';
+import {
+  createItem,
+  recordMovement,
+  updateItem,
+  InventoryError,
+} from '@/modules/inventory/service';
 import type { Currency } from './fx';
 
 /**
@@ -325,6 +330,14 @@ export interface ResultadoDeImportacion {
   sinCambio: number;
   /** Filas que no se pudieron leer (sin identificador o sin cantidad válida). */
   omitidas: number;
+  /**
+   * SKUs ya existentes cuya FICHA (nombre, costo, ubicación) se corrigió desde el archivo.
+   *
+   * Se cuenta aparte de `ajustados` porque no es lo mismo: uno mueve existencia y el otro
+   * corrige datos descriptivos. Sin este contador, "240 sin cambio" sería un log que miente
+   * justo cuando el import acaba de reparar 240 fichas.
+   */
+  fichasCorregidas: number;
 }
 
 export interface ImportarInventarioParams {
@@ -362,7 +375,13 @@ export async function importarInventario(
    * Cuando no viene, se resuelve como siempre por vocabulario.
    */
   const mapa = params.mapa ?? mapearColumnasDeInventario(params.headerRow);
-  const out: ResultadoDeImportacion = { creados: 0, ajustados: 0, sinCambio: 0, omitidas: 0 };
+  const out: ResultadoDeImportacion = {
+    creados: 0,
+    ajustados: 0,
+    sinCambio: 0,
+    omitidas: 0,
+    fichasCorregidas: 0,
+  };
   if (!mapa) {
     out.omitidas = params.rows.length;
     return out;
@@ -456,7 +475,14 @@ export async function importarInventario(
 
     try {
       const [existente] = await db
-        .select({ id: inventoryItems.id, quantityOnHand: inventoryItems.quantityOnHand })
+        .select({
+          id: inventoryItems.id,
+          quantityOnHand: inventoryItems.quantityOnHand,
+          name: inventoryItems.name,
+          location: inventoryItems.location,
+          supplier: inventoryItems.supplier,
+          unitCostOriginal: inventoryItems.unitCostOriginal,
+        })
         .from(inventoryItems)
         .where(
           and(
@@ -481,6 +507,48 @@ export async function importarInventario(
         });
         out.creados++;
         continue;
+      }
+
+      /*
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       * LA FICHA TAMBIÉN SE CORRIGE DESDE EL ARCHIVO, NO SOLO LA EXISTENCIA
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       *
+       * Hasta acá, un SKU ya existente solo recibía su ajuste de cantidad: nombre, costo y
+       * ubicación se escribían UNA vez, al darlo de alta, y no se volvían a mirar nunca. La
+       * consecuencia se vio en CarsGT — el mapa de columnas no encontraba `Modelo` ni
+       * `Costo Adquisicion (Q)`, así que los 260 vehículos se dieron de alta con el SKU por
+       * nombre y costo 0. Arreglar el mapa no alcanzaba: **resubir el archivo corregía las
+       * cantidades y dejaba las fichas rotas para siempre**, sin forma de repararlas salvo a
+       * mano, uno por uno.
+       *
+       * El archivo es la fuente de verdad del catálogo por el mismo argumento que ya gobierna
+       * la cantidad: si el conteo del archivo pisa el saldo sin preguntar, su nombre puede
+       * pisar el nombre. Solo se escribe lo que el archivo TRAE — una columna ausente deja el
+       * valor guardado intacto, nunca lo borra.
+       */
+      const delArchivo = {
+        name: nombre,
+        location: texto(celda(row, mapa.location)),
+        supplier: texto(celda(row, mapa.supplier)),
+        unitCost: numero(celda(row, mapa.unitCost)),
+      };
+      const cambios: Parameters<typeof updateItem>[3] = {};
+      if (delArchivo.name !== existente.name) cambios.name = delArchivo.name;
+      if (delArchivo.location !== null && delArchivo.location !== existente.location)
+        cambios.location = delArchivo.location;
+      if (delArchivo.supplier !== null && delArchivo.supplier !== existente.supplier)
+        cambios.supplier = delArchivo.supplier;
+      if (
+        delArchivo.unitCost !== null &&
+        delArchivo.unitCost !== Number(existente.unitCostOriginal)
+      ) {
+        cambios.unitCost = delArchivo.unitCost;
+        cambios.unitCostCurrency = params.baseCurrency;
+      }
+      if (Object.keys(cambios).length > 0) {
+        await updateItem(db, params.companyId, existente.id, cambios);
+        out.fichasCorregidas++;
       }
 
       const enSistema = Number(existente.quantityOnHand);

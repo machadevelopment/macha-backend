@@ -82,7 +82,7 @@ describe('importación de inventario desde el Excel', () => {
       ['INS-001', 'Café en grano', 'kg', 40, 10],
       ['INS-002', 'Leche entera', 'lt', 25, 5],
     ]);
-    expect(r).toEqual({ creados: 2, ajustados: 0, sinCambio: 0, omitidas: 0 });
+    expect(r).toEqual({ creados: 2, ajustados: 0, sinCambio: 0, omitidas: 0, fichasCorregidas: 0 });
     expect(await existencia('INS-001')).toBe(40);
     expect(await existencia('INS-002')).toBe(25);
   });
@@ -107,14 +107,14 @@ describe('importación de inventario desde el Excel', () => {
       ['INS-001', 'Café en grano', 'kg', 40, 10],
       ['INS-002', 'Leche entera', 'lt', 25, 5],
     ]);
-    expect(r).toEqual({ creados: 0, ajustados: 0, sinCambio: 2, omitidas: 0 });
+    expect(r).toEqual({ creados: 0, ajustados: 0, sinCambio: 2, omitidas: 0, fichasCorregidas: 0 });
     expect(await existencia('INS-001')).toBe(40);
     expect(await existencia('INS-002')).toBe(25);
   });
 
   test('un conteo distinto se registra como AJUSTE por la diferencia', async () => {
     const r = await importar([['INS-001', 'Café en grano', 'kg', 33, 10]]);
-    expect(r).toEqual({ creados: 0, ajustados: 1, sinCambio: 0, omitidas: 0 });
+    expect(r).toEqual({ creados: 0, ajustados: 1, sinCambio: 0, omitidas: 0, fichasCorregidas: 0 });
     expect(await existencia('INS-001')).toBe(33);
 
     const [ajuste] = await owner`
@@ -135,7 +135,7 @@ describe('importación de inventario desde el Excel', () => {
       ['INS-001', 'Café en grano', 'kg', 33, 10],
       ['INS-003', 'Azúcar', 'kg', 12, 4],
     ]);
-    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 1, omitidas: 0 });
+    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 1, omitidas: 0, fichasCorregidas: 0 });
     expect(await existencia('INS-003')).toBe(12);
     expect(await existencia('INS-001')).toBe(33);
   });
@@ -147,7 +147,7 @@ describe('importación de inventario desde el Excel', () => {
       ['INS-005', 'Cantidad negativa', 'kg', -3, 1],
       ['INS-006', 'Válida', 'kg', 7, 1],
     ]);
-    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 0, omitidas: 3 });
+    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 0, omitidas: 3, fichasCorregidas: 0 });
     expect(await existencia('INS-006')).toBe(7);
     // Lo que no se pudo leer NO entró: nada de artículos fantasma con stock cero.
     expect(await existencia('INS-004')).toBeNull();
@@ -158,7 +158,7 @@ describe('importación de inventario desde el Excel', () => {
     // primera versión de este test daba esta fila por "ilegible" y estaba equivocado: sin
     // este camino, ese cliente no podría importar su inventario nunca.
     const r = await importar([[null, 'Canela en raja', 'kg', 3, 1]]);
-    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 0, omitidas: 0 });
+    expect(r).toEqual({ creados: 1, ajustados: 0, sinCambio: 0, omitidas: 0, fichasCorregidas: 0 });
     expect(await existencia('Canela en raja')).toBe(3);
   });
 
@@ -482,7 +482,13 @@ describe('importación de inventario desde el Excel', () => {
       ];
       const r = await importarCars(filas);
 
-      expect(r).toEqual({ creados: 0, ajustados: 0, sinCambio: 2, omitidas: 0 });
+      expect(r).toEqual({
+        creados: 0,
+        ajustados: 0,
+        sinCambio: 2,
+        omitidas: 0,
+        fichasCorregidas: 0,
+      });
       expect(await existencia('CAR-0001')).toBe(0);
       expect(await existencia('CAR-0003')).toBe(1);
     });
@@ -497,6 +503,59 @@ describe('importación de inventario desde el Excel', () => {
         ['CAR-0009', 'VIN0009', 'Mazda', 'CX-5', 180000, 'Mixco', 'En tránsito aduanal'],
       ]);
       expect(await existencia('CAR-0009')).toBe(1);
+    });
+
+    /**
+     * La FICHA se repara al resubir, no solo la existencia (2026-08-25).
+     *
+     * Los 260 vehículos de CarsGT se dieron de alta con el SKU por nombre y costo 0, porque el
+     * mapa no encontraba `Modelo` ni `Costo Adquisicion (Q)`. Arreglar el mapa no alcanzaba:
+     * un SKU ya existente solo recibía su ajuste de cantidad, así que resubir corregía las
+     * cantidades y dejaba las fichas rotas para siempre.
+     */
+    test('resubir CORRIGE el nombre y el costo de un artículo ya dado de alta', async () => {
+      // Alta como quedó en producción: el SKU por nombre, sin costo.
+      await importarInventario(db(), {
+        companyId: empresa,
+        documentId: docBase,
+        userId: usuario,
+        headerRow: ['ID Vehiculo', 'Estado'],
+        rows: [['CAR-0100', 'Disponible']],
+        baseCurrency: 'GTQ',
+        mapa: mapearInventarioSerializado(['ID Vehiculo', 'Estado'], 0),
+      });
+      const [antes] = await owner`
+        select name, unit_cost_original::float8 as costo from inventory_items
+        where company_id = ${empresa} and lower(sku) = 'car-0100'
+      `;
+      expect(antes!.name).toBe('CAR-0100');
+      expect(antes!.costo).toBe(0);
+
+      // Misma hoja, ahora con las columnas que el mapa arreglado sí encuentra.
+      const r = await importarCars([
+        ['CAR-0100', 'VIN0100', 'Toyota', 'Corolla', 118500, 'Mixco', 'Disponible'],
+      ]);
+
+      expect(r.fichasCorregidas).toBe(1);
+      // La existencia no se movió: seguía siendo 1 y sigue siendo 1.
+      expect(r.sinCambio).toBe(1);
+      expect(await existencia('CAR-0100')).toBe(1);
+
+      const [despues] = await owner`
+        select name, location, unit_cost_original::float8 as costo from inventory_items
+        where company_id = ${empresa} and lower(sku) = 'car-0100'
+      `;
+      expect(despues!.name).toBe('Corolla');
+      expect(despues!.location).toBe('Mixco');
+      expect(despues!.costo).toBe(118500);
+    });
+
+    test('una segunda pasada con la ficha ya correcta no vuelve a escribir', async () => {
+      const r = await importarCars([
+        ['CAR-0100', 'VIN0100', 'Toyota', 'Corolla', 118500, 'Mixco', 'Disponible'],
+      ]);
+      expect(r.fichasCorregidas).toBe(0);
+      expect(r.sinCambio).toBe(1);
     });
   });
 });
