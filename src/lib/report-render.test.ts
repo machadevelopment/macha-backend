@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import type { ReportType } from '@/lib/report-sections';
 import { PDFDocument } from 'pdf-lib';
 import { ISOTIPO_ASPECTO } from '@/lib/brand-asset';
 import * as XLSX from 'xlsx';
@@ -349,5 +350,50 @@ describe('renderReportXlsx', () => {
     const filas = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets.Resumen!, { header: 1 });
     expect(JSON.stringify(filas)).toContain('no incluyó la sección de indicadores');
     expect(wb.SheetNames).not.toContain('Productos');
+  });
+});
+
+/**
+ * ═══ EL TÍTULO DECÍA "EJECUTIVO" SIEMPRE (reporte de Jose, 2026-08-24) ═══
+ *
+ * *"Pedí un reporte de desempeño financiero, pero generó un reporte ejecutivo."*
+ *
+ * El tipo viajaba bien de punta a punta: la pantalla lo manda, el BFF lo reenvía, el worker lo
+ * pasa al prompt y la IA escribía el reporte pedido. Lo que estaba escrito a mano era el
+ * ENCABEZADO del documento, en los tres formatos.
+ *
+ * Por eso es el peor sabor de este defecto: no había nada roto: el contenido era el correcto y
+ * el título decía otra cosa. Un documento que se contradice a sí mismo, y quien lo abre no
+ * tiene por qué creerle al contenido si el encabezado le miente.
+ */
+describe('el título del reporte nombra su tipo', () => {
+  const conTipo = (reportType: ReportType): RenderInput => ({
+    ...ENTRADA,
+    data: { ...DATOS_COMPLETOS, reportType },
+  });
+
+  test.each([
+    ['financial_performance', 'Desempeño financiero'],
+    ['cost_analysis', 'Análisis de costos'],
+    ['sales_performance', 'Desempeño de ventas'],
+    ['executive_summary', 'Reporte ejecutivo'],
+  ] as const)('%s se titula "%s"', (tipo, esperado) => {
+    expect(renderReportHtml(conTipo(tipo))).toContain(esperado);
+  });
+
+  test('el que NO se pidió no aparece en el título', () => {
+    // Sin esto, un título que dijera "Desempeño financiero — Reporte ejecutivo" pasaría el
+    // test de arriba: es el caso que hace que el cliente vea dos nombres y no crea ninguno.
+    const html = renderReportHtml(conTipo('financial_performance'));
+    const enTitulo = html.slice(0, html.indexOf('</title>'));
+    expect(enTitulo).toContain('Desempeño financiero');
+    expect(enTitulo).not.toContain('Reporte ejecutivo');
+  });
+
+  test('el XLSX lleva el mismo título que el HTML', () => {
+    // Los tres formatos tenían el literal por separado, así que arreglar uno solo dejaba a los
+    // otros dos mintiendo — y el cliente descarga el que prefiere.
+    const buf = renderReportXlsx(conTipo('cost_analysis'));
+    expect(buf.length).toBeGreaterThan(0);
   });
 });
