@@ -177,3 +177,113 @@ describe('una tabla con columnas descriptivas encuentra su encabezado', () => {
     expect(detectarFilaDeEncabezado(rows)).toBe(0);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL TÍTULO ANGOSTO Y EL TÍTULO ANCHO — dos formas de quedarse en la fila 0 (2026-08-25)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Salieron de correr el pipeline determinista completo contra un corpus de libros de cinco
+ * rubros generados para eso. El primero apareció en la hoja de catálogo de clientes de una
+ * joyería y es el que importa, porque su daño es en cascada y silencioso: si el detector se
+ * queda en el título, `classifySheet` recibe una sola celda, la declara ilegible, y **se apagan
+ * a la vez el pre-filtro de catálogos, la firma de existencias y la forma de hoja**. El
+ * catálogo entero va al modelo y sus filas quedan a un veredicto de convertirse en movimientos
+ * que el cliente nunca tuvo.
+ *
+ * Ninguna de las dos señales que existían podía verlo, y no por descuido: en una hoja de puro
+ * texto el encabezado y los datos puntúan igual, y ninguna columna cambia de tipo.
+ */
+describe('una fila de título no es un encabezado', () => {
+  test('el catálogo de clientes: título de una celda sobre una tabla de seis', () => {
+    const rows: unknown[][] = [
+      ['Catalogo de Clientes'],
+      ['Base de clientes'],
+      ['ID Cliente', 'Nombre', 'Apellido', 'Email', 'Telefono', 'Nivel Lealtad'],
+    ];
+    for (let i = 0; i < 8; i++) {
+      rows.push([`C-${i}`, `Nombre${i}`, `Apellido${i}`, `c${i}@mail.com`, `5555-000${i}`, 'Oro']);
+    }
+    expect(detectarFilaDeEncabezado(rows)).toBe(2);
+  });
+
+  test('cuatro líneas de título seguidas', () => {
+    const rows: unknown[][] = [
+      ['FERRETERIA EL TORNILLO'],
+      ['Reporte de ventas'],
+      ['Periodo: enero a diciembre 2025'],
+      ['Generado por: sistema'],
+      ['Fecha', 'Producto', 'Cantidad', 'Total'],
+      ['2025-01-05', 'Martillo', 2, 300],
+      ['2025-01-06', 'Clavos', 10, 150],
+      ['2025-01-07', 'Pintura', 3, 900],
+    ];
+    expect(detectarFilaDeEncabezado(rows)).toBe(4);
+  });
+
+  /*
+   * La otra forma: el título llena TODA la fila, así que la guarda geométrica no aplica. Lo
+   * resuelve que el encabezado rompa el tipo de sus columnas — `Cantidad` y `Total` son texto
+   * arriba y números abajo. Es el formato que exportan varios sistemas contables
+   * ("Empresa: | ACME | Periodo: | 2025").
+   */
+  test('el título ancho: mismas celdas que el encabezado, todo texto', () => {
+    const rows: unknown[][] = [
+      ['Reporte', 'de', 'Ventas', '2025', 'Confidencial'],
+      ['Fecha', 'Producto', 'Cantidad', 'Total', 'Sucursal'],
+      ['2025-01-05', 'Martillo', 2, 300, 'Centro'],
+      ['2025-01-06', 'Clavos', 10, 150, 'Centro'],
+      ['2025-01-07', 'Pintura', 3, 900, 'Norte'],
+    ];
+    expect(detectarFilaDeEncabezado(rows)).toBe(1);
+  });
+
+  test('los montos que vienen como TEXTO no apagan la detección', () => {
+    // `rompeElTipoDeSusColumnas` da 0 acá (todo es texto); lo salva la guarda geométrica.
+    const rows: unknown[][] = [
+      ['Gastos del Periodo'],
+      ['Fecha', 'Concepto', 'Monto'],
+      ['05/01/2025', 'Nomina', 'Q 12,500.00'],
+      ['06/01/2025', 'Renta', 'Q 8,000.00'],
+      ['07/01/2025', 'Luz', 'Q 1,240.50'],
+    ];
+    expect(detectarFilaDeEncabezado(rows)).toBe(1);
+  });
+
+  describe('y el sesgo de no moverse se conserva', () => {
+    test('una tabla de UNA columna no activa la guarda', () => {
+      const rows: unknown[][] = [['Notas'], ['Primera'], ['Segunda'], ['Tercera'], ['Cuarta']];
+      expect(detectarFilaDeEncabezado(rows)).toBe(0);
+    });
+
+    test('sin título, la fila 0 YA es el encabezado', () => {
+      const rows: unknown[][] = [
+        ['ID', 'Nombre', 'Apellido', 'Email'],
+        ['C-1', 'Ana', 'Lopez', 'a@x.com'],
+        ['C-2', 'Luis', 'Perez', 'l@x.com'],
+        ['C-3', 'Eva', 'Diaz', 'e@x.com'],
+      ];
+      expect(detectarFilaDeEncabezado(rows)).toBe(0);
+    });
+
+    test('una hoja sin cuerpo no adivina: la guarda se desactiva sola', () => {
+      expect(detectarFilaDeEncabezado([['Hoja en blanco'], [], []])).toBe(0);
+    });
+
+    /*
+     * La PRIMERA fila de datos a medio llenar no puede bajar el ancho típico del cuerpo: por eso
+     * se usa la mediana de varias filas y no la de al lado.
+     */
+    test('una fila de datos incompleta no mueve el ancho del cuerpo', () => {
+      const rows: unknown[][] = [
+        ['Inventario'],
+        ['SKU', 'Producto', 'Cantidad', 'Costo', 'Ubicacion'],
+        ['A-1', 'Tornillo'],
+        ['A-2', 'Tuerca', 40, 3, 'Bodega'],
+        ['A-3', 'Arandela', 90, 1, 'Bodega'],
+        ['A-4', 'Clavo', 25, 2, 'Bodega'],
+      ];
+      expect(detectarFilaDeEncabezado(rows)).toBe(1);
+    });
+  });
+});

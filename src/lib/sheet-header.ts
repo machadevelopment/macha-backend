@@ -149,6 +149,68 @@ function rompeElTipoDeSusColumnas(rows: unknown[][], i: number, anchoMaximo: num
  */
 const MIN_COLUMNAS_QUE_CAMBIAN_DE_TIPO = 0.25;
 
+/** Cuántas celdas de la fila traen algo. Es el ANCHO ÚTIL, no `length`. */
+const celdasLlenas = (fila: unknown[]): number => fila.filter((c) => !vacia(c)).length;
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA FILA DE UNA CELDA NO ES EL ENCABEZADO DE UNA TABLA DE SEIS COLUMNAS
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Todo lo demás de este módulo compara filas por cómo se VEN —cuánto texto traen, si rompen el
+ * tipo de su columna—. Esta señal es de otra naturaleza y por eso va antes: es GEOMÉTRICA. Una
+ * fila que llena una celda no puede ser el encabezado de una tabla cuyo cuerpo llena seis, sin
+ * importar qué diga, en qué idioma, ni de qué tipo sean los datos.
+ *
+ * ═══ EL CASO QUE LO DESTAPA, Y POR QUÉ NINGUNA OTRA SEÑAL LO VE ═══
+ *
+ * Una hoja de catálogo de clientes:
+ *
+ *     [0] ancho 1   "Catalogo de Clientes"                        ← el detector elegía ESTA
+ *     [1] ancho 1   "Base de clientes"
+ *     [2] ancho 6   ID Cliente · Nombre · Apellido · Email · …    ← el encabezado real
+ *     [3] ancho 6   C-000 · Nombre0 · Apellido0 · c0@mail.com…
+ *
+ * Las dos vías que existían fallan las dos, y no por descuido:
+ *
+ *   · "verse más encabezado que las filas de abajo" no distingue nada cuando TODA la hoja es
+ *     texto — el encabezado y los datos puntúan igual;
+ *   · `rompeElTipoDeSusColumnas` devuelve 0 por construcción, porque ninguna columna cambia de
+ *     tipo: "Telefono" es texto y "5555-0001" también.
+ *
+ * El comentario de ese bloque decía que quedarse en la fila 0 acá era el sesgo correcto,
+ * "sin descartar un dato real". Y la premisa es cierta: no se descarta ningún dato. Lo que no
+ * se evaluó es lo que cuesta quedarse: `classifySheet` recibe `["Catalogo de Clientes"]`, una
+ * celda, lo declara ilegible y **se apagan a la vez el pre-filtro de catálogos, la firma de
+ * existencias y la forma de hoja**. El catálogo entero va al modelo, se paga por él, y sus
+ * filas quedan a un veredicto de distancia de convertirse en movimientos que el cliente nunca
+ * tuvo. Es el mismo fallo en cascada que ya costó el archivo más caro de la semana, entrando
+ * por otra puerta.
+ *
+ * ═══ POR QUÉ NO EXIGE "DESTACAR" ═══
+ *
+ * Cuando la fila 0 es geométricamente imposible, no hay nada que desempatar: ya sabemos que no
+ * es el encabezado, y lo correcto es lo que haría una persona mirando la hoja — el encabezado
+ * es la primera fila que llena la tabla. Exigirle además que "destaque" es lo que dejaba el
+ * caso sin resolver.
+ *
+ * ═══ EL UMBRAL, Y POR QUÉ ES LA MITAD ═══
+ *
+ * Se exige cubrir la MITAD del ancho del cuerpo, no todo: un encabezado real puede traer
+ * columnas sin nombre. Un título llena una celda de seis (0,17) y queda lejísimos; un
+ * encabezado con un par de huecos queda holgadamente adentro. Y si la hoja no tiene cuerpo del
+ * cual medir, la comprobación se desactiva sola en vez de adivinar.
+ */
+function anchoDelCuerpo(rows: unknown[][]): number {
+  const muestras = rows
+    .slice(1, 9)
+    .map(celdasLlenas)
+    .filter((n) => n > 0)
+    .sort((a, b) => a - b);
+  // Mediana y no promedio: una fila de subtotal a medio llenar no puede mover el ancho típico.
+  return muestras.length === 0 ? 0 : muestras[Math.floor(muestras.length / 2)]!;
+}
+
 /**
  * Índice de la fila de encabezados. `0` si no hay evidencia clara de otra cosa.
  *
@@ -163,6 +225,23 @@ export function detectarFilaDeEncabezado(rows: unknown[][]): number {
 
   const anchoMaximo = Math.max(...rows.map((f) => f.length));
   const limite = Math.min(MAX_FILAS_A_MIRAR, rows.length - 1);
+
+  /*
+   * Antes que cualquier comparación: ¿puede la fila 0 ser el encabezado de esta tabla? Si
+   * llena mucho menos que el cuerpo, es un título, y el encabezado es la primera fila que sí
+   * lo llena. Ver el bloque de `anchoDelCuerpo` para el caso que lo motiva.
+   */
+  const anchoTabla = anchoDelCuerpo(rows);
+  const cubreLaTabla = (fila: unknown[]) =>
+    anchoTabla === 0 || celdasLlenas(fila) * 2 >= anchoTabla;
+
+  if (!cubreLaTabla(rows[0] ?? [])) {
+    for (let i = 1; i < limite; i++) {
+      if (cubreLaTabla(rows[i]!)) return i;
+    }
+    // Ninguna fila llena la tabla: no hay tabla que encontrar y se conserva el sesgo de casa.
+    return 0;
+  }
 
   const base = puntaje(rows[0] ?? [], anchoMaximo);
   let mejor = 0;
@@ -191,11 +270,29 @@ export function detectarFilaDeEncabezado(rows: unknown[][]): number {
      * cuánto texto tenga la tabla. Sin la segunda vía, ninguna hoja con columnas descriptivas
      * podía encontrar su encabezado — ver la nota de `rompeElTipoDeSusColumnas`.
      */
-    const destaca =
-      p > promedioSiguientes + 0.2 ||
+    const rompeElTipo =
       rompeElTipoDeSusColumnas(rows, i, anchoMaximo) >= MIN_COLUMNAS_QUE_CAMBIAN_DE_TIPO;
+    const destaca = p > promedioSiguientes + 0.2 || rompeElTipo;
 
-    if (p > mejorPuntaje + 0.15 && destaca) {
+    /*
+     * ═══ EL MARGEN DE PUNTAJE NO APLICA CUANDO EL CANDIDATO ROMPE EL TIPO ═══
+     *
+     * El 0,15 existe para que una fila apenas mejor no mueva el corte, y para el camino
+     * original sigue intacto — la condición de abajo es la misma de siempre cuando no hay
+     * evidencia de tipo.
+     *
+     * Pero cuando el candidato ROMPE EL TIPO de sus columnas, ese margen deja de proteger y
+     * pasa a estorbar. El puntaje mide "cuánto se parece esto a un encabezado" mirando la fila
+     * sola; romper el tipo mide la fila CONTRA SUS PROPIOS DATOS, que es evidencia mucho más
+     * específica. Cuando las dos se contradicen, gana la segunda.
+     *
+     * El caso: un título de ancho completo y puro texto —"Reporte | de | Ventas | 2025 |
+     * Confidencial", o el "Empresa: | ACME | Periodo: | 2025" que exportan varios sistemas
+     * contables— empata en puntaje con el encabezado real de abajo y le gana por ser primero.
+     * La guarda geométrica no lo salva porque el título SÍ llena la tabla. Sin esto la hoja se
+     * queda en la fila 0, que es el fallo en cascada que apaga el pre-filtro entero.
+     */
+    if (destaca && (rompeElTipo ? p >= mejorPuntaje : p > mejorPuntaje + 0.15)) {
       mejor = i;
       mejorPuntaje = p;
     }
