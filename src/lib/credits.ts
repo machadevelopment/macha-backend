@@ -70,6 +70,49 @@ export function estimateRequiredCredits(
 }
 
 /**
+ * ¿Esta carga YA pagó sus créditos?
+ *
+ * ═══ POR QUÉ HACE FALTA (reporte de Jose, 2026-08-24) ═══
+ *
+ * El débito de la ingesta se cobraba POR LOTE, y la regla activa vale 25. Un archivo con 77
+ * lotes cobraba 1.925 créditos por UNA carga. Medido en producción el día del reporte:
+ *
+ *     Electro Hogar       77 lotes × 25 = 1.925   saldo final: -1.675
+ *     Prueba Modo Test    22 lotes × 25 =   550
+ *     CarsGT              14 lotes × 25 =   350
+ *
+ * Jose lo diagnosticó exacto: *"que no importa la cantidad de llamadas sino que dependa de la
+ * cantidad de upload"*. Una empresa con 250 créditos incluidos quedaba en negativo con su
+ * PRIMERA carga, que es la peor primera impresión posible del producto.
+ *
+ * ═══ POR QUÉ UNA CONSULTA Y NO UN CANDADO ═══
+ *
+ * El débito pasa a ser uno por documento, pero el worker es REANUDABLE: si el job se reintenta,
+ * vuelve a entrar por el mismo camino. La idempotencia por lote la daba `document_ingest_batches`
+ * (su índice único hacía que un lote ya confirmado ni llegara al débito); un débito por documento
+ * necesita su propia comprobación, y `credit_transactions` es append-only —no admite un
+ * `ON CONFLICT`— así que se consulta.
+ *
+ * La consulta corre UNA vez por ejecución, antes de que arranquen los lotes concurrentes, así
+ * que no hay carrera entre lotes. Dos ejecuciones simultáneas del MISMO documento no ocurren:
+ * pg-boss no entrega el mismo job dos veces a la vez.
+ */
+export async function cargaYaDebitada(db: DB, documentId: string): Promise<boolean> {
+  const [fila] = await db
+    .select({ id: creditTransactions.id })
+    .from(creditTransactions)
+    .where(
+      and(
+        eq(creditTransactions.refId, documentId),
+        eq(creditTransactions.reason, 'consumption'),
+        eq(creditTransactions.actionKind, 'excel'),
+      ),
+    )
+    .limit(1);
+  return fila !== undefined;
+}
+
+/**
  * Débito de créditos (CU-868kfvaa6, append-only). `refId` es el objeto origen
  * (document_id/chat_id/report_id/insight_requests.id según action_kind).
  */
