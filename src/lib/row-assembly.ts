@@ -148,8 +148,51 @@ export function asNumber(value: unknown): number | null {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
 
-  const limpio = value.replace(/[^0-9.,-]/g, '').trim();
-  if (limpio === '') return null;
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * UN CÓDIGO DE PRODUCTO NO ES UN MONTO
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Antes se borraba TODO lo que no fuera dígito, coma, punto o guion. Medido (2026-08-25):
+   *
+   *     "SKU-4567"  →  -4567
+   *     "CLI-0001"  →      -1
+   *     "Zona 10"   →      10
+   *
+   * O sea que un identificador de catálogo salía convertido en un monto negativo plausible.
+   * Es el mismo defecto que `asDate` tenía con `new Date("CLI-0001")`, sobre la otra mitad de
+   * la fila, y con la misma consecuencia: si el mapa de columnas apunta a una columna de
+   * código —y `ID Cliente` es la primera columna de media base de archivos— cada fila entra
+   * con una cifra inventada que ninguna validación puede desmentir, porque es un número.
+   *
+   * Ahora solo se quita la decoración de moneda que un archivo real trae, y lo que queda
+   * tiene que ser un número Y NADA MÁS. Una cadena con letras pegadas a los dígitos es un
+   * código, no plata, y vale `null` — la fila se marca para revisión en vez de inventarle un
+   * monto.
+   */
+  let texto = value.trim();
+  if (texto === '') return null;
+
+  // Paréntesis contables: `(1,234.56)` es un negativo, no un adorno.
+  let negativo = false;
+  if (/^\(.*\)$/.test(texto)) {
+    negativo = true;
+    texto = texto.slice(1, -1).trim();
+  }
+
+  // Símbolo o código de moneda, delante o detrás. Los códigos largos van primero: sin eso,
+  // `GTQ 100` perdería solo la `Q` y quedaría `GT 100`, que ya no es un número.
+  const MONEDA = /US\$|GTQ|USD|EUR|MXN|[Q$€]/i;
+  texto = texto
+    .replace(new RegExp(`^\\s*(?:${MONEDA.source})\\s*`, 'i'), '')
+    .replace(new RegExp(`\\s*(?:${MONEDA.source})\\s*$`, 'i'), '')
+    .trim();
+
+  // Lo que queda: signo opcional, dígitos y separadores. Cualquier letra lo descalifica.
+  if (!/^-?[\d.,\s]*\d[\d.,\s]*$/.test(texto)) return null;
+
+  const limpio = (negativo ? `-${texto}` : texto).replace(/\s/g, '');
+  if (limpio === '' || limpio === '-') return null;
 
   /*
    * La coma puede ser separador de miles (1,234.50) o decimal (1234,50). Se decide por
@@ -251,9 +294,58 @@ export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | n
     return d.toISOString().slice(0, 10);
   }
 
-  // ISO (`2025-05-01`) y todo lo demás siguen por el camino de siempre: ahí no hay ambigüedad.
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * `new Date(string)` CONVIERTE UN CÓDIGO DE CLIENTE EN UNA FECHA CREÍBLE
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Medido (2026-08-25), y no es un caso raro:
+   *
+   *     new Date("CLI-0001")  →  2001-01-01
+   *     new Date("RUT-001")   →  2001-01-01
+   *     new Date("PRY-002")   →  2001-02-01
+   *
+   * La especificación de JavaScript solo garantiza el parseo de ISO 8601; para cualquier otra
+   * cadena el comportamiento queda a criterio del motor, y el de V8 es tan permisivo que un
+   * identificador de catálogo sale convertido en una fecha perfectamente plausible.
+   *
+   * El daño es el mismo que el bloque de arriba ya evita para los NÚMEROS con su rango de
+   * plausibilidad: si el mapa de columnas apunta a una columna de ID —y eso pasa: `ID Cliente`
+   * es la primera columna de media base de archivos— cada fila entra con una fecha inventada
+   * que ninguna validación puede desmentir, porque es una fecha válida. El camino de texto no
+   * tenía esa guarda.
+   *
+   * Y encima desarma el filtro de catálogos: una hoja de clientes o de rutas "tiene fechas" en
+   * su columna de código, así que no se reconoce como catálogo y se va al modelo. Fueron las
+   * siete discrepancias que destapó la auditoría contra el validador de extracción.
+   *
+   * ═══ LISTA BLANCA, NO LISTA NEGRA ═══
+   *
+   * No se puede enumerar lo que `new Date` acepta de más — es la definición del problema. Se
+   * enumera lo que SÍ es una fecha: los formatos que aparecen en los archivos reales. Todo lo
+   * demás es `null`, y `staging-rules` marca la fila para revisión en vez de inventarle un día.
+   */
+  const FORMATOS_DE_FECHA = [
+    // ISO, con o sin hora: `2025-05-01`, `2025-05-01T10:30:00`
+    /^\d{4}-\d{2}-\d{2}([T ].*)?$/,
+    // Año primero con barras: `2025/05/01`
+    /^\d{4}[/.]\d{1,2}[/.]\d{1,2}$/,
+    // Mes en palabras: `05-May-2025`, `5 May 2025`, `May 5, 2025`, `1 de mayo de 2025`
+    /^\d{1,2}[\s-]*(?:de\s+)?[a-zA-Z]{3,10}\.?[\s-]*(?:de\s+)?\d{2,4}$/,
+    /^[a-zA-Z]{3,10}\.?\s+\d{1,2},?\s+\d{4}$/,
+  ];
+  if (!FORMATOS_DE_FECHA.some((re) => re.test(s))) return null;
+
   const parsed = new Date(s);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+  if (Number.isNaN(parsed.getTime())) return null;
+  /*
+   * Rango de plausibilidad de negocio, igual que en el camino numérico: un movimiento de una
+   * PYME no ocurrió en 1901 ni va a ocurrir en 2200. Acota lo que un formato reconocido pero
+   * mal escrito puede producir.
+   */
+  const anio = parsed.getUTCFullYear();
+  if (anio < 1990 || anio > 2100) return null;
+  return parsed.toISOString().slice(0, 10);
 }
 
 /**

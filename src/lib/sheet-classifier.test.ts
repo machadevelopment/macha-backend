@@ -4,7 +4,7 @@ import {
   classifySheet,
   firmaDeCatalogo,
   pareceLibroDeMovimientos,
-  sinNingunaFecha,
+  noPuedeProducirMovimientos,
 } from './sheet-classifier';
 
 /**
@@ -377,53 +377,71 @@ describe('un inventario de mostrador no usa vocabulario de bodega', () => {
  * No rompe el sesgo de "ante la duda, al modelo": un movimiento sin fecha lo rechaza
  * `staging-rules` por `invalid_date`. Lo único que cambia es dónde se detiene.
  */
-describe('una hoja sin una sola fecha no puede producir movimientos', () => {
-  const leer = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+describe('una hoja que no puede producir movimientos se descarta', () => {
+  const leerFecha = (v: unknown) =>
+    typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  const leerNumero = (v: unknown) => (typeof v === 'number' ? v : null);
+  const juzgar = (rows: unknown[][]) => noPuedeProducirMovimientos(rows, leerFecha, leerNumero);
 
-  test('un catálogo de rutas o de flota se descarta', () => {
-    const rutas = [
-      ['ID Ruta', 'Ruta', 'Distancia (km)', 'Tiempo Estimado'],
-      ...Array.from({ length: 10 }, (_, i) => [`R-${i}`, `Ruta ${i}`, 100 + i, `${i}h`]),
-    ];
-    expect(sinNingunaFecha(rutas, leer)).toBe(true);
+  test('un catálogo de rutas: ni una fecha en toda la hoja', () => {
+    expect(
+      juzgar([
+        ['ID Ruta', 'Ruta', 'Distancia (km)', 'Tiempo Estimado'],
+        ...Array.from({ length: 10 }, (_, i) => [`R-${i}`, `Ruta ${i}`, 100 + i, 3]),
+      ]),
+    ).toBe(true);
   });
 
   /*
-   * Lo que la hace segura: se mira el CONTENIDO. Una hoja de movimientos cuya columna se llame
-   * `Emisión` o `Corte` no tiene ninguna palabra reconocible, pero sus celdas traen fechas.
+   * El catálogo de clientes de un bufete SÍ tiene una fecha real (`Fecha Alta`). Lo que no
+   * tiene es plata en ninguna otra columna — y las dos mitades hacen falta.
    */
-  test('una hoja de movimientos con la columna mal nombrada NO se descarta', () => {
-    const raro = [
-      ['Ref', 'Emision', 'Detalle', 'Importe'],
-      ...Array.from({ length: 10 }, (_, i) => [
-        `F-${i}`,
-        `2025-0${(i % 9) + 1}-15`,
-        'Servicio',
-        100,
+  test('un catálogo CON fecha pero sin dinero también se descarta', () => {
+    expect(
+      juzgar([
+        ['ID Cliente', 'Nombre', 'Tipo', 'Area Principal', 'Fecha Alta'],
+        ...Array.from({ length: 10 }, (_, i) => [
+          `CLI-${i}`,
+          `Cliente ${i}`,
+          'Empresa',
+          'Laboral',
+          `2024-0${(i % 9) + 1}-15`,
+        ]),
       ]),
-    ];
-    expect(sinNingunaFecha(raro, leer)).toBe(false);
+    ).toBe(true);
   });
 
-  test('basta UNA celda con fecha en toda la muestra', () => {
-    const casi = [
-      ['A', 'B', 'C'],
-      ...Array.from({ length: 9 }, () => ['x', 'y', 'z']),
-      ['x', '2025-05-01', 'z'],
-    ];
-    expect(sinNingunaFecha(casi, leer)).toBe(false);
+  /*
+   * Lo que hace segura la señal: la fecha y el dinero se buscan en columnas DISTINTAS. Una
+   * hoja de movimientos cuyos montos caen todos en el rango de seriales de Excel (decenas de
+   * miles) NO se descarta, porque su fecha sigue siendo otra columna.
+   */
+  test('una hoja de movimientos con montos de cinco cifras NO se descarta', () => {
+    expect(
+      juzgar([
+        ['Fecha', 'Concepto', 'Monto'],
+        ...Array.from({ length: 10 }, (_, i) => [`2025-0${(i % 9) + 1}-10`, 'Venta', 45_000 + i]),
+      ]),
+    ).toBe(false);
+  });
+
+  test('una hoja de movimientos con la columna mal nombrada NO se descarta', () => {
+    // Se juzga el CONTENIDO: `Emision` no está en ningún vocabulario, pero trae fechas.
+    expect(
+      juzgar([
+        ['Ref', 'Emision', 'Detalle', 'Importe'],
+        ...Array.from({ length: 10 }, (_, i) => [`F-${i}`, `2025-0${(i % 9) + 1}-15`, 'Serv', 100]),
+      ]),
+    ).toBe(false);
   });
 
   test('una hoja chica se manda igual: no se puede afirmar nada con tres filas', () => {
     expect(
-      sinNingunaFecha(
-        [
-          ['A', 'B'],
-          ['x', 'y'],
-          ['x', 'y'],
-        ],
-        leer,
-      ),
+      juzgar([
+        ['A', 'B'],
+        ['x', 'y'],
+        ['x', 'y'],
+      ]),
     ).toBe(false);
   });
 });

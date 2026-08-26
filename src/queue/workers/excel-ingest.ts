@@ -18,7 +18,7 @@ import {
   fusionarMapaDeColumnas,
   type VeredictoCrudo,
 } from '@/lib/anthropic';
-import { asDate, type ColumnMap } from '@/lib/row-assembly';
+import { asDate, asNumber, type ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import {
@@ -37,8 +37,8 @@ import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
 import {
   canSkipSheet,
   firmaDeCatalogo,
+  noPuedeProducirMovimientos,
   pareceLibroDeMovimientos,
-  sinNingunaFecha,
 } from '@/lib/sheet-classifier';
 import {
   importarInventario,
@@ -727,7 +727,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * de movimientos cuya columna se llame `Emisión` o `Corte` no tiene ninguna palabra
            * que el vocabulario reconozca, pero sus celdas siguen trayendo fechas.
            */
-          if (sinNingunaFecha(rows, asDate)) {
+          if (noPuedeProducirMovimientos(rows, asDate, asNumber)) {
             totalRowsSkippedPreFiltro += rows.length;
             hojasLeidas.push({
               estado: 'descartada',
@@ -736,8 +736,9 @@ export function startExcelIngestWorker(): Promise<string> {
               filas: rows.length - 1,
             });
             console.info(
-              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada: ni una celda ` +
-                `con fecha en toda la hoja, así que no puede producir movimientos ` +
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada: no tiene ` +
+                `una columna de fecha con dinero en otra columna, así que no puede producir ` +
+                `movimientos ` +
                 `(${rows.length - 1} filas no van al modelo)`,
             );
             continue;
