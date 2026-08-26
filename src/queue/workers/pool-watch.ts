@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/bun';
 import { boss, QUEUES } from '@/queue';
-import { medirSaludDelPool, describirSalud } from '@/lib/db-health';
+import { medirSaludDelPool, describirSalud, recuperarTransaccionesColgadas } from '@/lib/db-health';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -31,12 +31,28 @@ import { medirSaludDelPool, describirSalud } from '@/lib/db-health';
  * — los logs de Railway no agregan, no alertan y rotan. La detección está construida; el canal
  * de aviso es una variable de entorno que falta.
  *
- * ═══ NO INTENTA ARREGLARLO, Y ES DELIBERADO ═══
+ * ═══ SÍ INTENTA ARREGLARLO, Y ESO ES UNA CORRECCIÓN ═══
  *
- * Podría matar la transacción colgada. No lo hace: `pg_terminate_backend` desde un job
- * automático es un martillo apuntando a la base de clientes reales, y las dos redes de arriba
- * ya cubren el caso normal. Si algo llegó hasta acá es porque se salió de lo previsto, y ahí
- * quiero una persona mirando, no otro proceso escribiendo.
+ * La primera versión de este archivo decía, textual: *"Podría matar la transacción colgada. No
+ * lo hace: es un martillo apuntando a la base de clientes reales... ahí quiero una persona
+ * mirando, no otro proceso escribiendo."* Ese razonamiento se apoyaba en una premisa falsa —que
+ * `/health/db` haría que Railway reiniciara el servicio, o sea que existía otra capa de
+ * auto-recuperación—. **No existe**: el healthcheck de Railway solo corre al desplegar, y de
+ * hecho el path ya estaba configurado durante la caída y no reinició nada.
+ *
+ * Sin esa capa imaginaria, "que lo vea una persona" significaba en la práctica "que el producto
+ * siga caído hasta que alguien reclame", que es exactamente lo que pasó durante una hora.
+ *
+ * Y el martillo tampoco era martillo: deshacer una transacción `idle in transaction` no
+ * interrumpe nada —no está ejecutando— y no descarta nada que alguien haya visto —no hizo
+ * commit—. Los tres candados están en `lib/db-health.ts`.
+ *
+ * ═══ AVISA IGUAL, Y ESO NO ES OPCIONAL ═══
+ *
+ * Recuperarse en silencio deja el mismo agujero que teníamos: nadie se entera de que la fuga
+ * existe y por lo tanto nadie la arregla en el código. El aviso sube a `error` cuando hubo que
+ * intervenir, porque una fuga que llegó hasta acá **se escapó de las otras dos redes** y eso es
+ * una noticia distinta de "el pool está tenso".
  */
 export function startPoolWatchWorker(): Promise<string> {
   return boss.work(QUEUES.poolWatch, async () => {
@@ -47,6 +63,22 @@ export function startPoolWatchWorker(): Promise<string> {
       const mensaje = `[pool-watch] el pool de la base necesita atención: ${describirSalud(salud)}`;
       console.error(mensaje);
       Sentry.captureMessage(mensaje, 'warning');
+
+      /*
+       * La recuperación va DESPUÉS de avisar, no antes: si lo que sigue falla o el proceso se
+       * cae en el intento, el aviso ya salió. Al revés, un fallo acá se llevaría también la
+       * única señal de que algo pasó.
+       */
+      const r = await recuperarTransaccionesColgadas();
+      if (r.terminadas > 0) {
+        const arreglo =
+          `[pool-watch] se deshicieron ${r.terminadas} transacción(es) colgada(s) ` +
+          `(pid ${r.pids.join(', ')}) para liberar el pool. Es una FUGA que se escapó del ` +
+          'watchdog de db-scope y del timeout de Postgres: hay que perseguir su origen, no ' +
+          'basta con que esta capa la limpie.';
+        console.error(arreglo);
+        Sentry.captureMessage(arreglo, 'error');
+      }
     } catch (err) {
       /*
        * Un fallo al MEDIR no puede tumbar el job, y menos reintentarse en bucle: si la base no

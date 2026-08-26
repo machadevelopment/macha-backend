@@ -1,4 +1,6 @@
+import postgres from 'postgres';
 import { sql } from '@/db/client';
+import { env } from '@/lib/env';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -19,9 +21,16 @@ import { sql } from '@/db/client';
  * contrario de lo que hacía falta. `modules/health` responde un objeto fijo sin tocar la base,
  * así que un pool agotado le resulta invisible.
  *
- * De ahí las dos piezas que este archivo habilita: un chequeo que SÍ mira el pool
- * (`/health/db`, para que Railway pueda reiniciar el servicio solo) y un job periódico que
- * avisa antes de que el usuario lo note.
+ * De ahí las tres piezas que este archivo habilita: un chequeo que SÍ mira el pool
+ * (`/health/db`), un job periódico que avisa antes de que el usuario lo note, y la
+ * auto-recuperación del final.
+ *
+ * ⚠️ CORRECCIÓN A UNA VERSIÓN ANTERIOR DE ESTA MISMA CABECERA. Decía que `/health/db` servía
+ * "para que Railway pueda reiniciar el servicio solo". **Es falso**: el healthcheck de Railway
+ * solo corre al desplegar —*"Railway does not monitor the healthcheck endpoint after the
+ * deployment has gone live"*— y de hecho ya estaba configurado durante la caída sin reiniciar
+ * nada. Lo que `/health/db` sí hace es frenar un DESPLIEGUE que arranca sin base, y dar un
+ * diagnóstico que un `curl` puede leer. La auto-recuperación tuvo que construirse por eso.
  *
  * ═══ QUÉ SE MIDE, Y POR QUÉ ESTAS DOS COSAS Y NO EL CONTEO DE CONEXIONES ═══
  *
@@ -108,4 +117,175 @@ export function describirSalud(s: SaludDelPool): string {
     partes.push(`la más vieja lleva ${s.colgadaMasViejaSeg}s abierta`);
   }
   return partes.join(' · ');
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * CURARSE SOLO, PORQUE EN RAILWAY NADIE MÁS LO VA A HACER
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Esto existe por una CORRECCIÓN. El 2026-08-26 se puso `/health/db` como healthcheck del
+ * servicio creyendo que un pool agotado haría que Railway reiniciara. **Es falso**, y está en su
+ * documentación: *"Railway does not monitor the healthcheck endpoint after the deployment has
+ * gone live"*. El healthcheck es una compuerta de DESPLIEGUE, no una sonda de vida.
+ *
+ * La prueba de que es falso vino de la realidad, no de los docs: el path YA estaba configurado
+ * durante la caída y no reinició nada, porque no tenía que hacerlo.
+ *
+ * O sea que la plataforma no aporta ninguna capa de auto-recuperación. La única forma es que la
+ * app se cure a sí misma, y esta función es esa capa.
+ *
+ * ═══ POR QUÉ ES SEGURO, Y POR QUÉ CAMBIÉ DE OPINIÓN ═══
+ *
+ * `pool-watch` nació deliberadamente SIN esto, con el argumento de que terminar sesiones de
+ * forma automática era "un martillo apuntando a la base de clientes reales". Ese razonamiento
+ * era demasiado conservador y queda corregido acá:
+ *
+ * Una transacción en estado `idle in transaction` **no está ejecutando nada** y **no hizo
+ * commit**. Deshacerla descarta trabajo que ningún cliente vio y que nadie va a poder ver
+ * nunca, porque su dueña se perdió. No es un martillo: es una operación demostrablemente sin
+ * pérdida — literalmente la misma que un operador ejecutó a mano ese día para levantar el
+ * producto.
+ *
+ * ═══ LOS TRES CANDADOS, Y NINGUNO ES DECORATIVO ═══
+ *
+ * 1. Solo el rol de la APP, comparado por NOMBRE contra el usuario de `APP_DATABASE_URL` (no
+ *    `current_user`: la consulta la ejecuta el dueño, ver más abajo). Las migraciones y los
+ *    scripts corren con el rol dueño y sus transacciones largas son legítimas.
+ * 2. Solo `idle in transaction`. **Nunca** una sesión `active`: esa está ejecutando algo, y
+ *    cortarla sí puede interrumpir la promoción de un archivo a mitad de camino.
+ * 3. Solo pasados `UMBRAL_MATAR_SEG`, que va DESPUÉS de las otras dos redes (Postgres 60 s,
+ *    watchdog 90 s). Si algo llegó hasta acá es porque esas dos no lo alcanzaron, así que esta
+ *    capa no compite con ellas por cerrar la misma transacción.
+ *
+ * ═══ QUÉ NO TOCA ═══
+ *
+ * Las sesiones BLOQUEADAS. Están esperando un lock, o sea trabajando: en cuanto la colgada se
+ * va, avanzan solas. Cortarlas sería abortar requests que iban a completarse bien.
+ *
+ * ═══ CORRE CON EL ROL DUEÑO, Y ESO LO DESCUBRIÓ EL TEST ═══
+ *
+ * La primera versión usaba el pool de la app y **fallaba siempre** contra Postgres real:
+ *
+ *     PostgresError: permission denied to terminate process
+ *
+ * `macha_app` es un rol restringido a propósito (migración 0010) y no puede señalizar sesiones.
+ * O sea que esta capa habría lanzado una excepción en cada ejecución, la habría tragado el
+ * `catch` del job, y nos habríamos enterado en la próxima caída — con el consuelo de creer que
+ * estábamos cubiertos. Es exactamente lo que estos tests de integración existen para atrapar.
+ *
+ * Se usa una conexión del rol DUEÑO, el mismo precedente que `tenant-provisioning.ts` para la
+ * única operación que exige propiedad. La alternativa —`GRANT pg_signal_backend TO macha_app`—
+ * se descarta: le daría al rol restringido la capacidad de señalizar cualquier backend no
+ * superusuario, y mantener a `macha_app` sin privilegios que no necesita es una regla del
+ * proyecto, no una preferencia.
+ *
+ * ⚠️ El filtro pasa a ser el NOMBRE del rol de la app, no `current_user`, porque ahora quien
+ * consulta es el dueño. Y si los dos roles resultan ser el mismo —`APP_DATABASE_URL` sin
+ * configurar, que según CLAUDE.md cae a `DATABASE_URL`— esta capa **no hace nada**: sin la
+ * distinción de roles no puede separar una fuga de la app de una migración en curso, y una
+ * migración entre sentencias también está `idle in transaction`. Preferir no actuar es lo
+ * único defendible ahí.
+ */
+const UMBRAL_MATAR_SEG = 120;
+
+/**
+ * Conexión dedicada con el rol dueño, con UNA sola conexión: esto corre cada dos minutos y no
+ * necesita concurrencia. Se crea perezosamente para no abrir una conexión extra en los procesos
+ * que nunca llaman a esta función (los tests unitarios, por ejemplo).
+ */
+let ownerSql: ReturnType<typeof postgres> | null = null;
+function conexionDelDueno() {
+  ownerSql ??= postgres(env.databaseUrl, { max: 1, onnotice: () => {} });
+  return ownerSql;
+}
+
+/** El usuario con el que la app se conecta, sacado de la propia URL que usa. */
+function rolDeLaApp(): string | null {
+  try {
+    const u = new URL(env.appDatabaseUrl).username;
+    return u ? decodeURIComponent(u) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** El usuario dueño, para poder comparar y no actuar si son el mismo. */
+function rolDueno(): string | null {
+  try {
+    const u = new URL(env.databaseUrl).username;
+    return u ? decodeURIComponent(u) : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface Recuperacion {
+  /** Cuántas transacciones colgadas se deshicieron. */
+  terminadas: number;
+  /** Los pid afectados, para que el aviso diga exactamente qué se tocó. */
+  pids: number[];
+}
+
+export async function recuperarTransaccionesColgadas(
+  /**
+   * Solo los tests lo pasan, igual que en el watchdog de `db-scope`. Es un parámetro y no una
+   * variable de entorno a propósito: el orden de las tres redes (Postgres 60 s → watchdog 90 s →
+   * esta 120 s) es una decisión de diseño con un test que lo fija, no algo que convenga aflojar
+   * desde un panel.
+   */
+  umbralSeg: number = UMBRAL_MATAR_SEG,
+): Promise<Recuperacion> {
+  const app = rolDeLaApp();
+  const dueno = rolDueno();
+
+  /*
+   * Sin poder distinguir los roles, no se actúa. Ver la cabecera: una migración entre sentencias
+   * también está `idle in transaction`, así que con un solo rol esta capa podría deshacer un
+   * cambio de esquema a medias — mucho peor que la caída que viene a evitar.
+   */
+  if (!app || app === dueno) {
+    return { terminadas: 0, pids: [] };
+  }
+
+  /*
+   * ⚠️ LA SUBCONSULTA CON `offset 0` NO ES ESTILO: ES LO QUE IMPIDE QUE ESTO SEA CATASTRÓFICO.
+   *
+   * **Postgres no garantiza el orden de evaluación de las condiciones de un `WHERE`.** Escrito
+   * como una sola lista de condiciones —que es la forma obvia y la que tenía la primera
+   * versión— el planificador puede evaluar `pg_terminate_backend(pid)` ANTES de los filtros, y
+   * entonces la función se ejecuta sobre filas que no pasaron ningún candado.
+   *
+   * MEDIDO contra Postgres real, en una base recién levantada: con la versión sin valla, el
+   * filtro seleccionaba **0 filas** y aun así la consulta terminó su propia conexión
+   * (`CONNECTION_CLOSED`). En producción eso habría cerrado TODO —el pool de la app, el rol
+   * dueño, lo que hubiera— **cada dos minutos**: la capa escrita para prevenir la caída la
+   * habría provocado sola, y con la firma de un misterio imposible de atribuir.
+   *
+   * `offset 0` es una valla de optimización: impide que el planificador aplane la subconsulta
+   * en la consulta externa, así que los candados se aplican COMPLETOS antes de que
+   * `pg_terminate_backend` vea un solo pid. Verificado: con la valla, 0 filas → 0 terminadas y
+   * la conexión intacta.
+   *
+   * Y sigue siendo UNA sola consulta a propósito. Hacerlo en dos pasos —leer los pid, después
+   * actuar— abriría una ventana en la que una sesión pasa de `idle in transaction` a `active`
+   * entre una consulta y la otra, y ahí sí se interrumpiría trabajo real.
+   *
+   * `pid <> pg_backend_pid()` es defensa en profundidad: el filtro por `usename` ya excluye a
+   * esta conexión (corre con el rol dueño), pero si alguien cambia ese filtro, esta condición
+   * evita que la capa se alcance a sí misma.
+   */
+  const filas = await conexionDelDueno()<{ pid: number }[]>`
+    select pid from (
+      select pid
+        from pg_stat_activity
+       where usename = ${app}
+         and state = 'idle in transaction'
+         and now() - state_change > make_interval(secs => ${umbralSeg})
+         and pid <> pg_backend_pid()
+       offset 0
+    ) colgadas
+    where pg_terminate_backend(colgadas.pid)
+  `;
+  return { terminadas: filas.length, pids: filas.map((f) => f.pid) };
 }
