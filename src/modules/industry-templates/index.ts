@@ -2,6 +2,7 @@ import { Elysia } from 'elysia';
 import * as XLSX from 'xlsx';
 import { desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
+import { identityDerive } from '@/guards/identity.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { companies, industryStarterTemplates } from '@/db/schema';
 import { normalizeIndustry, resolveIndustryTemplate } from '@/lib/industry-template';
@@ -133,22 +134,51 @@ export const industryTemplateDownload = new Elysia({ prefix: '/industry-template
     set.headers['content-disposition'] =
       `attachment; filename="plantilla-${company.industry}.xlsx"`;
     return buffer;
-  })
-  /**
-   * ═══════════════════════════════════════════════════════════════════════════════════════
-   * LAS INDUSTRIAS QUE EL PRODUCTO RECONOCE (lista de Jose, 2026-08-25)
-   * ═══════════════════════════════════════════════════════════════════════════════════════
-   *
-   * Sirve la lista para que la pantalla de registro ofrezca un desplegable en vez de un campo
-   * de texto libre. Hasta hoy era texto libre y por eso `companies.industry` en producción
-   * tiene valores escritos a mano que ninguna plantilla puede resolver.
-   *
-   * Devuelve SLUGS y no nombres: los rótulos visibles son copia de interfaz y viven en el
-   * diccionario del frontend, en los dos idiomas. El backend es dueño de la llave que decide
-   * qué plantilla se sirve, no de cómo se lee.
-   *
-   * Va detrás de `tenantDerive` porque el registro ya ocurre con sesión —quien lo llena es un
-   * usuario autenticado que todavía no tiene empresa— y no expone nada sensible: es un catálogo
-   * de plataforma, igual que `industry_starter_templates`.
-   */
+  });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LAS INDUSTRIAS QUE EL PRODUCTO RECONOCE (lista de Jose, 2026-08-25)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Sirve la lista para que la pantalla de registro ofrezca un desplegable en vez de un campo de
+ * texto libre. Era texto libre y por eso `companies.industry` en producción tiene valores
+ * escritos a mano que ninguna plantilla puede resolver.
+ *
+ * Devuelve SLUGS y no nombres: los rótulos visibles son copia de interfaz y viven en el
+ * diccionario del frontend, en los dos idiomas. El backend es dueño de la llave que decide qué
+ * plantilla se sirve, no de cómo se lee.
+ *
+ * ═══ POR QUÉ `identityDerive` Y NO `tenantDerive` (medido en producción, 2026-08-26) ═══
+ *
+ * Nació montada sobre `tenantDerive`, con el comentario escrito de que servía al registro
+ * "porque quien lo llena es un usuario autenticado que todavía no tiene empresa". La primera
+ * mitad de esa frase es cierta y la segunda es exactamente lo que la rompía: `tenantDerive`
+ * corta con **403 `No active company membership`** (tenant.derive.ts) justo cuando no hay
+ * membresía, y quien se registra por primera vez no tiene ninguna.
+ *
+ * El fallo no se veía por ningún lado, y ahí está la lección. El wizard cae a un campo de texto
+ * libre si la lista no llega —una degradación deliberada, para que un fallo de red no deje a
+ * nadie sin poder terminar de registrarse— así que el 403 se veía como el formulario de
+ * SIEMPRE. La pantalla funcionaba; solo servía la versión vieja de sí misma, y únicamente al
+ * usuario que estrena cuenta. Un miembro de una empresa existente creando una segunda SÍ veía
+ * el desplegable, que es lo que lo hacía indistinguible de "a algunos les funciona".
+ *
+ * Medido contra producción el día siguiente al despliegue: de 32 empresas, **17 tienen un
+ * `industry` que no resuelve a ningún slug** (`tech`, `TECH`, `autos`, `carros`, `coffee`,
+ * `hogar`, `candelas`, `software2`…), y **dos de ellas se crearon DESPUÉS** de que esta lista
+ * existiera. Esas 17 reciben la plantilla genérica, que es precisamente lo que el ticket vino
+ * a arreglar.
+ *
+ * `identityDerive` es el guard correcto y ya existía: exige sesión verificada y NO membresía —
+ * es el que sirve `/register` y `/me/memberships`, las dos primeras llamadas de un usuario
+ * nuevo. Esto no afloja nada: la lista es catálogo de plataforma, la misma categoría que
+ * `industry_starter_templates`, y sigue detrás de un bearer válido.
+ *
+ * Va en su PROPIA instancia y no dentro de la de arriba porque un `.use()` aplica a toda la
+ * cadena: mezclarlas pondría `/download` —que sí necesita saber de qué empresa es el cliente—
+ * detrás de un guard que no resuelve empresa.
+ */
+export const industryList = new Elysia({ prefix: '/industry-templates' })
+  .use(identityDerive)
   .get('/industries', () => ({ industries: TARGET_INDUSTRIES }));

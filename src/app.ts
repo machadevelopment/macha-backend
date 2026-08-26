@@ -24,7 +24,7 @@ import { billingWebhooks } from '@/modules/billing/webhooks';
 import { chats_ } from '@/modules/chats';
 import { health } from '@/modules/health';
 import { ingestion } from '@/modules/ingestion';
-import { industryTemplateDownload } from '@/modules/industry-templates';
+import { industryTemplateDownload, industryList } from '@/modules/industry-templates';
 import { insights, creditsBalance } from '@/modules/insights';
 import {
   metrics,
@@ -82,6 +82,7 @@ const clientApi = new Elysia()
   .use(health)
   .use(ingestion)
   .use(industryTemplateDownload)
+  .use(industryList)
   .use(metrics)
   .use(arAp)
   .use(arApCounterparties)

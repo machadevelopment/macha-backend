@@ -147,7 +147,18 @@ describe('rutas guardadas — 401 sin token', () => {
     });
   }
 
-  const identityScoped = ['/me/memberships'];
+  const identityScoped = [
+    '/me/memberships',
+    /*
+     * El catálogo del desplegable de industrias. Colgaba de `tenantDerive`, que responde 403
+     * cuando no hay membresía — o sea que le fallaba justo a quien está creando su primera
+     * empresa, el único usuario que lo necesita. Está acá para que quede fijado el guard que
+     * le toca; que el 401 sin token NO distingue entre los dos guards está demostrado en
+     * `tests/integration/industrias-en-el-alta.test.ts`, y por eso ese test existe además de
+     * esta línea.
+     */
+    '/industry-templates/industries',
+  ];
   for (const path of identityScoped) {
     test(`GET ${path} exige token`, async () => {
       expect((await call(path)).status).toBe(401);
