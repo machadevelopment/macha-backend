@@ -16,7 +16,8 @@ export type ClientCapability =
   | 'manage_members'
   | 'change_roles'
   | 'billing'
-  | 'manage_inventory';
+  | 'manage_inventory'
+  | 'manage_fx_rate';
 
 // CU-868kh8pwv — `delete_company` SE RETIRÓ de la matriz (decisión de Jose, 2026-07-28).
 //
@@ -58,6 +59,28 @@ const CLIENT_MATRIX: Record<ClientCapability, ClientRole[]> = {
   // append-only, así que no hay nada que destruir. Una capacidad aparte para marcar una
   // bandera reversible sería control que no controla nada.
   manage_inventory: ['owner', 'admin', 'member'],
+  /*
+   * ═══ EL TIPO DE CAMBIO LO MANTIENE EL CLIENTE (decisión de Jose, 2026-08-25) ═══
+   *
+   * La pregunta abierta era quién lo mantiene: nosotros o el cliente. Hasta ahora era
+   * nosotros —la tasa se cargaba desde `/admin/*` y el cliente la veía sin tocarla— y esa
+   * ruta se conserva para soporte.
+   *
+   * Jose eligió el cliente, y explícitamente CUALQUIER ADMIN de la empresa, no solo el
+   * dueño: *"el tipo de cambio no es tan sensible como para restringirlo tanto, y limitarlo
+   * solo al dueño va a generar fricción en el día a día para algo que hay que ajustar
+   * seguido."*
+   *
+   * Por eso NO está junto a `billing`/`manage_members`, que sí son solo del dueño. Y `member`
+   * queda fuera: mover la tasa mueve todas las cifras que se convierten de ahí en adelante,
+   * así que no es una acción de operación diaria como registrar una entrada de bodega.
+   *
+   * Lo que hace segura esta decisión —y lo que la desbloqueó— es que **cambiar la tasa nunca
+   * reescribe la contabilidad ya cargada**: cada fila financiera congela su `fx_rate` al
+   * promoverse (ver la cabecera de `lib/fx.ts`). Una tasa nueva aplica de ahí en adelante, así
+   * que un ajuste de hoy no puede mover las cifras de marzo.
+   */
+  manage_fx_rate: ['owner', 'admin'],
 };
 
 export function clientCan(role: ClientRole, capability: ClientCapability): boolean {
