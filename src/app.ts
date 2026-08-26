@@ -36,6 +36,7 @@ import {
   metricsStores,
   metricsCurrencies,
 } from '@/modules/metrics';
+import { clientFxRate } from '@/modules/metrics/fx-rate';
 import { inventory } from '@/modules/inventory';
 import { me } from '@/modules/me';
 import {
@@ -89,6 +90,7 @@ const clientApi = new Elysia()
   .use(metricsCategories)
   .use(metricsStores)
   .use(metricsCurrencies)
+  .use(clientFxRate)
   .use(inventory)
   .use(insights)
   .use(creditsBalance)

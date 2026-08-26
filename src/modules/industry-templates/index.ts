@@ -5,6 +5,7 @@ import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { companies, industryStarterTemplates } from '@/db/schema';
 import { normalizeIndustry, resolveIndustryTemplate } from '@/lib/industry-template';
+import { TARGET_INDUSTRIES } from '@/config/industries';
 import { downloadObject } from '@/lib/s3';
 
 const COLUMNS = ['fecha', 'descripción', 'categoría', 'monto', 'moneda'];
@@ -132,4 +133,22 @@ export const industryTemplateDownload = new Elysia({ prefix: '/industry-template
     set.headers['content-disposition'] =
       `attachment; filename="plantilla-${company.industry}.xlsx"`;
     return buffer;
-  });
+  })
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * LAS INDUSTRIAS QUE EL PRODUCTO RECONOCE (lista de Jose, 2026-08-25)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Sirve la lista para que la pantalla de registro ofrezca un desplegable en vez de un campo
+   * de texto libre. Hasta hoy era texto libre y por eso `companies.industry` en producción
+   * tiene valores escritos a mano que ninguna plantilla puede resolver.
+   *
+   * Devuelve SLUGS y no nombres: los rótulos visibles son copia de interfaz y viven en el
+   * diccionario del frontend, en los dos idiomas. El backend es dueño de la llave que decide
+   * qué plantilla se sirve, no de cómo se lee.
+   *
+   * Va detrás de `tenantDerive` porque el registro ya ocurre con sesión —quien lo llena es un
+   * usuario autenticado que todavía no tiene empresa— y no expone nada sensible: es un catálogo
+   * de plataforma, igual que `industry_starter_templates`.
+   */
+  .get('/industries', () => ({ industries: TARGET_INDUSTRIES }));
