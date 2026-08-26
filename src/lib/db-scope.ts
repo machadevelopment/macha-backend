@@ -1,12 +1,17 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { sql, schema, type DB } from '@/db/client';
+import { WATCHDOG_MS } from '@/lib/orden-de-las-redes';
 
 /**
  * Cuánto se espera a que el dueño de una conexión reservada la cierre antes de forzar el
- * rollback. Ver la cabecera del watchdog más abajo para por qué 90 s y por qué va DESPUÉS del
- * timeout de Postgres.
+ * rollback.
+ *
+ * ⚠️ El valor y su orden respecto de las otras dos redes viven en `lib/orden-de-las-redes.ts`.
+ * La cabecera de ese archivo dice por qué esta red va **PRIMERA**: es la única que ESCRIBE
+ * sobre la conexión, y escribirle a un backend que Postgres ya terminó mata el proceso.
+ * Corregido el 2026-08-26 — iba tercera y crasheaba producción en bucle.
  */
-const TIEMPO_MAXIMO_MS = 90_000;
+const TIEMPO_MAXIMO_MS = WATCHDOG_MS;
 
 export interface ScopedConnection {
   db: DB;
@@ -114,17 +119,26 @@ export async function reserveScopedConnection(
    * producto financiero; el rollback deja las cosas como estaban, que es la única opción
    * defendible cuando no se sabe.
    *
-   * ═══ POR QUÉ 90 SEGUNDOS, Y POR QUÉ MÁS QUE EL DE POSTGRES ═══
+   * ═══ POR QUÉ 90 SEGUNDOS, Y POR QUÉ ANTES QUE EL DE POSTGRES ═══
    *
-   * `db/client.ts` pone `idle_in_transaction_session_timeout` en 60 s. Este va DESPUÉS a
-   * propósito: el de Postgres cubre lo que está idle, y este cubre lo que ya no está idle
-   * porque quedó esperando un lock —justo el estado de las nueve sesiones de la caída, que
-   * NO son "idle in transaction" y por lo tanto ese timeout no las alcanza—.
+   * ⚠️ ESTE PÁRRAFO DECÍA EXACTAMENTE LO CONTRARIO Y ESE "a propósito" COSTÓ PRODUCCIÓN.
+   * Decía: *"`db/client.ts` pone `idle_in_transaction_session_timeout` en 60 s. Este va
+   * DESPUÉS a propósito"*. Pero **este watchdog es la única de las tres redes que ESCRIBE
+   * sobre la conexión**, y si Postgres ya mató la sesión, el `rollback` de acá abajo revienta
+   * el proceso entero: `socket.write` sobre un socket en null, dentro de un `setImmediate` de
+   * postgres.js, o sea fuera de toda promesa y sin `catch` que lo alcance. Iba tercero de
+   * tres, así que le escribía a un cadáver SIEMPRE. El orden completo, con el recibo de
+   * producción, está en `lib/orden-de-las-redes.ts`.
    *
-   * Son dos redes para dos estados distintos, no una redundante. Y 90 s es holgado: ninguna
-   * request legítima dura tanto (el worker de ingesta usa transacciones cortas y deja las
-   * llamadas al modelo FUERA, ver `queue/workers/excel-ingest.ts`), así que llegar acá
-   * siempre significa que algo se rompió.
+   * Lo que SÍ era cierto de aquel párrafo, y se conserva porque es el motivo de que esta red
+   * exista aparte del timeout de Postgres: ese timeout cubre lo que está `idle in
+   * transaction`, y este cubre además lo que quedó ESPERANDO UN LOCK —el estado de las nueve
+   * sesiones de la caída, que no son idle y por lo tanto ese timeout no alcanza—. Son redes
+   * para estados distintos, no una redundante.
+   *
+   * Y 90 s es holgado: ninguna request legítima dura tanto (el worker de ingesta usa
+   * transacciones cortas y deja las llamadas al modelo FUERA, ver
+   * `queue/workers/excel-ingest.ts`), así que llegar acá siempre significa que algo se rompió.
    *
    * `unref()` para no mantener vivo el proceso por un temporizador pendiente: un contenedor
    * que no puede terminar su apagado es la forma de arreglar esto creando otro problema.

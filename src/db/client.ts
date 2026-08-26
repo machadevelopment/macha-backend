@@ -2,6 +2,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { env } from '@/lib/env';
 import * as schema from './schema';
+import { IDLE_TX_TIMEOUT_MS } from '@/lib/orden-de-las-redes';
 
 // Runtime connection uses the restricted macha_app role (env.appDatabaseUrl,
 // migration 0010), NOT the owner role that runs migrations — a table owner always
@@ -58,9 +59,19 @@ import * as schema from './schema';
  *
  * ⚠️ Esto acota el DAÑO, no arregla la fuga. La fuga vive en el cierre de
  * `reserveScopedConnection` y hay que perseguirla aparte; lo que esto garantiza es que la
- * próxima se limpie sola en un minuto en vez de tumbar el producto por una hora.
+ * próxima se limpie sola en vez de tumbar el producto por una hora.
+ *
+ * ═══ EL VALOR YA NO VIVE ACÁ, Y ESA ES LA CORRECCIÓN (2026-08-26, segunda pasada) ═══
+ *
+ * Era `60_000`, escrito en este archivo sin relación con las otras dos redes. Y esa
+ * independencia fue el bug: el watchdog de `db-scope` despierta a los 90 s, o sea que
+ * Postgres mataba la sesión TREINTA SEGUNDOS ANTES de que el watchdog fuera a escribirle
+ * `rollback`. Escribirle a un backend terminado **mata el proceso** —`socket.write` sobre
+ * null, fuera de toda promesa, sin `catch` posible— y producción quedó en bucle de crash.
+ *
+ * Los tres valores viven juntos en `lib/orden-de-las-redes.ts` con el porqué del orden y un
+ * test que lo fija. Tres constantes en tres archivos no se pueden ordenar entre sí.
  */
-const IDLE_TX_TIMEOUT_MS = 60_000;
 
 export const sql = postgres(env.appDatabaseUrl, {
   max: 10,

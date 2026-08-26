@@ -26,7 +26,14 @@ import { setupTestDatabase, testAppUrl, testOwnerUrl } from './setup';
  * a Postgres qué quedó configurado.
  */
 
-const IDLE_TX_TIMEOUT_MS = 60_000;
+/*
+ * ⚠️ ERA UNA CUARTA COPIA DEL VALOR, ESCRITA A MANO (`60_000`). Y era la enfermedad exacta que
+ * causó el bucle de crash del 2026-08-26: el mismo número vivía en `db/client.ts`, en este
+ * test y —como su contraparte— en otros dos, sin que ningún archivo pudiera ver la RELACIÓN
+ * entre las tres redes del pool. Un test que repite la constante no verifica el valor: verifica
+ * que alguien copió bien, y sigue en verde cuando el valor de producción cambia debajo.
+ */
+const { IDLE_TX_TIMEOUT_MS } = await import('@/lib/orden-de-las-redes');
 
 describe('timeout de transacción colgada', () => {
   let app: ReturnType<typeof postgres>;

@@ -177,22 +177,39 @@ describe('auto-recuperación del pool', () => {
   });
 
   /**
-   * El ORDEN de las tres redes es parte del diseño: Postgres (60 s) → watchdog (90 s) →
-   * recuperación (120 s). Si alguien adelanta esta capa, empieza a competir con el watchdog por
-   * cerrar la misma transacción en vez de cubrir lo que al watchdog se le escapó — y el aviso
-   * que emite ("se escapó de las otras dos redes") pasaría a ser mentira.
+   * ⚠️ ESTE TEST FIJABA EL ORDEN AL REVÉS, Y PASABA EN VERDE. Decía que el diseño era
+   * *"Postgres (60 s) → watchdog (90 s) → recuperación (120 s)"* y lo exigía con
+   * `expect(watchdog).toBeGreaterThan(pg)`. O sea que el bucle de crash del 2026-08-26 no se
+   * coló por un descuido: estaba **clavado por un test**, que es peor, porque el siguiente que
+   * intentara arreglarlo se habría encontrado con la suite en rojo y habría supuesto que el
+   * equivocado era él.
+   *
+   * Lo que faltaba en aquel razonamiento es de qué TIPO es cada red. Dos de las tres MATAN el
+   * backend (el timeout de Postgres y `pg_terminate_backend`); solo el watchdog ESCRIBE sobre
+   * la conexión para hacer `rollback`. Escribirle a un backend ya terminado revienta el proceso
+   * —`socket.write` sobre null, dentro de un `setImmediate` de postgres.js, fuera de toda
+   * promesa—, así que con el watchdog en tercer lugar le escribía a un cadáver siempre.
+   * `watchdog-sobre-conexion-muerta.test.ts` demuestra el mecanismo en un subproceso.
+   *
+   * La preocupación original SÍ se conserva y sigue siendo válida: esta capa tiene que ir
+   * ÚLTIMA, porque si se adelanta compite con el watchdog en vez de cubrir lo que se le escapó,
+   * y su aviso ("se escapó de las otras dos redes") pasaría a ser mentira.
+   *
+   * Se importan las constantes en vez de sacarlas con expresiones regulares de tres archivos.
+   * No es limpieza: tres constantes en tres módulos no se pueden ordenar entre sí, y ese fue
+   * exactamente el bug. Ahora viven juntas en `lib/orden-de-las-redes.ts` y el invariante
+   * completo tiene su propio test unitario.
    */
-  test('el umbral va después del watchdog y del timeout de Postgres', async () => {
+  test('esta capa va ÚLTIMA, después del watchdog y del timeout de Postgres', async () => {
+    const { WATCHDOG_MS, IDLE_TX_TIMEOUT_MS, MATAR_COLGADAS_SEG } =
+      await import('@/lib/orden-de-las-redes');
+
+    expect(MATAR_COLGADAS_SEG * 1000).toBeGreaterThan(IDLE_TX_TIMEOUT_MS);
+    expect(IDLE_TX_TIMEOUT_MS).toBeGreaterThan(WATCHDOG_MS);
+
+    // Y que sea el valor que de verdad usa la capa, no una constante paralela que nadie lee.
     const health = await Bun.file('src/lib/db-health.ts').text();
-    const scope = await Bun.file('src/lib/db-scope.ts').text();
-    const client = await Bun.file('src/db/client.ts').text();
-
-    const matar = Number(health.match(/UMBRAL_MATAR_SEG\s*=\s*(\d+)/)![1]) * 1000;
-    const watchdog = Number(scope.match(/TIEMPO_MAXIMO_MS\s*=\s*([\d_]+)/)![1]!.replace(/_/g, ''));
-    const pg = Number(client.match(/IDLE_TX_TIMEOUT_MS\s*=\s*([\d_]+)/)![1]!.replace(/_/g, ''));
-
-    expect(matar).toBeGreaterThan(watchdog);
-    expect(watchdog).toBeGreaterThan(pg);
+    expect(health).toContain('const UMBRAL_MATAR_SEG = MATAR_COLGADAS_SEG;');
   });
 
   /**

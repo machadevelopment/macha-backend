@@ -1,6 +1,7 @@
 import postgres from 'postgres';
 import { sql } from '@/db/client';
 import { env } from '@/lib/env';
+import { MATAR_COLGADAS_SEG } from '@/lib/orden-de-las-redes';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -154,7 +155,7 @@ export function describirSalud(s: SaludDelPool): string {
  *    scripts corren con el rol dueño y sus transacciones largas son legítimas.
  * 2. Solo `idle in transaction`. **Nunca** una sesión `active`: esa está ejecutando algo, y
  *    cortarla sí puede interrumpir la promoción de un archivo a mitad de camino.
- * 3. Solo pasados `UMBRAL_MATAR_SEG`, que va DESPUÉS de las otras dos redes (Postgres 60 s,
+ * 3. Solo pasados `UMBRAL_MATAR_SEG`, que va ÚLTIMO de las tres redes (watchdog 90 s,
  *    watchdog 90 s). Si algo llegó hasta acá es porque esas dos no lo alcanzaron, así que esta
  *    capa no compite con ellas por cerrar la misma transacción.
  *
@@ -187,7 +188,7 @@ export function describirSalud(s: SaludDelPool): string {
  * migración entre sentencias también está `idle in transaction`. Preferir no actuar es lo
  * único defendible ahí.
  */
-const UMBRAL_MATAR_SEG = 120;
+const UMBRAL_MATAR_SEG = MATAR_COLGADAS_SEG;
 
 /**
  * Conexión dedicada con el rol dueño, con UNA sola conexión: esto corre cada dos minutos y no

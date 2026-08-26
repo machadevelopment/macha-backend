@@ -104,16 +104,33 @@ describe('watchdog de conexiones reservadas', () => {
   });
 
   /**
-   * El plazo de producción tiene que quedar POR ENCIMA del `idle_in_transaction_session_timeout`
-   * del pool: ese cubre lo que está idle, y el watchdog cubre lo que quedó esperando un lock,
-   * que NO es "idle in transaction" y por eso ese timeout no lo alcanza. Si alguien invierte el
-   * orden, la red de afuera se dispara antes que la de adentro y el watchdog deja de servir.
+   * ⚠️ ESTE TEST EXIGÍA EL ORDEN QUE TUMBÓ PRODUCCIÓN, y su comentario explicaba con
+   * convicción por qué: *"El plazo de producción tiene que quedar POR ENCIMA del
+   * `idle_in_transaction_session_timeout` … Si alguien invierte el orden, la red de afuera se
+   * dispara antes que la de adentro y el watchdog deja de servir."*
+   *
+   * La premisa era que las dos redes hacen lo mismo y la de adentro tiene que ganar. No hacen
+   * lo mismo: **el watchdog ESCRIBE `rollback` sobre la conexión y el timeout de Postgres MATA
+   * el backend.** Con el watchdog último, escribía sobre una sesión que Postgres ya había
+   * terminado treinta segundos antes, y eso no "deja de servir": revienta el proceso entero —
+   * `socket.write` sobre null, dentro de un `setImmediate` de postgres.js, fuera de toda
+   * promesa, sin `catch` que lo alcance. Producción quedó en bucle de crash y ninguna carga de
+   * Excel podía terminar.
+   *
+   * La preocupación de fondo era real y sigue cubierta, solo que al revés: el watchdog tiene
+   * que dispararse PRIMERO, porque es el único que devuelve la conexión utilizable. Lo que el
+   * timeout de Postgres cubre y el watchdog no es otra cosa (una transacción abierta fuera de
+   * `reserveScopedConnection`), y para eso sigue estando.
+   *
+   * `watchdog-sobre-conexion-muerta.test.ts` prueba el mecanismo en un subproceso; el orden
+   * completo vive en `lib/orden-de-las-redes.ts` con su propio test.
    */
-  test('el plazo del watchdog es mayor que el timeout de Postgres', async () => {
+  test('el plazo del watchdog es MENOR que el timeout de Postgres', async () => {
+    const { WATCHDOG_MS, IDLE_TX_TIMEOUT_MS } = await import('@/lib/orden-de-las-redes');
+    expect(WATCHDOG_MS).toBeLessThan(IDLE_TX_TIMEOUT_MS);
+
+    // Y que el watchdog use de verdad esa constante, no un número propio que nadie sincroniza.
     const scope = await Bun.file('src/lib/db-scope.ts').text();
-    const client = await Bun.file('src/db/client.ts').text();
-    const wd = Number(scope.match(/TIEMPO_MAXIMO_MS\s*=\s*([\d_]+)/)![1]!.replace(/_/g, ''));
-    const pg = Number(client.match(/IDLE_TX_TIMEOUT_MS\s*=\s*([\d_]+)/)![1]!.replace(/_/g, ''));
-    expect(wd).toBeGreaterThan(pg);
+    expect(scope).toContain('const TIEMPO_MAXIMO_MS = WATCHDOG_MS;');
   });
 });
