@@ -178,7 +178,7 @@ export function asNumber(value: unknown): number | null {
  * La época de Excel es el 1899-12-30 (no el 31, por el bug del año bisiesto de Lotus 1-2-3
  * que Excel conserva a propósito).
  */
-export function asDate(value: unknown): string | null {
+export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | null {
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
   }
@@ -206,8 +206,87 @@ export function asDate(value: unknown): string | null {
 
   const s = asText(value);
   if (!s) return null;
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * "01/05/2025" ES EL 1 DE MAYO, NO EL 5 DE ENERO
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * `new Date(s)` interpreta `DD/MM/YYYY` como `MM/DD/YYYY`, que es la convención de Estados
+   * Unidos. Este producto factura en Guatemala, donde se escribe el día primero.
+   *
+   * El daño es el peor de todos los que se han encontrado, porque NO borra ni inventa plata:
+   * la mueve de mes. Medido sobre el archivo de una agencia de marketing (2026-08-25):
+   *
+   *   · 61 de 150 filas entraban con la fecha INVERTIDA y sin que nada fallara — el 1 de mayo
+   *     registrado el 5 de enero, o sea en otro trimestre del dashboard;
+   *   · las otras 89 se marcaban por `invalid_date` y no entraban a la contabilidad, que son
+   *     exactamente las que tienen día > 12 y por eso no pueden fingir ser un mes.
+   *
+   * O sea que el 41 % de sus ingresos quedaba mal fechado y el 59 % no quedaba.
+   *
+   * ═══ NO SE PUEDE DECIDIR FILA POR FILA, PERO SÍ POR COLUMNA ═══
+   *
+   * "01/05" es genuinamente ambiguo mirándolo solo. Lo que resuelve la ambigüedad es la
+   * COLUMNA: basta que UNA fila traiga un valor > 12 en la primera posición para saber que ahí
+   * van días, y con eso se lee toda la columna igual. Ver `detectarOrdenDeFecha`.
+   *
+   * ═══ Y EL DEFAULT ES `dmy`, QUE ES UNA DECISIÓN DE PRODUCTO ═══
+   *
+   * Cuando la columna no da evidencia —todos sus días son ≤ 12— hay que elegir, y se elige el
+   * formato del mercado al que se le factura. Es además el sesgo seguro: leer `MM/DD` donde va
+   * `DD/MM` es lo que produjo el bug, y el error inverso solo puede ocurrir con un archivo
+   * exportado de un sistema en inglés cuya columna, encima, no tenga ni un día mayor a 12.
+   */
+  const conBarras = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s);
+  if (conBarras) {
+    const a = Number(conBarras[1]);
+    const b = Number(conBarras[2]);
+    const anio = Number(conBarras[3]);
+    const [dia, mes] = orden === 'mdy' ? [b, a] : [a, b];
+    if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null;
+    const d = new Date(Date.UTC(anio, mes - 1, dia));
+    // Un 31 de febrero desborda al mes siguiente: eso no es una fecha, es un dato malo.
+    if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
+    return d.toISOString().slice(0, 10);
+  }
+
+  // ISO (`2025-05-01`) y todo lo demás siguen por el camino de siempre: ahí no hay ambigüedad.
   const parsed = new Date(s);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+}
+
+/**
+ * En qué orden vienen día y mes en una columna de fechas escritas con barras.
+ *
+ * Se decide con la COLUMNA entera porque una fila sola no alcanza: `01/05` es ambiguo, pero si
+ * alguna fila de la misma columna dice `25/09`, ese 25 solo puede ser un día — y entonces todas
+ * se leen igual. Basta UNA fila con evidencia; el resto de la columna la hereda.
+ *
+ * `dmy` cuando no hay evidencia: ver el bloque de `asDate`.
+ */
+export function detectarOrdenDeFecha(valores: unknown[]): 'dmy' | 'mdy' {
+  let pruebaDMY = 0;
+  let pruebaMDY = 0;
+
+  for (const v of valores) {
+    const s = asText(v);
+    if (!s) continue;
+    const m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.]\d{4}$/.exec(s);
+    if (!m) continue;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    // Solo cuenta lo que NO puede ser un mes. Un 13 en primera posición es un día, y punto.
+    if (a > 12 && b <= 12) pruebaDMY++;
+    if (b > 12 && a <= 12) pruebaMDY++;
+  }
+
+  /*
+   * Si la columna se contradice —hay filas que exigen `dmy` y otras `mdy`— no hay orden que
+   * la explique entera y el archivo está mal. Se elige `dmy` igual, que es el del mercado: la
+   * alternativa sería inventar un criterio para datos que ya son inconsistentes.
+   */
+  return pruebaMDY > pruebaDMY ? 'mdy' : 'dmy';
 }
 
 /**
@@ -256,8 +335,16 @@ export function assemblePayload(params: {
   row: unknown[];
   columns: ColumnMap;
   baseCurrency: string;
+  /**
+   * En qué orden vienen día y mes en las fechas con barras de ESTA hoja, deducido de la
+   * columna entera (`detectarOrdenDeFecha`). Sin él se usa `dmy`, el formato del mercado.
+   *
+   * No es un ajuste: leer `MM/DD` donde va `DD/MM` no falla, mueve el movimiento de MES — y
+   * eso no lo detecta nadie hasta que el cliente no reconoce su propio trimestre.
+   */
+  ordenDeFecha?: 'dmy' | 'mdy';
 }): Record<string, unknown> {
-  const { verdict, row, columns, baseCurrency } = params;
+  const { verdict, row, columns, baseCurrency, ordenDeFecha } = params;
 
   /*
    * EL SIGNO SE DESCARTA, Y ES OBLIGATORIO — no una comodidad.
@@ -282,7 +369,7 @@ export function assemblePayload(params: {
     return {
       type: verdict.type ?? 'other',
       category: verdict.category,
-      date: asDate(cell(row, columns.date)),
+      date: asDate(cell(row, columns.date), ordenDeFecha),
       description: asText(cell(row, columns.description)),
       originalAmount: amount,
       originalCurrency: currency,
@@ -296,8 +383,8 @@ export function assemblePayload(params: {
   // invoice / bill comparten forma (AR/AP).
   return {
     counterparty: asText(cell(row, columns.counterparty)),
-    issueDate: asDate(cell(row, columns.date)),
-    dueDate: asDate(cell(row, columns.dueDate)),
+    issueDate: asDate(cell(row, columns.date), ordenDeFecha),
+    dueDate: asDate(cell(row, columns.dueDate), ordenDeFecha),
     originalAmount: amount,
     originalCurrency: currency,
   };

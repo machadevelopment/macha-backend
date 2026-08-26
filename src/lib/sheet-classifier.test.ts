@@ -4,6 +4,7 @@ import {
   classifySheet,
   firmaDeCatalogo,
   pareceLibroDeMovimientos,
+  sinNingunaFecha,
 } from './sheet-classifier';
 
 /**
@@ -364,5 +365,65 @@ describe('un inventario de mostrador no usa vocabulario de bodega', () => {
   test('exige un costo POR UNIDAD y un identificador de artículo', () => {
     expect(firmaDeCatalogo(['Cantidad', 'Precio'])).toBe(null);
     expect(firmaDeCatalogo(['Cantidad', 'Costo Unitario'])).toBe(null); // sin identificador
+  });
+});
+
+/**
+ * El catálogo moderno no trae vocabulario de contacto — y sin una fecha no hay movimiento.
+ *
+ * `Clientes: ID · Nombre · Industria · Plan`, `Rutas`, `Flota`: los tres se iban al modelo,
+ * y la mitad de los diez libros del corpus traía al menos uno.
+ *
+ * No rompe el sesgo de "ante la duda, al modelo": un movimiento sin fecha lo rechaza
+ * `staging-rules` por `invalid_date`. Lo único que cambia es dónde se detiene.
+ */
+describe('una hoja sin una sola fecha no puede producir movimientos', () => {
+  const leer = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+
+  test('un catálogo de rutas o de flota se descarta', () => {
+    const rutas = [
+      ['ID Ruta', 'Ruta', 'Distancia (km)', 'Tiempo Estimado'],
+      ...Array.from({ length: 10 }, (_, i) => [`R-${i}`, `Ruta ${i}`, 100 + i, `${i}h`]),
+    ];
+    expect(sinNingunaFecha(rutas, leer)).toBe(true);
+  });
+
+  /*
+   * Lo que la hace segura: se mira el CONTENIDO. Una hoja de movimientos cuya columna se llame
+   * `Emisión` o `Corte` no tiene ninguna palabra reconocible, pero sus celdas traen fechas.
+   */
+  test('una hoja de movimientos con la columna mal nombrada NO se descarta', () => {
+    const raro = [
+      ['Ref', 'Emision', 'Detalle', 'Importe'],
+      ...Array.from({ length: 10 }, (_, i) => [
+        `F-${i}`,
+        `2025-0${(i % 9) + 1}-15`,
+        'Servicio',
+        100,
+      ]),
+    ];
+    expect(sinNingunaFecha(raro, leer)).toBe(false);
+  });
+
+  test('basta UNA celda con fecha en toda la muestra', () => {
+    const casi = [
+      ['A', 'B', 'C'],
+      ...Array.from({ length: 9 }, () => ['x', 'y', 'z']),
+      ['x', '2025-05-01', 'z'],
+    ];
+    expect(sinNingunaFecha(casi, leer)).toBe(false);
+  });
+
+  test('una hoja chica se manda igual: no se puede afirmar nada con tres filas', () => {
+    expect(
+      sinNingunaFecha(
+        [
+          ['A', 'B'],
+          ['x', 'y'],
+          ['x', 'y'],
+        ],
+        leer,
+      ),
+    ).toBe(false);
   });
 });

@@ -2,7 +2,13 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
 import { AiProviderError, runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
-import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
+import {
+  assemblePayload,
+  costoDeLaFila,
+  detectarOrdenDeFecha,
+  type ColumnMap,
+  type RowVerdict,
+} from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -256,6 +262,20 @@ export function construirFilas(
   columns: ColumnMap,
 ): ClassifiedRow[] {
   const out: ClassifiedRow[] = [];
+
+  /*
+   * El orden de día y mes se deduce UNA vez, de la columna de fecha del lote entero, y no fila
+   * por fila: `01/05` es ambiguo mirándolo solo, pero si alguna fila del mismo lote dice
+   * `25/09`, ese 25 solo puede ser un día y con eso se leen todas igual.
+   *
+   * Ver `detectarOrdenDeFecha`. Sin esto, un archivo guatemalteco entraba con las fechas
+   * invertidas —el 1 de mayo registrado el 5 de enero— y las filas con día mayor a 12 se
+   * marcaban por `invalid_date`. Medido sobre un archivo real: 41 % mal fechado, 59 % perdido.
+   */
+  const ordenDeFecha =
+    columns.date === null
+      ? 'dmy'
+      : detectarOrdenDeFecha(params.rows.map((r) => r[columns.date as number]));
   for (const [i, v] of porIndice) {
     if (v.e === 'skip') continue;
     const row = params.rows[i]!;
@@ -264,7 +284,13 @@ export function construirFilas(
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
+      payload: assemblePayload({
+        verdict,
+        row,
+        columns,
+        baseCurrency: params.baseCurrency,
+        ordenDeFecha,
+      }),
     });
 
     /*
