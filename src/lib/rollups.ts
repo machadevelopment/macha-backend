@@ -37,6 +37,55 @@ async function sumTransactionsForMonth(
   return Number(row?.total ?? 0);
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA ESCRITURA DEL CACHÉ NUNCA PUEDE HACER ESPERAR A UNA LECTURA (caída del 2026-08-26)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `metric_rollups` es un CACHÉ, y su clave única `(empresa, mes, tipo)` es LA MISMA para todas
+ * las cargas de dashboard de una empresa. Eso convirtió una transacción colgada en la caída
+ * del producto entero:
+ *
+ *     pid 315 · transacción abierta 57 min, con su insert de rollup sin commitear
+ *     9 sesiones encoladas: insert into "metric_rollups" (...)
+ *     macha_app: 10 de 10 conexiones → todo lo que toca la base falla
+ *
+ * `onConflictDoNothing` NO evita esto y es la parte que sorprende: ante una clave duplicada
+ * Postgres hace ESPERAR al segundo insert hasta saber si el primero commitea o aborta. La
+ * cláusula resuelve el conflicto, no la espera.
+ *
+ * ═══ EL LOCK CONSULTIVO, Y POR QUÉ ES LA HERRAMIENTA CORRECTA ═══
+ *
+ * `pg_try_advisory_xact_lock` no espera: devuelve `false` en el acto si otro lo tiene. Así que
+ * cuando dos lectores concurrentes quieren llenar el mismo caché, uno escribe y el resto se lo
+ * saltan **sin tocar la clave única**, o sea sin poder encolarse detrás de nadie.
+ *
+ * Con la transacción colgada de la caída: ella tendría el lock, y las otras nueve lo verían
+ * ocupado y seguirían de largo. Ninguna se habría bloqueado y el pool nunca se habría agotado.
+ *
+ * ═══ PERDER LA ESCRITURA ES INOFENSIVO, Y YA ESTABA ASUMIDO ═══
+ *
+ * El comentario de `onConflictDoNothing` más abajo ya lo dice: quien gana calcula sobre EL
+ * MISMO ledger y escribe el mismo número. Saltarse el caché no devuelve un dato peor — el
+ * valor se calculó igual y se devuelve igual; lo único que se pierde es tenerlo guardado, y la
+ * siguiente lectura lo vuelve a intentar. La degradación es "más lento", nunca "mal".
+ *
+ * ⚠️ Es por EMPRESA y no por fila a propósito: una empresa escribe sus doce meses en un solo
+ * insert, así que un lock por fila multiplicaría las llamadas sin cambiar el resultado.
+ *
+ * ⚠️ Y NO se aplica al camino de promoción (`refreshExistingRollups`): ese corre en el worker,
+ * no compite con lecturas y debe escribir siempre.
+ */
+async function cachePropio(db: DB, companyId: string): Promise<boolean> {
+  // `_xact_`: se libera solo al cerrar la transacción, así que no hay nada que desbloquear a
+  // mano ni forma de olvidarse — que es justo el error que causó la caída.
+  const filas = await db.execute<{ tomado: boolean }>(
+    rawSql`select pg_try_advisory_xact_lock(hashtext(${'rollup:' + companyId})::bigint) as tomado`,
+  );
+  const fila = (filas as unknown as { tomado: boolean }[])[0];
+  return fila?.tomado === true;
+}
+
 async function upsertMonthlyRollup(
   db: DB,
   companyId: string,
@@ -68,6 +117,9 @@ async function upsertMonthlyRollup(
      * proceso pudo crear la fila. `onConflictDoNothing` la absorbe en vez de tumbar la
      * promoción entera por un rollup — que es un caché, no contabilidad.
      */
+    // Ver `cachePropio`: si otro lector ya está llenando este caché, no se escribe. Encolarse
+    // detrás de su lock es lo que tumbó producción.
+    if (!(await cachePropio(db, companyId))) return;
     await db
       .insert(metricRollups)
       .values({
@@ -227,7 +279,11 @@ export async function getOrComputeMonthlyAmounts(
    * este insert es inofensivo: el que ganó calculó sobre EL MISMO ledger y escribió el mismo
    * número.
    */
-  await db.insert(metricRollups).values(toInsert).onConflictDoNothing();
+  // Ver `cachePropio`. Va DESPUÉS de calcular y ANTES de escribir: el valor que se devuelve
+  // no depende de haber ganado el lock, solo el guardarlo.
+  if (await cachePropio(db, companyId)) {
+    await db.insert(metricRollups).values(toInsert).onConflictDoNothing();
+  }
 
   for (const { period, type } of missing) {
     result.get(period)![type] = computed.get(`${period}|${type}`) ?? 0;

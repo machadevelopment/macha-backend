@@ -11,6 +11,7 @@ import { startReportGenerateWorker } from '@/queue/workers/report-generate';
 import { startReportTickWorker } from '@/queue/workers/report-tick';
 import { startEmailSendWorker } from '@/queue/workers/email-send';
 import { startDbBackupWorker } from '@/queue/workers/db-backup';
+import { startPoolWatchWorker } from '@/queue/workers/pool-watch';
 import { runStartupIsolationCheck } from '@/lib/db-role-check';
 import { evaluateEmailSender } from '@/lib/email-sender-check';
 import { sql } from '@/db/client';
@@ -74,6 +75,7 @@ startQueue()
       startReportTickWorker(),
       startEmailSendWorker(),
       startDbBackupWorker(),
+      startPoolWatchWorker(),
     ]),
   )
   .catch((err) => {

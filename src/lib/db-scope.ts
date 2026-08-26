@@ -1,6 +1,13 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { sql, schema, type DB } from '@/db/client';
 
+/**
+ * Cuánto se espera a que el dueño de una conexión reservada la cierre antes de forzar el
+ * rollback. Ver la cabecera del watchdog más abajo para por qué 90 s y por qué va DESPUÉS del
+ * timeout de Postgres.
+ */
+const TIEMPO_MAXIMO_MS = 90_000;
+
 export interface ScopedConnection {
   db: DB;
   /**
@@ -39,7 +46,14 @@ export interface ScopedConnection {
  * viviera en otra conexión, la empresa resuelta no estaría cubierta por el mismo
  * backstop.
  */
-export async function reserveScopedConnection(): Promise<ScopedConnection> {
+export async function reserveScopedConnection(
+  /**
+   * Solo los tests lo pasan. Es un parámetro y no una variable de entorno a propósito: el
+   * valor de producción es una decisión de diseño (ver la cabecera del watchdog), no algo que
+   * convenga poder aflojar desde un panel a las 3 de la mañana.
+   */
+  tiempoMaximoMs: number = TIEMPO_MAXIMO_MS,
+): Promise<ScopedConnection> {
   const reserved = await sql.reserve();
   await reserved`begin`;
 
@@ -62,6 +76,7 @@ export async function reserveScopedConnection(): Promise<ScopedConnection> {
   const release = async (commitTx: boolean) => {
     if (released) return;
     released = true;
+    clearTimeout(guardia);
     try {
       if (commitTx) await reserved`commit`;
       else await reserved`rollback`;
@@ -69,6 +84,67 @@ export async function reserveScopedConnection(): Promise<ScopedConnection> {
       reserved.release();
     }
   };
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * EL WATCHDOG: EL CIERRE NO PUEDE DEPENDER DE QUE UN HOOK SE EJECUTE
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * La cabecera de arriba lo dice sin darle peso: en el patrón por request, el
+   * `commit`/`rollback` se delega a los hooks de Elysia. El 2026-08-26 eso tumbó producción
+   * durante una hora, y así se veía en la base:
+   *
+   *     pid 315 · transacción ABIERTA hace 57 minutos · idle todo ese tiempo
+   *     9 sesiones bloqueadas esperándola: insert into "metric_rollups" (...)
+   *     macha_app: 10 de 10 conexiones
+   *
+   * Si el hook no corre —cliente que se desconecta, request abortada, un camino de salida no
+   * cubierto— la transacción queda abierta con sus locks y la conexión nunca vuelve al pool.
+   * Con `max: 10`, diez fugas dejan el producto sin base. Y el síntoma no se parece a la
+   * causa: se vivió como "el login está roto", porque `/continue` es la primera puerta
+   * después de entrar.
+   *
+   * Este temporizador convierte el cierre en una garantía de ESTE archivo. Ya no importa qué
+   * haga Elysia: si nadie cerró en `TIEMPO_MAXIMO_MS`, se hace rollback y la conexión vuelve.
+   *
+   * ═══ POR QUÉ ROLLBACK Y NUNCA COMMIT ═══
+   *
+   * Una transacción que llegó al watchdog es, por definición, una cuyo dueño se perdió. No se
+   * sabe si terminó su trabajo. Commitear a ciegas escribiría contabilidad a medias en un
+   * producto financiero; el rollback deja las cosas como estaban, que es la única opción
+   * defendible cuando no se sabe.
+   *
+   * ═══ POR QUÉ 90 SEGUNDOS, Y POR QUÉ MÁS QUE EL DE POSTGRES ═══
+   *
+   * `db/client.ts` pone `idle_in_transaction_session_timeout` en 60 s. Este va DESPUÉS a
+   * propósito: el de Postgres cubre lo que está idle, y este cubre lo que ya no está idle
+   * porque quedó esperando un lock —justo el estado de las nueve sesiones de la caída, que
+   * NO son "idle in transaction" y por lo tanto ese timeout no las alcanza—.
+   *
+   * Son dos redes para dos estados distintos, no una redundante. Y 90 s es holgado: ninguna
+   * request legítima dura tanto (el worker de ingesta usa transacciones cortas y deja las
+   * llamadas al modelo FUERA, ver `queue/workers/excel-ingest.ts`), así que llegar acá
+   * siempre significa que algo se rompió.
+   *
+   * `unref()` para no mantener vivo el proceso por un temporizador pendiente: un contenedor
+   * que no puede terminar su apagado es la forma de arreglar esto creando otro problema.
+   */
+  /*
+   * `guardia` se declara DESPUÉS de `release` y este la referencia: es seguro porque `release`
+   * nunca se invoca de forma sincrónica antes de esta línea — la primera llamada llega desde
+   * un hook de Elysia, del worker, o desde este propio temporizador.
+   */
+  const guardia = setTimeout(() => {
+    console.error(
+      `[db-scope] transacción sin cerrar tras ${tiempoMaximoMs} ms: se hace ROLLBACK y se ` +
+        'devuelve la conexión al pool. Es una FUGA — alguien reservó y nadie cerró. ' +
+        'Ver la cabecera del watchdog en lib/db-scope.ts.',
+    );
+    void release(false).catch((err) => {
+      console.error('[db-scope] el rollback del watchdog falló:', err);
+    });
+  }, tiempoMaximoMs);
+  guardia.unref?.();
 
   return {
     db: drizzle(reserved, { schema }),

@@ -31,6 +31,8 @@ export const QUEUES = {
   alertEvaluate: 'alert.evaluate',
   emailSend: 'email.send',
   dbBackup: 'db.backup',
+  /** Vigilancia del pool de conexiones — ver `queue/workers/pool-watch.ts`. */
+  poolWatch: 'db.pool-watch',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
@@ -99,6 +101,16 @@ export const RETRY_POLICY: Record<QueueName, PgBoss.SendOptions> = {
   // Backup fallido -> reintenta pronto en vez de esperar 24h a la próxima noche. El
   // `pg_dump` de una base que crece puede pasarse de 15 minutos y quedar en el mismo
   // limbo; media hora da margen sin dejar un job colgado indefinidamente.
+  /*
+   * El valor es INDIFERENTE en la práctica y se pone en 1 para no debilitar la garantía que
+   * `retry-policy.test.ts` protege (toda cola con un techo explícito de reintentos).
+   *
+   * Es indiferente porque `pool-watch` captura sus propios errores y nunca lanza: pg-boss no
+   * ve un fallo, así que no hay nada que reintentar. Y si algún día lanzara, la medición de
+   * dentro de dos minutos la reemplaza — una vigilancia que se reintenta solo agrega ruido
+   * cuando la base ya está en problemas.
+   */
+  [QUEUES.poolWatch]: { retryLimit: 1, retryDelay: 30, retryBackoff: false },
   [QUEUES.dbBackup]: {
     retryLimit: 2,
     retryDelay: 300,
@@ -118,6 +130,8 @@ export async function startQueue(): Promise<PgBoss> {
   // Nightly pg_dump -> S3 (CU-868kfvar3), 07:00 UTC — after the report tick so the
   // two don't contend for DB read load in the same minute.
   await boss.schedule(QUEUES.dbBackup, '0 7 * * *');
+  // Cada 2 minutos: caza lo que el watchdog (90 s) y Postgres (60 s) no alcanzaron.
+  await boss.schedule(QUEUES.poolWatch, '*/2 * * * *');
   return boss;
 }
 
