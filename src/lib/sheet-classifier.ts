@@ -400,52 +400,97 @@ export function canSkipSheet(headerRow: unknown[]): boolean {
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
- * SIN UNA SOLA FECHA EN TODA LA HOJA NO HAY MOVIMIENTO POSIBLE
+ * UNA HOJA SIN COLUMNA DE FECHA, O SIN DINERO FUERA DE ELLA, NO PUEDE PRODUCIR MOVIMIENTOS
  * ═══════════════════════════════════════════════════════════════════════════════════════════
  *
- * El pre-filtro de catálogos reconoce vocabulario de CONTACTO (`email`, `teléfono`,
- * `apellido`) porque nació de los catálogos de clientes que traían los primeros archivos. Un
- * catálogo moderno no trae nada de eso:
+ * El pre-filtro de catálogos reconoce vocabulario de CONTACTO (`email`, `teléfono`, `apellido`)
+ * porque nació de los catálogos de clientes que traían los primeros archivos. Un catálogo
+ * moderno no trae nada de eso:
  *
  *     Clientes   ID Cliente · Nombre · Industria · Plan
+ *     Clientes   ID Cliente · Nombre · Tipo · Área Principal · Fecha Alta
  *     Rutas      ID Ruta · Ruta · Distancia (km) · Tiempo Estimado
  *     Flota      ID Unidad · Placa · Marca · Modelo · Anio · Estado
  *
- * Las tres se iban al modelo: se paga por clasificarlas y sus filas quedan a un veredicto de
- * convertirse en movimientos que el cliente nunca tuvo. Encontrado en un corpus de diez libros
- * reales (2026-08-25), donde la mitad de los archivos traía al menos una.
+ * Los cuatro se iban al modelo: se paga por clasificarlos y sus filas quedan a un veredicto de
+ * convertirse en movimientos que el cliente nunca tuvo. En la auditoría contra el validador de
+ * extracción (2026-08-25), la mitad de los diez archivos traía al menos uno.
  *
- * ═══ POR QUÉ ESTA SEÑAL NO CONTRADICE EL SESGO DE LA CASA ═══
+ * ═══ POR QUÉ ESTA SEÑAL NO ROMPE EL SESGO DE LA CASA ═══
  *
  * El pre-filtro descarta con el sesgo explícito de PAGAR DE MÁS: ante la duda, al modelo,
- * porque descartar de más pierde contabilidad del cliente en silencio. Esta comprobación no
- * rompe ese sesgo, y el motivo es que **no descarta nada que hoy sobreviva**.
+ * porque descartar de más pierde contabilidad del cliente en silencio. Esto no rompe ese sesgo,
+ * y el motivo es que **no descarta nada que hoy sobreviva**: `staging-rules` exige fecha legible
+ * Y monto positivo, así que una hoja que no puede dar ninguna de las dos produce, en el mejor
+ * de los casos, filas marcadas — pagando el modelo para llegar ahí. Lo único que cambia es
+ * dónde se detiene.
  *
- * Un movimiento sin fecha no se promueve: `staging-rules` lo rechaza entero por `invalid_date`
- * y queda en revisión interna. O sea que una hoja donde NINGUNA celda parece una fecha produce,
- * en el mejor de los casos, filas marcadas — pagando el modelo para llegar ahí. Lo único que
- * cambia es dónde se detiene: antes de la llamada en vez de después.
+ * ═══ SE JUZGA POR COLUMNA, Y ESO ES LO QUE LO HACE SEGURO ═══
  *
- * ═══ SE MIRA EL CONTENIDO, NO LOS NOMBRES ═══
+ * Dos versiones anteriores miraban las celdas suelta por suelta y las dos se equivocaban, en
+ * direcciones opuestas:
  *
- * Y eso es lo que la hace segura. Una hoja de movimientos cuya columna se llame `Emisión` o
- * `Corte` no tiene ninguna palabra que el vocabulario reconozca, pero SUS CELDAS siguen
- * trayendo fechas. Juzgar por el nombre habría vuelto a apostar a una lista; juzgar por los
- * valores no puede equivocarse en esa dirección.
+ *   · "¿hay alguna celda con fecha?" — el catálogo de un bufete trae `Fecha Alta`, una fecha
+ *     REAL, así que pasaba el filtro aunque no tuviera un centavo en ninguna columna.
+ *   · "¿hay alguna celda con número?" — las fechas de Excel SON números, así que la columna de
+ *     fecha fingía ser dinero y volvía a pasar.
  *
- * Basta UNA celda con pinta de fecha en toda la muestra para que la hoja siga su camino.
+ * Lo que resuelve las dos es exigir que la fecha y el dinero estén en columnas DISTINTAS: se
+ * busca la columna que es predominantemente fecha, y después dinero en cualquier OTRA. Un
+ * catálogo con `Fecha Alta` y ninguna cifra más se descarta; y una hoja de movimientos cuyos
+ * montos caen todos en el rango de seriales de Excel (32.874–73.415, o sea decenas de miles)
+ * NO se descarta, porque su fecha y su monto siguen siendo dos columnas.
+ *
+ * Y se juzga por el CONTENIDO, no por los nombres: una hoja de movimientos cuya columna se
+ * llame `Emisión` o `Corte` no tiene ninguna palabra que el vocabulario reconozca, pero sus
+ * celdas siguen trayendo fechas. Juzgar por el nombre habría vuelto a apostar a una lista.
+ *
+ * Depende de que los lectores no INVENTEN valores, y eso hubo que arreglarlo antes:
+ * `asDate("CLI-0001")` devolvía 2001-01-01 y `asNumber("SKU-4567")` devolvía -4567, así que
+ * cualquier columna de código fingía ser las dos cosas. Ver `row-assembly`.
  */
-export function sinNingunaFecha(rows: unknown[][], leerFecha: (v: unknown) => unknown): boolean {
-  // `rows` viene desde el encabezado; los datos empiezan en la 1.
+export function noPuedeProducirMovimientos(
+  rows: unknown[][],
+  leerFecha: (v: unknown) => unknown,
+  leerNumero: (v: unknown) => unknown,
+): boolean {
   const muestra = rows.slice(1, 60);
   // Con muy pocas filas no se puede afirmar nada: una hoja chica se manda igual.
   if (muestra.length < 5) return false;
-  for (const fila of muestra) {
-    for (const celda of fila) {
-      if (leerFecha(celda) !== null && leerFecha(celda) !== undefined) return false;
+
+  const ancho = Math.max(...muestra.map((f) => f.length), 0);
+  let columnaDeFecha = -1;
+  let mejorProporcion = 0;
+  const conNumeros = new Set<number>();
+
+  for (let c = 0; c < ancho; c++) {
+    const valores = muestra
+      .map((f) => f[c])
+      .filter((v) => v !== null && v !== undefined && v !== '');
+    if (valores.length === 0) continue;
+
+    const fechas = valores.filter(
+      (v) => leerFecha(v) !== null && leerFecha(v) !== undefined,
+    ).length;
+    // El cero no cuenta: `staging-rules` exige monto POSITIVO.
+    const numeros = valores.filter((v) => {
+      const n = leerNumero(v);
+      return typeof n === 'number' && n !== 0;
+    }).length;
+
+    const proporcion = fechas / valores.length;
+    // 0,8 y no 1,0: un archivo real trae una fila a medio llenar en la columna de fecha.
+    if (proporcion >= 0.8 && proporcion > mejorProporcion) {
+      mejorProporcion = proporcion;
+      columnaDeFecha = c;
     }
+    if (numeros > 0) conNumeros.add(c);
   }
-  return true;
+
+  if (columnaDeFecha === -1) return true;
+  // El dinero tiene que estar en OTRA columna. Ver el bloque de arriba.
+  conNumeros.delete(columnaDeFecha);
+  return conNumeros.size === 0;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   asDate,
+  asNumber,
   assemblePayload,
   costoDeLaFila,
   detectarOrdenDeFecha,
@@ -428,5 +429,73 @@ describe('el orden de día y mes', () => {
       expect(detectarOrdenDeFecha([])).toBe('dmy');
       expect(detectarOrdenDeFecha(['2025-05-01', 46023, null])).toBe('dmy');
     });
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UN CÓDIGO DE CATÁLOGO NO ES NI UNA FECHA NI UN MONTO (auditoría 2026-08-25)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Los dos lectores inventaban valores a partir de identificadores, y con la misma consecuencia:
+ * si el mapa de columnas apunta a una columna de código —y `ID Cliente` es la primera columna
+ * de media base de archivos— cada fila entra con un dato inventado que ninguna validación
+ * puede desmentir, porque es una fecha válida y un número válido.
+ *
+ *     new Date("CLI-0001")   →  2001-01-01
+ *     asNumber("SKU-4567")   →  -4567
+ *
+ * `asDate` ya tenía un rango de plausibilidad para los NÚMEROS por este mismo motivo; el
+ * camino de texto no tenía ninguna guarda. Y de paso desarmaban el filtro de catálogos: una
+ * hoja de clientes "tenía fechas y cifras" en su columna de código.
+ */
+describe('los lectores no inventan datos a partir de un código', () => {
+  const CODIGOS = ['CLI-0001', 'RUT-001', 'PRY-0012', 'SKU-4567', 'V-0001', 'INV-0093'];
+
+  test('ningún código de catálogo es una fecha', () => {
+    for (const c of CODIGOS) expect(asDate(c)).toBe(null);
+  });
+
+  test('ningún código de catálogo es un monto', () => {
+    for (const c of CODIGOS) expect(asNumber(c)).toBe(null);
+  });
+
+  test('ni un texto con un número pegado', () => {
+    expect(asNumber('Zona 10')).toBe(null);
+    expect(asNumber('Sucursal 3')).toBe(null);
+    expect(asDate('Enero 2026')).toBe(null);
+  });
+
+  /*
+   * La contraparte: la decoración de moneda que un archivo real SÍ trae tiene que seguir
+   * leyéndose. Es lista blanca, no lista negra — no se puede enumerar lo que `new Date` y el
+   * borrado de caracteres aceptan de más, así que se enumera lo que sí es un dato.
+   */
+  test('la decoración de moneda de un archivo real sigue leyéndose', () => {
+    expect(asNumber('Q 1,234.56')).toBe(1234.56);
+    expect(asNumber('US$ 1,234.56')).toBe(1234.56);
+    expect(asNumber('GTQ 100')).toBe(100);
+    expect(asNumber('1.234,56')).toBe(1234.56);
+    expect(asNumber('1,234.56 Q')).toBe(1234.56);
+    expect(asNumber('1 234,56')).toBe(1234.56);
+    // Paréntesis contables: es un negativo, no un adorno.
+    expect(asNumber('(1,234.56)')).toBe(-1234.56);
+    expect(asNumber('0')).toBe(0);
+  });
+
+  test('y los formatos de fecha de un archivo real también', () => {
+    expect(asDate('2025-05-01')).toBe('2025-05-01');
+    expect(asDate('01/05/2025')).toBe('2025-05-01');
+    expect(asDate('2025/05/01')).toBe('2025-05-01');
+    expect(asDate('05-May-2025')).toBe('2025-05-05');
+    expect(asDate('May 5, 2025')).toBe('2025-05-05');
+    expect(asDate('2025-05-01T10:30:00')).toBe('2025-05-01');
+    expect(asDate(46023)).toBe('2026-01-01');
+  });
+
+  test('una fecha fuera del rango de plausibilidad de negocio es null', () => {
+    // Acota lo que un formato reconocido pero mal escrito puede producir.
+    expect(asDate('1901-05-05')).toBe(null);
+    expect(asDate('2200-01-01')).toBe(null);
   });
 });
