@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Macha Finance — CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
+  "description": "Macha Finance \u2014 CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "build": "bun build src/index.ts --target bun --env=disable --outdir dist",
@@ -19,6 +19,7 @@
     "test:db:down": "docker compose -f docker-compose.test.yml down -v",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
+    "db:size": "bun run scripts/db-size.ts",
     "db:seed": "bun run scripts/seed.ts",
     "provision:tenant": "bun run scripts/provision-tenant.ts",
     "restore:drill": "bun run scripts/restore-drill.ts",
