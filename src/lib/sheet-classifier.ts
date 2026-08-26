@@ -399,6 +399,56 @@ export function canSkipSheet(headerRow: unknown[]): boolean {
 }
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * SIN UNA SOLA FECHA EN TODA LA HOJA NO HAY MOVIMIENTO POSIBLE
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El pre-filtro de catálogos reconoce vocabulario de CONTACTO (`email`, `teléfono`,
+ * `apellido`) porque nació de los catálogos de clientes que traían los primeros archivos. Un
+ * catálogo moderno no trae nada de eso:
+ *
+ *     Clientes   ID Cliente · Nombre · Industria · Plan
+ *     Rutas      ID Ruta · Ruta · Distancia (km) · Tiempo Estimado
+ *     Flota      ID Unidad · Placa · Marca · Modelo · Anio · Estado
+ *
+ * Las tres se iban al modelo: se paga por clasificarlas y sus filas quedan a un veredicto de
+ * convertirse en movimientos que el cliente nunca tuvo. Encontrado en un corpus de diez libros
+ * reales (2026-08-25), donde la mitad de los archivos traía al menos una.
+ *
+ * ═══ POR QUÉ ESTA SEÑAL NO CONTRADICE EL SESGO DE LA CASA ═══
+ *
+ * El pre-filtro descarta con el sesgo explícito de PAGAR DE MÁS: ante la duda, al modelo,
+ * porque descartar de más pierde contabilidad del cliente en silencio. Esta comprobación no
+ * rompe ese sesgo, y el motivo es que **no descarta nada que hoy sobreviva**.
+ *
+ * Un movimiento sin fecha no se promueve: `staging-rules` lo rechaza entero por `invalid_date`
+ * y queda en revisión interna. O sea que una hoja donde NINGUNA celda parece una fecha produce,
+ * en el mejor de los casos, filas marcadas — pagando el modelo para llegar ahí. Lo único que
+ * cambia es dónde se detiene: antes de la llamada en vez de después.
+ *
+ * ═══ SE MIRA EL CONTENIDO, NO LOS NOMBRES ═══
+ *
+ * Y eso es lo que la hace segura. Una hoja de movimientos cuya columna se llame `Emisión` o
+ * `Corte` no tiene ninguna palabra que el vocabulario reconozca, pero SUS CELDAS siguen
+ * trayendo fechas. Juzgar por el nombre habría vuelto a apostar a una lista; juzgar por los
+ * valores no puede equivocarse en esa dirección.
+ *
+ * Basta UNA celda con pinta de fecha en toda la muestra para que la hoja siga su camino.
+ */
+export function sinNingunaFecha(rows: unknown[][], leerFecha: (v: unknown) => unknown): boolean {
+  // `rows` viene desde el encabezado; los datos empiezan en la 1.
+  const muestra = rows.slice(1, 60);
+  // Con muy pocas filas no se puede afirmar nada: una hoja chica se manda igual.
+  if (muestra.length < 5) return false;
+  for (const fila of muestra) {
+    for (const celda of fila) {
+      if (leerFecha(celda) !== null && leerFecha(celda) !== undefined) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * QUÉ catálogo es, cuando es catálogo. `null` si no lo es.
  *
  * Hasta acá la clasificación solo decía sí/no y toda hoja de catálogo terminaba igual: en la

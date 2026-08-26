@@ -18,7 +18,7 @@ import {
   fusionarMapaDeColumnas,
   type VeredictoCrudo,
 } from '@/lib/anthropic';
-import type { ColumnMap } from '@/lib/row-assembly';
+import { asDate, type ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import {
@@ -34,7 +34,12 @@ import { medirFilas } from '@/lib/reconciliation';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
-import { canSkipSheet, firmaDeCatalogo, pareceLibroDeMovimientos } from '@/lib/sheet-classifier';
+import {
+  canSkipSheet,
+  firmaDeCatalogo,
+  pareceLibroDeMovimientos,
+  sinNingunaFecha,
+} from '@/lib/sheet-classifier';
 import {
   importarInventario,
   mapearInventarioSerializado,
@@ -701,6 +706,39 @@ export function startExcelIngestWorker(): Promise<string> {
             });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
+            );
+            continue;
+          }
+
+          /*
+           * ═══ TERCER FILTRO: NI UNA SOLA FECHA EN TODA LA HOJA ═══
+           *
+           * El pre-filtro de arriba reconoce vocabulario de contacto, y un catálogo moderno no
+           * trae nada de eso — `Clientes: ID · Nombre · Industria · Plan`, `Rutas`, `Flota`.
+           * Los tres se iban al modelo. Encontrado en un corpus de diez libros reales
+           * (2026-08-25): la mitad de los archivos traía al menos uno.
+           *
+           * NO rompe el sesgo de "ante la duda, al modelo", porque no descarta nada que hoy
+           * sobreviva: un movimiento sin fecha lo rechaza `staging-rules` por `invalid_date` y
+           * queda en revisión interna. Lo único que cambia es dónde se detiene — antes de
+           * pagar la llamada en vez de después.
+           *
+           * Y se juzga por el CONTENIDO de las celdas, no por los nombres de columna: una hoja
+           * de movimientos cuya columna se llame `Emisión` o `Corte` no tiene ninguna palabra
+           * que el vocabulario reconozca, pero sus celdas siguen trayendo fechas.
+           */
+          if (sinNingunaFecha(rows, asDate)) {
+            totalRowsSkippedPreFiltro += rows.length;
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'catalogo',
+              filas: rows.length - 1,
+            });
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada: ni una celda ` +
+                `con fecha en toda la hoja, así que no puede producir movimientos ` +
+                `(${rows.length - 1} filas no van al modelo)`,
             );
             continue;
           }

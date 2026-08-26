@@ -3,6 +3,7 @@ import {
   asDate,
   assemblePayload,
   costoDeLaFila,
+  detectarOrdenDeFecha,
   type ColumnMap,
   type RowVerdict,
 } from './row-assembly';
@@ -356,5 +357,76 @@ describe('el costo que venía en la misma fila y se perdía', () => {
     // positivo. Un costo negativo se marcaría `invalid_amount` y se iría a revisión.
     const neg: ColumnMap = { ...CAFETERIA, costTotal: 7 };
     expect(costoDeLaFila([46174, 'P01', 'x', 'y', 6, 18, 108, -27], neg)).toBe(27);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * "01/05/2025" ES EL 1 DE MAYO — EL BUG QUE MUEVE PLATA DE MES SIN QUE NADA FALLE
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `new Date("01/05/2025")` devuelve el 5 de ENERO: JavaScript asume la convención de Estados
+ * Unidos. Este producto factura en Guatemala, donde el día va primero.
+ *
+ * Medido sobre el archivo real de una agencia de marketing (2026-08-25), 150 filas de ingresos:
+ *
+ *   · 61 entraban con la fecha INVERTIDA y sin que nada fallara — el 1 de mayo registrado el
+ *     5 de enero, o sea en otro trimestre del dashboard;
+ *   · 89 se marcaban por `invalid_date` y no entraban, que son exactamente las que tienen día
+ *     mayor a 12 y por eso no pueden fingir ser un mes.
+ *
+ * Es el peor de los fallos encontrados en el corpus porque no borra ni inventa plata: la mueve
+ * de período, que es indetectable salvo que el dueño reconozca que su mayo no es su mayo.
+ */
+describe('el orden de día y mes', () => {
+  test('una fecha guatemalteca se lee como día primero', () => {
+    expect(asDate('01/05/2025')).toBe('2025-05-01');
+    expect(asDate('25/09/2025')).toBe('2025-09-25');
+    expect(asDate('01-05-2025')).toBe('2025-05-01');
+    expect(asDate('01.05.2025')).toBe('2025-05-01');
+  });
+
+  test('con orden `mdy` explícito se lee al revés', () => {
+    expect(asDate('05/01/2025', 'mdy')).toBe('2025-05-01');
+    expect(asDate('09/25/2025', 'mdy')).toBe('2025-09-25');
+  });
+
+  test('ISO y seriales de Excel no se tocan: ahí no hay ambigüedad', () => {
+    expect(asDate('2025-05-01')).toBe('2025-05-01');
+    expect(asDate(46023)).toBe('2026-01-01');
+  });
+
+  /*
+   * Un 31 de febrero desborda al mes siguiente con `Date`. Eso no es una fecha, es un dato
+   * malo, y darlo por bueno metería el movimiento en marzo.
+   */
+  test('una fecha que no existe es null, no el mes siguiente', () => {
+    expect(asDate('31/02/2025')).toBe(null);
+    expect(asDate('32/01/2025')).toBe(null);
+    expect(asDate('01/13/2025')).toBe(null);
+  });
+
+  describe('el orden se deduce de la COLUMNA, no de la celda', () => {
+    /*
+     * `01/05` es genuinamente ambiguo mirándolo solo. Lo que lo resuelve es que otra fila de
+     * la MISMA columna traiga un valor que solo puede ser un día.
+     */
+    test('una sola fila con día mayor a 12 fija toda la columna', () => {
+      expect(detectarOrdenDeFecha(['01/05/2025', '03/04/2025', '25/09/2025'])).toBe('dmy');
+    });
+
+    test('y al revés: un archivo exportado en formato gringo se detecta', () => {
+      expect(detectarOrdenDeFecha(['05/01/2025', '04/03/2025', '09/25/2025'])).toBe('mdy');
+    });
+
+    /*
+     * Sin evidencia hay que elegir, y se elige el formato del mercado al que se le factura.
+     * Es además el sesgo seguro: leer `MM/DD` donde va `DD/MM` es lo que produjo el bug.
+     */
+    test('sin evidencia se usa el formato del mercado', () => {
+      expect(detectarOrdenDeFecha(['01/05/2025', '03/04/2025'])).toBe('dmy');
+      expect(detectarOrdenDeFecha([])).toBe('dmy');
+      expect(detectarOrdenDeFecha(['2025-05-01', 46023, null])).toBe('dmy');
+    });
   });
 });
