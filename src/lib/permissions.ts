@@ -17,7 +17,8 @@ export type ClientCapability =
   | 'change_roles'
   | 'billing'
   | 'manage_inventory'
-  | 'manage_fx_rate';
+  | 'manage_fx_rate'
+  | 'settle_receivables';
 
 // CU-868kh8pwv — `delete_company` SE RETIRÓ de la matriz (decisión de Jose, 2026-07-28).
 //
@@ -81,6 +82,27 @@ const CLIENT_MATRIX: Record<ClientCapability, ClientRole[]> = {
    * que un ajuste de hoy no puede mover las cifras de marzo.
    */
   manage_fx_rate: ['owner', 'admin'],
+
+  /*
+   * ═══ MARCAR UNA CUENTA COMO COBRADA O PAGADA (CU-868kx4cr6, 2026-08-27) ═══
+   *
+   * Reporte de Jose: *"si ya está pagada, se debería restar del balance abierto; actualmente
+   * sale el capital completo de las cuentas aunque ya están pagadas."* No había nada en el
+   * producto que cambiara `invoices.status` de `open` a `paid`: la columna existía y nadie la
+   * escribía nunca, así que el balance abierto era la suma de todo lo facturado en la historia.
+   *
+   * ═══ POR QUÉ TAMBIÉN `member`, QUE ES LA DECISIÓN NO OBVIA ═══
+   *
+   * Mueve una cifra de portada, y el reflejo es restringirlo como `manage_fx_rate`. Pero la
+   * matriz ya deja que un `member` haga algo estrictamente MAYOR: `upload_excel` escribe la
+   * contabilidad ENTERA de la empresa. Negarle marcar UNA factura como cobrada mientras puede
+   * cargar el libro completo no protege nada y sí rompe el flujo — cobrar es tarea diaria de
+   * quien opera, exactamente el argumento con que `manage_inventory` incluye a `member`.
+   *
+   * Y es reversible: se puede volver a `open` por el mismo camino, así que un error no destruye
+   * nada. Ahí está la diferencia con `revert_upload`, que sí borra filas.
+   */
+  settle_receivables: ['owner', 'admin', 'member'],
 };
 
 export function clientCan(role: ClientRole, capability: ClientCapability): boolean {

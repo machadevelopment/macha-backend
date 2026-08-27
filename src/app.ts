@@ -48,6 +48,7 @@ import {
   BILLING_NOT_CONFIGURED_MESSAGE,
 } from '@/lib/billing/billing-errors';
 import { members, invitationAcceptance } from '@/modules/members';
+import { receivables } from '@/modules/receivables';
 import { transactionsList } from '@/modules/transactions';
 import { reports_ } from '@/modules/reports';
 
@@ -209,6 +210,7 @@ export function createApp() {
       .use(publicDemoRequests)
       .use(me)
       .use(transactionsList)
+      .use(receivables)
       .use(members)
       .use(invitationAcceptance)
       .get('/', () => ({ service: 'macha-backend', env: env.nodeEnv }))
