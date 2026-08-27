@@ -3,6 +3,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { adminGuard } from '@/guards/admin.guard';
 import { assertStaffCapability } from '@/guards/require-capability';
 import { companies, fxRates } from '@/db/schema';
+import { ESQUEMA_TASA } from '@/lib/fx';
 import { logAdminAction } from '@/lib/admin-audit';
 import { counterCurrency, type Currency } from '@/lib/fx';
 
@@ -158,7 +159,8 @@ export const adminFxRates = new Elysia({ prefix: '/admin/companies/:id/fx-rates'
     {
       body: t.Object({
         quoteCurrency: t.Union([t.Literal('GTQ'), t.Literal('USD')]),
-        rate: t.Number(),
+        // Estrictamente positiva. El porqué —y por qué vive en un solo lugar— en `lib/fx.ts`.
+        rate: ESQUEMA_TASA,
         // date-only, no timestamp: la vigencia es por día (data model §4.10).
         effectiveDate: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
       }),
