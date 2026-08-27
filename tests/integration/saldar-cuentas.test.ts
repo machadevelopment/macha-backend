@@ -13,6 +13,30 @@ mock.module('@/lib/auth', () => ({
   verifyToken: async (token: string) => ({ sub: token }),
 }));
 
+/*
+ * ⚠️ NO HAY REDIS EN EL JOB DE INTEGRACIÓN, Y SIN ESTE DOBLE EL TEST SE PASA DE PLAZO.
+ *
+ * `enforceTokenBucket` falla ABIERTO cuando Redis no responde, así que el resultado es
+ * correcto — pero antes de fallar espera a que el cliente agote su reintento. Local pasa (hay
+ * `REDIS_URL`); en CI cada request se comía ~1,6 s y el test de tres peticiones **se pasó de
+ * los 5 s de plazo**. El PR quedó en rojo por la infraestructura del job, no por lo que este
+ * archivo prueba.
+ *
+ * El spread del módulo real no es ceremonia: sin él el mock BORRA el resto de los exports, y
+ * cualquier archivo que importe `checkQueueGate` o `reportRateLimited` revienta con un
+ * `SyntaxError` que no menciona ni este archivo ni este mock. Es el mismo patrón —y la misma
+ * advertencia— de `client-alert-rules.test.ts`.
+ *
+ * `mock.module` es GLOBAL al proceso, así que declararlo acá también protege a este archivo del
+ * orden en que corran los demás: depender de que otro suite lo haya declarado antes es
+ * exactamente cómo un test pasa en una máquina y falla en otra.
+ */
+const rateLimitReal = await import('@/lib/rate-limit');
+mock.module('@/lib/rate-limit', () => ({
+  ...rateLimitReal,
+  enforceTokenBucket: async () => null,
+}));
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
  * DAR POR SALDADA UNA CUENTA, Y QUE SALGA DEL BALANCE ABIERTO — CU-868kx4cr6
