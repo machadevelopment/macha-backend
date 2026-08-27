@@ -4,10 +4,7 @@ import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { users, companyUsers, companies, subscriptions } from '@/db/schema';
 import { reserveScopedConnection } from '@/lib/db-scope';
-
-// Reserved connections are kept off the typed context (handlers never see the raw
-// pooled connection) and released via onAfterHandle/onError, keyed by the request.
-const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>();
+import { registrarCierre, cerrarPendiente } from '@/guards/liberar-conexion';
 
 /**
  * Enforcement point for tenant isolation. Verifies the WorkOS JWT, correlates
@@ -53,7 +50,10 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
     // Conexión reservada para este request, con transacción abierta. A partir de aquí
     // cualquier salida por error DEBE liberarla — de ahí el try/catch: no se delega en
     // `onError`, que solo cubre lo que Elysia ya considera un request en curso.
-    const scoped = await reserveScopedConnection();
+    const scoped = await reserveScopedConnection(
+      undefined,
+      `${request.method} ${new URL(request.url).pathname}`,
+    );
     try {
       // Paso 2 (ver cabecera): sin este GUC, `company_users` no devuelve nada al rol
       // macha_app. Es identidad ya verificada — sale del `sub` del JWT, no del cliente.
@@ -120,7 +120,7 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
       }
 
       // Cleared on commit/rollback and released back to the pool by the hooks below.
-      pendingRelease.set(request, (ok: boolean) => (ok ? scoped.commit() : scoped.rollback()));
+      registrarCierre(request, scoped);
 
       return {
         userId: user.id as string,
@@ -135,18 +135,10 @@ export const tenantDerive = new Elysia({ name: 'tenant.derive' })
     }
   })
   .onAfterHandle(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(true);
-    }
+    await cerrarPendiente(request, true);
   })
   .onError(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(false);
-    }
+    await cerrarPendiente(request, false);
   })
   // `scoped`, NO `global`. Ver la nota compartida en src/app.test.ts: `global` propaga
   // este `derive` al padre y a TODO lo que se monte después en src/app.ts, así que la

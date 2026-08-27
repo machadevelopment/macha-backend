@@ -4,10 +4,7 @@ import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { users, staff } from '@/db/schema';
 import { reserveScopedConnection } from '@/lib/db-scope';
-
-// Reserved connections are kept off the typed context (handlers never see the raw
-// pooled connection) and released via onAfterHandle/onError, keyed by the request.
-const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>();
+import { registrarCierre, cerrarPendiente } from '@/guards/liberar-conexion';
 
 /**
  * CU-868kfvaex: /admin/* is a SEPARATE namespace, structurally outside the
@@ -57,10 +54,13 @@ export const adminGuard = new Elysia({ name: 'admin.guard' })
       throw new Error('Not staff');
     }
 
-    const scoped = await reserveScopedConnection();
+    const scoped = await reserveScopedConnection(
+      undefined,
+      `${request.method} ${new URL(request.url).pathname}`,
+    );
     try {
       await scoped.scopeTo('app.cross_tenant', 'on');
-      pendingRelease.set(request, (ok: boolean) => (ok ? scoped.commit() : scoped.rollback()));
+      registrarCierre(request, scoped);
 
       return {
         staffId: staffRow.id as string,
@@ -74,18 +74,10 @@ export const adminGuard = new Elysia({ name: 'admin.guard' })
     }
   })
   .onAfterHandle(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(true);
-    }
+    await cerrarPendiente(request, true);
   })
   .onError(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(false);
-    }
+    await cerrarPendiente(request, false);
   })
   // `scoped`, no `global` — misma razón que en tenant.derive.ts. Ver src/app.test.ts.
   // Aquí importa el doble: con `global`, este guard y el de inquilino se aplicaban AMBOS
