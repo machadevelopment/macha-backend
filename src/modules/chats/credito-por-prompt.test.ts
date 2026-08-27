@@ -88,3 +88,58 @@ describe('el chat debita el crédito del prompt', () => {
 function debitoDesde(fuente: string): number {
   return fuente.indexOf('const reglaDeChat');
 }
+
+describe('sin créditos, el prompt no se manda', () => {
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * CU-868kxjucv — la otra mitad del débito
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Conectar el débito (CU-868kx4gzx) dejó al chat **cobrando sin bloquear**: una empresa sin
+   * saldo podía seguir usando el asesor indefinidamente y su balance se iba a negativo. No es
+   * hipotético — la ingesta ya dejó empresas en −1.675 créditos por el mismo tipo de hueco.
+   */
+  test('comprueba el saldo ANTES de llamar al modelo, no después', () => {
+    /*
+     * EL ORDEN ES LA DECISIÓN. Comprobando antes, el mensaje no se manda, no se guarda y no
+     * gasta un token: el compositor conserva lo que el usuario escribió. Comprobando después ya
+     * se le pagó a Anthropic por algo que no se puede cobrar, la conversación quedó a medias en
+     * la base, y el error llega cuando ya no hay nada que hacer con él.
+     *
+     * Se verifica por POSICIÓN porque es lo único que lo garantiza de verdad.
+     */
+    const bloqueo = chats.indexOf("return { error: 'insufficient_credits'");
+    const llamada = chats.indexOf('runChatTurn({');
+    expect(bloqueo).toBeGreaterThan(-1);
+    expect(bloqueo).toBeLessThan(llamada);
+  });
+
+  test('responde 402 con la MISMA forma que /insights', () => {
+    /*
+     * No es estética: `classify()` del panel del Consejo Diario ya sabe leer exactamente ese
+     * cuerpo, así que reusar la forma es lo que hace que el chat herede el mensaje de "faltan
+     * créditos" con su enlace a comprar, en vez de caer en un error genérico de red.
+     */
+    expect(chats).toContain('set.status = 402');
+    expect(chats).toMatch(/error: 'insufficient_credits', required: \w+, balance: \w+/);
+  });
+
+  test('el umbral sale de la regla del panel, no de un número', () => {
+    // Si mañana el prompt cuesta 5 créditos, el bloqueo tiene que moverse solo.
+    const bloque = chats.slice(
+      chats.indexOf('const reglaDelPrompt'),
+      chats.indexOf('runChatTurn({'),
+    );
+    expect(bloque).toContain('estimateRequiredCredits(reglaDelPrompt, 1)');
+    expect(bloque).toContain('getCreditBalance(db, companyId)');
+  });
+
+  /*
+   * Sin regla configurada NO se bloquea. Es coherente con el débito —que tampoco cobra sin
+   * regla— y evita el peor estado posible: que borrar una fila del panel de admin deje a todos
+   * los clientes sin asesor.
+   */
+  test('sin regla de crédito configurada no bloquea a nadie', () => {
+    expect(chats).toContain('if (reglaDelPrompt) {');
+  });
+});

@@ -58,6 +58,18 @@ export async function reserveScopedConnection(
    * convenga poder aflojar desde un panel a las 3 de la mañana.
    */
   tiempoMaximoMs: number = TIEMPO_MAXIMO_MS,
+  /**
+   * QUIÉN pidió esta conexión — normalmente `MÉTODO /ruta`.
+   *
+   * Existe por una carencia concreta del mensaje del watchdog: decía que hubo una fuga y no de
+   * dónde salía. En producción se dispara cada pocos minutos, y sin esto no hay forma de
+   * acotarlo a un endpoint — solo de agregar otra red encima. "Hay una fuga" no es accionable;
+   * "`GET /metrics/period` fuga" sí.
+   *
+   * Opcional para no obligar a los llamadores que no son una request HTTP (el worker usa
+   * `withCompanyScope`, que cierra en su propio `finally` y no puede fugar).
+   */
+  origen?: string,
 ): Promise<ScopedConnection> {
   const reserved = await sql.reserve();
   await reserved`begin`;
@@ -152,6 +164,7 @@ export async function reserveScopedConnection(
     console.error(
       `[db-scope] transacción sin cerrar tras ${tiempoMaximoMs} ms: se hace ROLLBACK y se ` +
         'devuelve la conexión al pool. Es una FUGA — alguien reservó y nadie cerró. ' +
+        `Origen: ${origen ?? '(sin identificar)'}. ` +
         'Ver la cabecera del watchdog en lib/db-scope.ts.',
     );
     void release(false).catch((err) => {
@@ -177,8 +190,11 @@ export async function reserveScopedConnection(
  * que conoce el `company_id` de antemano. Sets app.company_id via SET LOCAL so RLS
  * applies (backstop, guards are the primary enforcement).
  */
-export async function reserveCompanyConnection(companyId: string): Promise<ScopedConnection> {
-  const scoped = await reserveScopedConnection();
+export async function reserveCompanyConnection(
+  companyId: string,
+  origen?: string,
+): Promise<ScopedConnection> {
+  const scoped = await reserveScopedConnection(TIEMPO_MAXIMO_MS, origen);
   try {
     await scoped.scopeTo('app.company_id', companyId);
   } catch (err) {

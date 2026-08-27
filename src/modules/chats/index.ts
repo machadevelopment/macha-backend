@@ -7,7 +7,12 @@ import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@
 import { runChatTurn } from '@/lib/chat-orchestrator';
 import { localeDeContenido } from '@/lib/content-locale';
 import { enforceTokenBucket } from '@/lib/rate-limit';
-import { getActiveCreditRule, estimateRequiredCredits, debitCredits } from '@/lib/credits';
+import {
+  getActiveCreditRule,
+  estimateRequiredCredits,
+  debitCredits,
+  getCreditBalance,
+} from '@/lib/credits';
 import { esTituloPorDefecto, tituloDesdePrimerMensaje, tituloPorDefecto } from '@/lib/chat-title';
 
 /**
@@ -124,6 +129,50 @@ export const chats_ = new Elysia({ prefix: '/chats' })
       if (!chat) {
         set.status = 404;
         return { error: 'Chat not found' };
+      }
+
+      /*
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       * SIN CRÉDITOS NO SE MANDA EL PROMPT — CU-868kxjucv
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       *
+       * El débito por prompt se conectó en CU-868kx4gzx (antes: 73 mensajes, cero débitos).
+       * Esto es la otra mitad: hasta ahora el chat **cobraba pero no bloqueaba**, así que una
+       * empresa sin saldo podía seguir usando el asesor indefinidamente y su balance se iba a
+       * negativo. No es hipotético — la ingesta ya dejó empresas en −1.675 créditos por el
+       * mismo tipo de hueco.
+       *
+       * ═══ SE COMPRUEBA ANTES DE LLAMAR AL MODELO, Y ESO ES LO IMPORTANTE ═══
+       *
+       * Va acá arriba y no junto al débito del final. La diferencia es lo que le pasa al
+       * usuario: comprobando antes, su mensaje **no se manda, no se guarda y no se gasta un
+       * token** — el compositor conserva lo que escribió y puede comprar créditos y darle
+       * enviar otra vez. Comprobando después, ya se llamó a Claude (gastando dinero real que
+       * no se puede cobrar), la conversación quedó a medias en la base, y el error llega
+       * cuando ya no hay nada que hacer con él.
+       *
+       * ═══ MISMA FORMA DE RESPUESTA QUE `/insights` ═══
+       *
+       * `402` con `{ error: 'insufficient_credits', required, balance }`. No es estética: el
+       * frontend YA sabe clasificar exactamente ese cuerpo y pintar el enlace a comprar
+       * créditos (`classify()` en `insight-panel.tsx`), así que reusar la forma es lo que hace
+       * que el chat herede ese mensaje en vez de caer en un "algo salió mal" genérico.
+       *
+       * ⚠️ ESTO CORTA UNA CONVERSACIÓN EN CURSO, y es la parte que hay que mirar de frente:
+       * el Consejo Diario es un botón —se niega y ya— pero un hilo de chat es algo que la
+       * persona está usando. Lo que hace tolerable el corte es que sea ANTES de mandar: el
+       * mensaje sigue escrito, el historial queda intacto, y lo que falta es explícito y
+       * comprable. Si aun así se decide que el chat nunca debe cortarse, quitar este bloque
+       * devuelve el comportamiento anterior sin tocar el débito.
+       */
+      const reglaDelPrompt = await getActiveCreditRule(db, 'chat');
+      if (reglaDelPrompt) {
+        const necesarios = estimateRequiredCredits(reglaDelPrompt, 1);
+        const saldo = await getCreditBalance(db, companyId);
+        if (saldo < necesarios) {
+          set.status = 402;
+          return { error: 'insufficient_credits', required: necesarios, balance: saldo };
+        }
       }
 
       // CU-868krvuct: el idioma de la RESPUESTA es el de quien pregunta, no el que la
