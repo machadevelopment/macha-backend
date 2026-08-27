@@ -2,11 +2,8 @@ import { Elysia } from 'elysia';
 import { verifyBearerOr401 } from '@/guards/bearer';
 import { db as rootDb } from '@/db/client';
 import { reserveScopedConnection } from '@/lib/db-scope';
+import { registrarCierre, cerrarPendiente } from '@/guards/liberar-conexion';
 import { resolveOrProvisionUser } from '@/lib/user-provisioning';
-
-// Reserved connections are kept off the typed context (handlers never see the raw
-// pooled connection) and released via onAfterHandle/onError, keyed by the request.
-const pendingRelease = new WeakMap<Request, (commit: boolean) => Promise<void>>();
 
 /**
  * Lighter guard than tenant.derive.ts (CU-868kfva6c): verifies the bearer JWT and
@@ -48,10 +45,13 @@ export const identityDerive = new Elysia({ name: 'identity.derive' })
     // A partir de aquí cualquier salida por error DEBE liberar la conexión — de ahí el
     // try/catch, igual que en tenant.derive: `onError` solo cubre lo que Elysia ya
     // considera un request en curso.
-    const scoped = await reserveScopedConnection();
+    const scoped = await reserveScopedConnection(
+      undefined,
+      `${request.method} ${new URL(request.url).pathname}`,
+    );
     try {
       await scoped.scopeTo('app.user_id', user.id);
-      pendingRelease.set(request, (ok: boolean) => (ok ? scoped.commit() : scoped.rollback()));
+      registrarCierre(request, scoped);
 
       return {
         userId: user.id as string,
@@ -66,18 +66,10 @@ export const identityDerive = new Elysia({ name: 'identity.derive' })
     }
   })
   .onAfterHandle(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(true);
-    }
+    await cerrarPendiente(request, true);
   })
   .onError(async ({ request }) => {
-    const release = pendingRelease.get(request);
-    if (release) {
-      pendingRelease.delete(request);
-      await release(false);
-    }
+    await cerrarPendiente(request, false);
   })
   // `scoped`, no `global` — misma razón que en tenant.derive.ts. Ver src/app.test.ts.
   .as('scoped');
