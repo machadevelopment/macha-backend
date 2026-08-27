@@ -1181,7 +1181,32 @@ export async function classifySheetRows(params: {
  * insight de costos o de margen entra ahí. Abrir más categorías es una decisión de producto,
  * no una que se toma escribiendo el enum.
  */
-export const INSIGHT_CATEGORIES = ['collections', 'sales', 'financial'] as const;
+/*
+ * ═══ LOS TEMAS DE UN CONSEJO — AMPLIADOS EN CU-868kx7a73 (2026-08-27) ═══
+ *
+ * Jose reportó que el tag del Consejo Financiero Diario decía "CONTEXTO" y pidió que dijera "el
+ * tema de la data, por ejemplo cashflow o revenue". "Contexto" era la severidad `info` (el nivel
+ * de urgencia más bajo) leída como si fuera un tema — ver `insight-panel.tsx` para esa mitad.
+ *
+ * Esta es la otra mitad: los temas que existían eran tres y demasiado anchos para lo que pidió.
+ * `financial` cubría a la vez el margen, los costos y la caja, que para quien lee el panel son
+ * tres noticias distintas. Se parten en los dos que nombró (`cashflow`, `revenue`) más
+ * `expenses`, que es su contraparte natural — sin él, un consejo sobre gastos volvería a caer en
+ * el cajón genérico que este ticket vino a vaciar.
+ *
+ * **Los tres viejos se conservan**, y no por compatibilidad nominal: `insight_requests` es un
+ * ledger append-only con consejos ya emitidos bajo esas etiquetas, y quitarlas dejaría al panel
+ * pintando el código crudo en su lugar. `sales` queda como sinónimo histórico de `revenue`; el
+ * prompt ya no lo ofrece, así que deja de usarse solo.
+ */
+export const INSIGHT_CATEGORIES = [
+  'cashflow',
+  'revenue',
+  'expenses',
+  'collections',
+  'financial',
+  'sales',
+] as const;
 export type InsightCategory = (typeof INSIGHT_CATEGORIES)[number];
 
 export type InsightItem = { category: InsightCategory; text: string };
@@ -1252,10 +1277,16 @@ const EMIT_INSIGHTS_TOOL: Anthropic.Tool = {
           properties: {
             category: {
               type: 'string',
-              enum: [...INSIGHT_CATEGORIES],
+              /*
+               * El modelo elige entre los CUATRO vigentes. `sales` y `financial` siguen en el
+               * enum para que los consejos ya guardados se puedan pintar, pero no se ofrecen:
+               * eran justamente los cajones anchos que hacían que todo cayera en "Financiero".
+               */
+              enum: ['cashflow', 'revenue', 'expenses', 'collections'],
               description:
-                'collections = cobranza y cuentas por cobrar; sales = ventas e ingresos; ' +
-                'financial = margen, costos y salud financiera general.',
+                'cashflow = caja, liquidez y flujo; revenue = ventas e ingresos; ' +
+                'expenses = gastos, costos y margen; collections = cobranza y cuentas por ' +
+                'cobrar. Elige el que describa el DATO del que habla el insight.',
             },
             text: { type: 'string', description: 'El insight, en una o dos frases.' },
           },

@@ -7,6 +7,7 @@ import { getOrCreateActiveSegment, buildChatHistory, maybeCloseSegment } from '@
 import { runChatTurn } from '@/lib/chat-orchestrator';
 import { localeDeContenido } from '@/lib/content-locale';
 import { enforceTokenBucket } from '@/lib/rate-limit';
+import { getActiveCreditRule, estimateRequiredCredits, debitCredits } from '@/lib/credits';
 import { esTituloPorDefecto, tituloDesdePrimerMensaje, tituloPorDefecto } from '@/lib/chat-title';
 
 /**
@@ -208,6 +209,62 @@ export const chats_ = new Elysia({ prefix: '/chats' })
         role: 'assistant',
         content: result.assistantText,
       });
+
+      /*
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       * UN PROMPT CUESTA UN CRÉDITO — CU-868kx4gzx (Jose, 2026-08-26)
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       *
+       * *"1 carga de Excel = 25 créditos, 1 prompt = 1 crédito, 1 reporte = 10 créditos."*
+       *
+       * Las tres reglas ya estaban cargadas y activas en producción desde el 21/08 —cinco días
+       * ANTES del pedido— con esos valores exactos. Lo que faltaba no era configurarlas: era
+       * que alguien consumiera la del chat. **Medido: 73 mensajes al asesor desde que la regla
+       * existe y CERO débitos.** Excel (237 × 25), reportes (13 × 10) e insights (12 × 1) sí
+       * cobraban; el chat era el único con la regla puesta y nadie que la leyera.
+       *
+       * ═══ UNA VEZ POR PROMPT, NO POR LLAMADA AL MODELO ═══
+       *
+       * Va acá y no dentro de `runChatTurn`, y esa es la decisión que importa. Un turno con
+       * uso de herramientas hace VARIAS llamadas a Claude —`runChatTurn` lleva su `callCount`—
+       * y cada una inserta su fila en `ai_usage_events`, que es correcto porque ese ledger mide
+       * el costo con el proveedor. Los créditos miden otra cosa: lo que el cliente pidió. Jose
+       * dijo "1 prompt", y un prompt es un mensaje del usuario, sin importar cuántas vueltas
+       * dé el modelo para contestarlo. Debitar por llamada haría que la misma pregunta costara
+       * distinto según si el asesor necesitó consultar los datos.
+       *
+       * ═══ SOLO SI EL TURNO TERMINÓ ═══
+       *
+       * El camino de cancelación retorna arriba (499), así que no llega acá. Es deliberado: el
+       * usuario que corta no recibió respuesta, y cobrarle sería cobrar por nada. Es la
+       * diferencia con la ingesta, donde el lote resuelto en código SÍ debita porque el trabajo
+       * se hizo y el cliente lo recibió.
+       *
+       * ⚠️ NO BLOQUEA POR SALDO, a diferencia de `/insights`. Eso es una decisión de producto
+       * que este ticket no pide y que tiene consecuencias: cortar el chat a mitad de una
+       * conversación por saldo es un corte distinto —y más brusco— que negar la generación de
+       * un consejo. Queda anotado como pendiente, no como olvido.
+       *
+       * Un fallo al debitar NO tumba la respuesta: el usuario ya la tiene en pantalla y la
+       * conversación ya está guardada. Mismo criterio que el diccionario de categorías de la
+       * ingesta — lo que se pierde es el cobro, no el trabajo.
+       */
+      const reglaDeChat = await getActiveCreditRule(db, 'chat');
+      if (reglaDeChat) {
+        try {
+          await debitCredits(db, {
+            companyId,
+            actionKind: 'chat',
+            credits: estimateRequiredCredits(reglaDeChat, 1),
+            creditRuleId: reglaDeChat.id,
+            // El HILO, no el mensaje: es el objeto que el resto del producto identifica como
+            // "esta conversación", y `debitCredits` documenta `chat_id` para este `action_kind`.
+            refId: params.id,
+          });
+        } catch (err) {
+          console.error('[chat] no se pudo debitar el crédito del prompt:', err);
+        }
+      }
       /*
        * CU-868krkw4p — LA CONVERSACIÓN SE NOMBRA SOLA CON LA PRIMERA PREGUNTA.
        *
