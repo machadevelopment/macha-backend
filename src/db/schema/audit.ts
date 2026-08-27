@@ -12,7 +12,15 @@ export const adminAuditLog = pgTable(
     companyId: uuid('company_id'),
     action: text('action').notNull(), // e.g. company.suspend, credit.topup, alert_rule.update
     targetTable: text('target_table'),
-    targetId: uuid('target_id'),
+    /*
+     * TEXTO y no `uuid` (migración 0037, bug del 2026-08-27). Esta tabla es un registro
+     * genérico: `target_table` es texto libre, así que la clave de la fila apuntada no tiene
+     * por qué ser un uuid. `plans.code` y `platform_settings.key` son texto, y con la columna
+     * en `uuid` **auditarlas lanzaba** `invalid input syntax for type uuid` — dentro de la
+     * misma transacción que la escritura de negocio, así que además la deshacía. Medido: cero
+     * planes editados y cero parámetros guardados en producción desde que existen.
+     */
+    targetId: text('target_id'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

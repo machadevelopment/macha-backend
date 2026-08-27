@@ -171,9 +171,14 @@ export const insights = new Elysia().use(tenantDerive).post(
             // el handler deja de encajar con su propio esquema de respuesta. El enum sigue
             // siendo la fuente de verdad en `lib/anthropic.ts`; si crece, esto también.
             category: t.Union([
+              t.Literal('cashflow'),
+              t.Literal('revenue'),
+              t.Literal('expenses'),
               t.Literal('collections'),
-              t.Literal('sales'),
+              // Vigentes solo para pintar consejos ya guardados: `insight_requests` es
+              // append-only y trae estas dos de antes de CU-868kx7a73.
               t.Literal('financial'),
+              t.Literal('sales'),
             ]),
             text: t.String(),
           }),

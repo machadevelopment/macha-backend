@@ -439,3 +439,100 @@ describe('aceptación de invitaciones sin depender del token (CU-868ktkq8r)', ()
     expect(filas).toHaveLength(0);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ACEPTAR CON EL TOKEN DEL ENLACE DEL CORREO — el camino que NADIE probaba
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Jose, 2026-08-26: *"al aceptar la invitación no sirve"*, con una captura del mensaje genérico
+ * "We couldn't use this invitation".
+ *
+ * Lo que hizo falta para creerle no fue leer el código sino contar filas en producción:
+ * **de 10 invitaciones creadas desde que existe la tabla, CERO tienen `accepted_at`.** No es un
+ * caso puntual — nadie aceptó una invitación nunca.
+ *
+ * Y este suite ya cubría la aceptación… por `invitationId`, que es la vía de respaldo que se
+ * agregó en CU-868ktkq8r. El camino que recorre TODO invitado que hace clic en el enlace del
+ * correo —`?token=`— no tenía ni un test que llegara a aceptar: los tres que lo mencionan usan
+ * un `token_hash` inventado (`'h_pend_…'`) y comprueban que un token inexistente dé 404.
+ *
+ * O sea que el suite verificaba que el camino equivocado fallara bien, y el camino real no lo
+ * recorría nadie. Estos tests generan un token DE VERDAD con `generateInvitationToken`, lo
+ * guardan hasheado como hace la ruta de invitar, y lo presentan como lo presenta el enlace.
+ */
+describe('aceptar con el token del enlace del correo', () => {
+  let owner: ReturnType<typeof ownerConnection>;
+  const empresaTok = randomUUID();
+  const jefeTok = randomUUID();
+  const invitadoTok = randomUUID();
+  const correoTok = `tok-invitado-${randomUUID()}@ejemplo.com`;
+  let tokenEnElEnlace: string;
+
+  beforeAll(async () => {
+    await setupTestDatabase();
+    owner = ownerConnection();
+    const { generateInvitationToken, hashInvitationToken } = await import('@/lib/invitations');
+    tokenEnElEnlace = generateInvitationToken();
+
+    await owner`
+      insert into companies (id, workos_org_id, name, industry, base_currency, locale)
+      values (${empresaTok}, ${'org_' + empresaTok}, ${'Tok ' + empresaTok}, 'retail', 'GTQ', 'es')`;
+    await owner`
+      insert into users (id, workos_user_id, email)
+      values (${jefeTok}, ${'wos_' + jefeTok}, ${'jefe-tok-' + randomUUID() + '@ejemplo.com'}),
+             (${invitadoTok}, ${'wos_' + invitadoTok}, ${correoTok})`;
+    await owner`
+      insert into company_users (company_id, user_id, role, status)
+      values (${empresaTok}, ${jefeTok}, 'owner', 'active')`;
+    await owner`
+      insert into company_invitations
+        (company_id, email, role, token_hash, invited_by_user_id, expires_at)
+      values (${empresaTok}, ${correoTok}, 'member',
+              ${hashInvitationToken(tokenEnElEnlace)}, ${jefeTok}, now() + interval '7 days')`;
+  });
+
+  afterAll(async () => {
+    await owner?.end();
+  });
+
+  test('el token del enlace acepta la invitación y crea la membresía con su rol', async () => {
+    const res = await pedir('/invitations/accept', `wos_${invitadoTok}`, {
+      token: tokenEnElEnlace,
+    });
+    expect(res.status).toBe(200);
+
+    const [m] = await owner`
+      select role, status from company_users
+       where company_id = ${empresaTok} and user_id = ${invitadoTok}`;
+    expect(m?.role).toBe('member');
+    expect(m?.status).toBe('active');
+  });
+
+  /*
+   * `accepted_at` es la columna con la que se midió el bug en producción (0 de 10). Si el
+   * camino del token vuelve a romperse, esta aserción lo dice con el mismo dato que lo destapó.
+   */
+  test('y la invitación queda marcada como aceptada', async () => {
+    const [inv] = await owner`
+      select status, accepted_at from company_invitations
+       where company_id = ${empresaTok} and lower(email) = ${correoTok.toLowerCase()}`;
+    expect(inv?.status).toBe('accepted');
+    expect(inv?.accepted_at).not.toBeNull();
+  });
+
+  /*
+   * Un token base64url viaja por una URL sin escaparse (su alfabeto es `A-Za-z0-9-_`), pero
+   * quien arme el enlace podría pasarlo por `encodeURIComponent` de más. Esto fija que el
+   * backend recibe el token TAL CUAL se generó: si alguien lo codifica en el camino, el hash
+   * deja de coincidir y vuelve el "no pudimos usar esta invitación".
+   */
+  test('el token no lleva caracteres que una URL tenga que escapar', async () => {
+    const { generateInvitationToken } = await import('@/lib/invitations');
+    for (let i = 0; i < 20; i++) {
+      const t = generateInvitationToken();
+      expect(t).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(encodeURIComponent(t)).toBe(t);
+    }
+  });
+});
