@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { Value } from '@sinclair/typebox/value';
 import {
   counterCurrency,
+  ESQUEMA_TASA,
   missingFxFlagReason,
   missingFxRateMessage,
   resolveFromCatalog,
@@ -80,5 +82,62 @@ describe('par de monedas', () => {
   test('la contraparte de la base es la otra moneda soportada', () => {
     expect(counterCurrency('GTQ')).toBe('USD');
     expect(counterCurrency('USD')).toBe('GTQ');
+  });
+});
+
+describe('una tasa de cambio tiene que ser estrictamente positiva', () => {
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * EL CERO SE ACEPTABA, Y NO DEJABA RASTRO
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Las dos rutas que escriben en `fx_rates` validaban con `t.Number()` a secas. Con una tasa
+   * de 0 guardada, la ingesta hace `amount_base = originalAmount * 0` y **toda fila en la otra
+   * moneda se promueve con importe cero**: sin marcarse, sin error, y con el cliente viendo
+   * desaparecer esa parte de su contabilidad. Una negativa es peor todavía, porque invierte el
+   * signo del movimiento.
+   *
+   * Se valida con `Value.Check` contra el esquema REAL —el mismo objeto que importan las dos
+   * rutas— y no leyendo `exclusiveMinimum` de él. La diferencia importa: lo segundo comprueba
+   * que alguien escribió una propiedad, y esto comprueba que TypeBox rechaza el valor.
+   */
+  test.each([
+    ['cero', 0],
+    ['negativa', -7.7],
+  ])('rechaza una tasa %s', (_caso, valor) => {
+    expect(Value.Check(ESQUEMA_TASA, valor)).toBe(false);
+  });
+
+  test.each([
+    ['la tasa real GTQ/USD', 7.7],
+    ['una fracción chica', 0.13],
+  ])('acepta %s', (_caso, valor) => {
+    expect(Value.Check(ESQUEMA_TASA, valor)).toBe(true);
+  });
+
+  /*
+   * Las dos rutas comparten el objeto, no una copia. Es lo que impide que alguien endurezca una
+   * y deje la otra abierta — que fue exactamente el estado del que venimos.
+   */
+  test('el esquema es UNO solo para las dos rutas que escriben', async () => {
+    const cliente = await Bun.file('src/modules/metrics/fx-rate.ts').text();
+    const admin = await Bun.file('src/modules/admin/fx-rates.ts').text();
+
+    /*
+     * Se mira solo el `body:` de cada ruta, y esa acotación la escribió un falso positivo:
+     * la primera versión buscaba `rate: t.Number(` en el ARCHIVO entero y se disparaba con el
+     * esquema de RESPUESTA de `GET /fx-rate/display`, donde un número suelto es correcto —ahí
+     * la tasa se devuelve, no se acepta—. Lo que hay que proteger es la puerta de entrada.
+     */
+    const cuerpoDe = (fuente: string) => {
+      const i = fuente.indexOf('body: t.Object(');
+      expect(i).toBeGreaterThan(-1);
+      return fuente.slice(i, fuente.indexOf('}),', i));
+    };
+
+    for (const cuerpo of [cuerpoDe(cliente), cuerpoDe(admin)]) {
+      expect(cuerpo).toContain('rate: ESQUEMA_TASA,');
+      expect(cuerpo).not.toMatch(/rate: t\.Number\(/);
+    }
   });
 });
