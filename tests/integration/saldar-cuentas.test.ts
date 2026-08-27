@@ -36,7 +36,15 @@ mock.module('@/lib/auth', () => ({
  */
 describe('saldar una cuenta por cobrar o por pagar', () => {
   let owner: ReturnType<typeof ownerConnection>;
-  let app: typeof import('@/app');
+  /*
+   * La app se construye UNA vez en `beforeAll`, no en cada petición.
+   *
+   * La primera versión llamaba a `createApp()` dentro de `pedir`, o sea que cada request
+   * recomponía los ~30 plugins de Elysia desde cero. Local pasaba; **en CI un test de tres
+   * peticiones se pasó de los 5 s de plazo** y el PR quedó en rojo por algo que no tenía nada
+   * que ver con lo que prueba. Montar la app es caro y no es lo que este archivo verifica.
+   */
+  let app: ReturnType<typeof import('@/app').createApp>;
   const empresa = randomUUID();
   const otraEmpresa = randomUUID();
   const usuario = randomUUID();
@@ -46,7 +54,7 @@ describe('saldar una cuenta por cobrar o por pagar', () => {
   let cuentaPorPagar: string;
 
   const pedir = (ruta: string, init?: RequestInit) =>
-    app.createApp().handle(
+    app.handle(
       new Request(`http://localhost${ruta}`, {
         ...init,
         headers: {
@@ -61,7 +69,7 @@ describe('saldar una cuenta por cobrar o por pagar', () => {
   beforeAll(async () => {
     await setupTestDatabase();
     owner = ownerConnection();
-    app = await import('@/app');
+    app = (await import('@/app')).createApp();
 
     for (const id of [empresa, otraEmpresa]) {
       await owner`
