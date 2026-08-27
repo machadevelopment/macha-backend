@@ -3,7 +3,13 @@ import { and, desc, eq } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { companies, fxRates } from '@/db/schema';
-import { counterCurrency, type Currency } from '@/lib/fx';
+import {
+  counterCurrency,
+  ESQUEMA_TASA,
+  loadFxCatalog,
+  resolveFromCatalog,
+  type Currency,
+} from '@/lib/fx';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -91,6 +97,89 @@ export const clientFxRate = new Elysia({ prefix: '/fx-rate' })
     };
   })
   /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * LA TASA CON LA QUE UNA PANTALLA PUEDE MOSTRARSE EN LA OTRA MONEDA
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Pedido de Keneth (2026-08-26): *"si un user carga sus archivos en Q, pero quiere
+   * visualizarlo convertido a USD, que le pida configurar el TC y tenga un botón para ver su
+   * data en las 2 monedas."*
+   *
+   * ═══ ESTO NO ES CONTABILIDAD, Y LA DISTINCIÓN ES TODO EL DISEÑO ═══
+   *
+   * `amount_base` se escribe UNA vez al promover, con la tasa congelada de esa fila, y es lo
+   * auditable. Lo que devuelve esta ruta es una LENTE: una sola tasa, elegida por el cliente,
+   * para volver a expresar una cifra YA consolidada. No se escribe en ninguna tabla, no toca
+   * la ingesta y no cambia un solo `fx_rate` congelado.
+   *
+   * Mantener las dos cosas separadas es lo que hace legítimo el botón. Mezclarlas produce
+   * exactamente el número que `metrics/currencies.ts` advierte que no hay que producir.
+   *
+   * ═══ POR QUÉ ESTA RUTA EXISTE EN VEZ DE RESOLVERLO EN EL FRONTEND ═══
+   *
+   * El frontend ya recibe el historial completo en `GET /fx-rate`, así que podría elegir la
+   * tasa él mismo. Sería una TERCERA implementación de la misma regla: la cabecera de
+   * `lib/fx.ts` ya deja escrito que `findFxRate` y `resolveFromCatalog` tienen que coincidir
+   * "o el producto se contradice consigo mismo", y una copia en otro repo no se puede mantener
+   * en sincronía con las otras dos. Acá se llama a `resolveFromCatalog`, la MISMA función que
+   * decide si una fila se marca durante la ingesta — incluida su caída a la tasa más antigua.
+   *
+   * ═══ LA TASA ES LA DEL CIERRE DEL PERÍODO QUE SE ESTÁ MIRANDO ═══
+   *
+   * Y no "la última registrada", que era la alternativa obvia. Con la última, la cifra en
+   * dólares de marzo CAMBIA cada vez que alguien ajusta el tipo de cambio, aunque en marzo no
+   * haya pasado nada — un número histórico que se mueve solo. Con la del cierre del período,
+   * marzo se ve siempre igual y cambiar de período cambia la tasa, que es lo esperable y va
+   * escrito en pantalla.
+   *
+   * ═══ `rate: null` NO ES UN ERROR: ES EL ESTADO "FALTA CONFIGURARLO" ═══
+   *
+   * Es el que dispara la mitad del flujo que pidió Keneth. La empresa que nunca registró una
+   * tasa recibe `null` con un 200, y la pantalla ofrece ir a configurarla en vez de convertir
+   * con un número inventado.
+   */
+  .get(
+    '/display',
+    async ({ companyId, db, query }) => {
+      const [company] = await db
+        .select({ baseCurrency: companies.baseCurrency })
+        .from(companies)
+        .where(eq(companies.id, companyId));
+
+      const base = (company?.baseCurrency ?? 'GTQ') as Currency;
+      const quote = counterCurrency(base);
+
+      const catalogo = await loadFxCatalog(db, companyId, base, quote);
+      const tasa = resolveFromCatalog(catalogo, query.on);
+
+      return {
+        baseCurrency: base,
+        quoteCurrency: quote,
+        /*
+         * La tasa se devuelve TAL COMO ESTÁ GUARDADA, o sea `quote → base` (con base GTQ,
+         * `7.7` significa "1 USD son 7,7 GTQ"). Convertir una cifra en base a la otra moneda
+         * es por lo tanto una DIVISIÓN, no una multiplicación — al revés que la ingesta, que
+         * multiplica. El frontend tiene esa dirección en un solo helper con su test; acá se
+         * documenta para que nadie la deduzca del nombre del campo.
+         */
+        rate: tasa,
+      };
+    },
+    {
+      query: t.Object({
+        /** El día contra el que se resuelve la vigencia: el cierre del período en pantalla. */
+        on: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+      }),
+      response: {
+        200: t.Object({
+          baseCurrency: t.String(),
+          quoteCurrency: t.String(),
+          rate: t.Union([t.Object({ rate: t.Number(), effectiveDate: t.String() }), t.Null()]),
+        }),
+      },
+    },
+  )
+  /**
    * Registra o corrige la tasa de una fecha. `owner` y `admin` (ver `manage_fx_rate`).
    */
   .post(
@@ -172,7 +261,8 @@ export const clientFxRate = new Elysia({ prefix: '/fx-rate' })
     {
       body: t.Object({
         quoteCurrency: t.Union([t.Literal('GTQ'), t.Literal('USD')]),
-        rate: t.Number(),
+        // Estrictamente positiva. El porqué —y por qué vive en un solo lugar— en `lib/fx.ts`.
+        rate: ESQUEMA_TASA,
         // date-only, no timestamp: la vigencia es por día (data model §4.10).
         effectiveDate: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
       }),

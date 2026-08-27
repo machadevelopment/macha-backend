@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, lte } from 'drizzle-orm';
+import { t } from 'elysia';
 import type { DB } from '@/db/client';
 import { fxRates } from '@/db/schema';
 
@@ -178,3 +179,26 @@ export const MISSING_FX_FLAG = 'missing_fx_rate';
 export function missingFxFlagReason(quote: Currency, onOrBefore: string): string {
   return `${MISSING_FX_FLAG}:${quote}:${onOrBefore}`;
 }
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA TASA TIENE QUE SER ESTRICTAMENTE POSITIVA, Y EL ESQUEMA ES DONDE SE DECIDE
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Las dos rutas que escriben en `fx_rates` —la del cliente y la de admin— validaban con
+ * `t.Number()` a secas, así que **una tasa de 0 se aceptaba y se guardaba**. El daño no es
+ * teórico y no deja rastro:
+ *
+ *   · la ingesta hace `amount_base = originalAmount * fxRate` (`computeAmountBase`), o sea que
+ *     con 0 **toda fila en la otra moneda se promueve con importe cero**, sin marcarse y sin
+ *     error: el cliente ve desaparecer la parte en dólares de su contabilidad;
+ *   · una tasa negativa es peor, porque invierte el signo del movimiento;
+ *   · y la lente de vista del frontend DIVIDE por la tasa, así que un 0 es una división por
+ *     cero en la pantalla principal.
+ *
+ * Vive acá y no en cada ruta por el mismo motivo que el orden de las redes del pool vive en un
+ * solo archivo: dos copias de una regla en dos módulos no se pueden mantener de acuerdo. Es un
+ * esquema y no una función porque las dos rutas validan con TypeBox — una función suelta sería
+ * un segundo mecanismo que alguien tiene que acordarse de llamar.
+ */
+export const ESQUEMA_TASA = t.Number({ exclusiveMinimum: 0 });
