@@ -193,12 +193,17 @@ export const insights = new Elysia().use(tenantDerive).post(
               t.Literal('revenue'),
               t.Literal('expenses'),
               t.Literal('collections'),
-              // Vigentes solo para pintar consejos ya guardados: `insight_requests` es
-              // append-only y trae estas dos de antes de CU-868kx7a73.
+              // Alias que el parser aún puede devolver si alguien salta el mapeo:
+              // `insight_requests` es append-only y el panel pinta estas dos de
+              // antes de CU-868kx7a73. No se le ofrecen al modelo.
               t.Literal('financial'),
               t.Literal('sales'),
             ]),
             text: t.String(),
+            severity: t.Optional(
+              t.Union([t.Literal('critical'), t.Literal('warning'), t.Literal('info')]),
+            ),
+            action: t.Optional(t.String()),
           }),
         ),
         narrative: t.String(),
