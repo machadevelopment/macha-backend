@@ -10,7 +10,8 @@ import { setupTestDatabase, testOwnerUrl, testAppUrl } from './setup';
  * Durante aquella caída se le pegaron 20 llamadas a `GET /health` y devolvió 200 en las 20, con
  * el producto muerto. Lo que este archivo exige es que la detección nueva NO se pueda engañar
  * igual: con una transacción colgada de verdad en la base, `medirSaludDelPool` tiene que
- * marcarlo y `/health/db` responder 503.
+ * marcarlo. `/health/db` NO responde 503 por eso — Railway solo lo mira al desplegar, y
+ * un 503 por fugas del contenedor viejo bloquea el replica nuevo (2026-08-28).
  *
  * Va contra Postgres real porque el estado que hay que detectar —`idle in transaction`,
  * `pg_blocking_pids`— solo existe en una base de verdad. Un doble del cliente probaría que la
@@ -93,5 +94,10 @@ describe('vigilancia del pool', () => {
     const conBase = fuente.slice(fuente.indexOf(".get('/db'"));
     expect(conBase).toContain('medirSaludDelPool');
     expect(conBase).toContain('503');
+    // El 503 es del sondeo fallido, no de `requiereAtencion`: si alguien lo vuelve a
+    // poner ahí, el próximo deploy con una fuga viva no entra — que es exactamente
+    // lo que pasó el 2026-08-28.
+    const atencion = conBase.slice(conBase.indexOf('requiereAtencion'), conBase.indexOf('} catch'));
+    expect(atencion).not.toContain('set.status');
   });
 });

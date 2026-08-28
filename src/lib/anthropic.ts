@@ -2,13 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from './env';
 import { AiProviderError, runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
-import {
-  assemblePayload,
-  costoDeLaFila,
-  detectarOrdenDeFecha,
-  type ColumnMap,
-  type RowVerdict,
-} from './row-assembly';
+import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -262,20 +256,6 @@ export function construirFilas(
   columns: ColumnMap,
 ): ClassifiedRow[] {
   const out: ClassifiedRow[] = [];
-
-  /*
-   * El orden de día y mes se deduce UNA vez, de la columna de fecha del lote entero, y no fila
-   * por fila: `01/05` es ambiguo mirándolo solo, pero si alguna fila del mismo lote dice
-   * `25/09`, ese 25 solo puede ser un día y con eso se leen todas igual.
-   *
-   * Ver `detectarOrdenDeFecha`. Sin esto, un archivo guatemalteco entraba con las fechas
-   * invertidas —el 1 de mayo registrado el 5 de enero— y las filas con día mayor a 12 se
-   * marcaban por `invalid_date`. Medido sobre un archivo real: 41 % mal fechado, 59 % perdido.
-   */
-  const ordenDeFecha =
-    columns.date === null
-      ? 'dmy'
-      : detectarOrdenDeFecha(params.rows.map((r) => r[columns.date as number]));
   for (const [i, v] of porIndice) {
     if (v.e === 'skip') continue;
     const row = params.rows[i]!;
@@ -284,13 +264,7 @@ export function construirFilas(
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({
-        verdict,
-        row,
-        columns,
-        baseCurrency: params.baseCurrency,
-        ordenDeFecha,
-      }),
+      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
     });
 
     /*
@@ -510,11 +484,14 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 
 /**
  * ESQUEMA COMPACTO — el cambio que baja el costo y el tiempo a la vez (2026-08-12).
+ * genera un script para generar terminos que tengan que ver con ls industria/tema y esos terminos los pasamos para que al pasarolo a la data digeridad que lo pase
  *
  * El esquema anterior pedía la fila RECONSTRUIDA: nueve campos por fila con sus valores, y
  * structured outputs obligaba a que vinieran los nueve incluso en null. Medido: ~71 tokens
  * de salida por fila, y el 95,7 % del costo del recibo era salida. Como el modelo genera
  * token por token, esos mismos tokens eran también los 40-50 minutos de espera.
+ * STEP 1 NO ESTAMOS PREGUNTANDO NADA Y NOSOTROS ASUMIMOS PARA DEBERIAMOS DE GUARDAR EL CONTEXTO
+ *
  *
  * Siete de esos nueve campos ya los tenía el backend: se los mandó él en la fila cruda.
  *
@@ -1181,32 +1158,7 @@ export async function classifySheetRows(params: {
  * insight de costos o de margen entra ahí. Abrir más categorías es una decisión de producto,
  * no una que se toma escribiendo el enum.
  */
-/*
- * ═══ LOS TEMAS DE UN CONSEJO — AMPLIADOS EN CU-868kx7a73 (2026-08-27) ═══
- *
- * Jose reportó que el tag del Consejo Financiero Diario decía "CONTEXTO" y pidió que dijera "el
- * tema de la data, por ejemplo cashflow o revenue". "Contexto" era la severidad `info` (el nivel
- * de urgencia más bajo) leída como si fuera un tema — ver `insight-panel.tsx` para esa mitad.
- *
- * Esta es la otra mitad: los temas que existían eran tres y demasiado anchos para lo que pidió.
- * `financial` cubría a la vez el margen, los costos y la caja, que para quien lee el panel son
- * tres noticias distintas. Se parten en los dos que nombró (`cashflow`, `revenue`) más
- * `expenses`, que es su contraparte natural — sin él, un consejo sobre gastos volvería a caer en
- * el cajón genérico que este ticket vino a vaciar.
- *
- * **Los tres viejos se conservan**, y no por compatibilidad nominal: `insight_requests` es un
- * ledger append-only con consejos ya emitidos bajo esas etiquetas, y quitarlas dejaría al panel
- * pintando el código crudo en su lugar. `sales` queda como sinónimo histórico de `revenue`; el
- * prompt ya no lo ofrece, así que deja de usarse solo.
- */
-export const INSIGHT_CATEGORIES = [
-  'cashflow',
-  'revenue',
-  'expenses',
-  'collections',
-  'financial',
-  'sales',
-] as const;
+export const INSIGHT_CATEGORIES = ['collections', 'sales', 'financial'] as const;
 export type InsightCategory = (typeof INSIGHT_CATEGORIES)[number];
 
 export type InsightItem = { category: InsightCategory; text: string };
@@ -1277,16 +1229,10 @@ const EMIT_INSIGHTS_TOOL: Anthropic.Tool = {
           properties: {
             category: {
               type: 'string',
-              /*
-               * El modelo elige entre los CUATRO vigentes. `sales` y `financial` siguen en el
-               * enum para que los consejos ya guardados se puedan pintar, pero no se ofrecen:
-               * eran justamente los cajones anchos que hacían que todo cayera en "Financiero".
-               */
-              enum: ['cashflow', 'revenue', 'expenses', 'collections'],
+              enum: [...INSIGHT_CATEGORIES],
               description:
-                'cashflow = caja, liquidez y flujo; revenue = ventas e ingresos; ' +
-                'expenses = gastos, costos y margen; collections = cobranza y cuentas por ' +
-                'cobrar. Elige el que describa el DATO del que habla el insight.',
+                'collections = cobranza y cuentas por cobrar; sales = ventas e ingresos; ' +
+                'financial = margen, costos y salud financiera general.',
             },
             text: { type: 'string', description: 'El insight, en una o dos frases.' },
           },
@@ -1314,33 +1260,44 @@ snapshot. Responde en texto plano, sin markdown.`;
 /**
  * Presupuesto de salida del insight — CU-868ktm2m2.
  *
- * Antes era un `1024` suelto en la llamada. El número no era el problema (cinco insights de
- * dos frases caben de sobra); el problema era que NADIE COMPROBABA si se agotaba, así que
- * si alguna vez se agotaba el fallo no dejaba rastro. Con nombre y con la comprobación de
- * abajo, el día que un prompt editado desde /admin pida más de la cuenta, el error lo dice.
+ * Era 1024. Cinco insights de dos frases caben; lo que no cabe es el prompt editable de
+ * `/admin` más las directivas de escritura (símbolo, acción, empresa) que se anexan
+ * DESPUÉS. Medido en producción 2026-08-28: `POST /insights` devolvía 503 en ~3,6 s — el
+ * tiempo de emitir ~1024 tokens — y el panel decía "no pudimos generar el insight" con
+ * créditos de sobra. El tope era el fallo, no el proveedor. 4096 es el de un turno de
+ * chat; un consejo diario no puede tener menos presupuesto que una pregunta suelta.
  */
-const INSIGHT_MAX_TOKENS = 1024;
+const INSIGHT_MAX_TOKENS = 4096;
 
 /** On-demand insight narrative (CU-868kfvabk) — the AI narrates, never calculates (CLAUDE.md/PRD). */
 export async function generateInsightNarrative(
   metricsSnapshot: unknown,
   systemPrompt: string = DEFAULT_INSIGHT_PROMPT,
+  signal?: AbortSignal,
 ): Promise<InsightResult> {
   assertZdrModel(anthropicModel);
   const anthropic = getClient();
 
-  const stream = anthropic.messages.stream({
-    model: anthropicModel,
-    max_tokens: INSIGHT_MAX_TOKENS,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
-    tools: [EMIT_INSIGHTS_TOOL],
-    // Se FUERZA la herramienta: sin esto el modelo puede contestar en prosa y la
-    // clasificación no llega. No hay round-trip de tool-use que atender — la respuesta de
-    // la herramienta ES el resultado, no una consulta que haya que responder.
-    tool_choice: { type: 'tool', name: EMIT_INSIGHTS_TOOL.name },
-  });
-  const message = await runAi('insight_narrative', () => stream.finalMessage());
+  // `create` y no `stream`: el chat ya pasa la señal de aborto así, y el consejo diario
+  // era el único camino de IA de una request HTTP que no la pasaba. Sin ella, el techo
+  // de 90 s del panel abortaba el fetch y Claude seguía escribiendo — y la transacción
+  // de Postgres de ese request se quedaba abierta hasta el watchdog.
+  const message = await runAi('insight_narrative', () =>
+    anthropic.messages.create(
+      {
+        model: anthropicModel,
+        max_tokens: INSIGHT_MAX_TOKENS,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: JSON.stringify(metricsSnapshot) }],
+        tools: [EMIT_INSIGHTS_TOOL],
+        // Se FUERZA la herramienta: sin esto el modelo puede contestar en prosa y la
+        // clasificación no llega. No hay round-trip de tool-use que atender — la respuesta
+        // de la herramienta ES el resultado, no una consulta que haya que responder.
+        tool_choice: { type: 'tool', name: EMIT_INSIGHTS_TOOL.name },
+      },
+      signal ? { signal } : undefined,
+    ),
+  );
 
   const toolBlock = message.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === EMIT_INSIGHTS_TOOL.name,
@@ -1377,11 +1334,13 @@ export async function generateInsightNarrative(
    * Un `AiProviderError` sí se traduce a un mensaje que se le puede enseñar a un cliente
    * (`aiFailureMessage`) y lleva la causa técnica adjunta para el que investigue.
    *
-   * `stop_reason` se comprueba junto con la ausencia de contenido y no aparte: los dos son
-   * el mismo hecho —la llamada respondió y no hay consejo utilizable— y separarlos daría
-   * dos errores distintos para una sola cosa.
+   * `stop_reason === 'max_tokens'` YA NO TUMBA un consejo que parseó. La versión anterior
+   * lanzaba aunque hubiera insights válidos, razonando que el JSON pudo cortarse. Eso es
+   * cierto del ÚLTIMO elemento; `parseInsights` ya descarta lo malformado. Tirar los que
+   * sí llegaron enteros era convertir un recorte en la pantalla de error que Jose veía.
+   * Solo se lanza cuando no quedó NADA usable — ahí sí no hay consejo que servir.
    */
-  if (message.stop_reason === 'max_tokens' || !narrative) {
+  if (!narrative) {
     throw new AiProviderError('incomplete', 'insight_narrative', {
       cause: new Error(
         `stop_reason=${message.stop_reason} max_tokens=${INSIGHT_MAX_TOKENS} ` +
@@ -1389,6 +1348,12 @@ export async function generateInsightNarrative(
           `texto=${textBlock?.text.length ?? 0} chars`,
       ),
     });
+  }
+  if (message.stop_reason === 'max_tokens') {
+    console.warn(
+      `[insight_narrative] stop_reason=max_tokens con ${insights.length} insight(s) usable(s); ` +
+        `se sirven. output_tokens=${message.usage.output_tokens} max_tokens=${INSIGHT_MAX_TOKENS}`,
+    );
   }
 
   return {
