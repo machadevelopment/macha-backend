@@ -20,6 +20,8 @@ import {
 import { localeDeContenido } from '@/lib/content-locale';
 import { insightRequests, companies } from '@/db/schema';
 import { enforceTokenBucket, rateLimitedResponse } from '@/lib/rate-limit';
+import { withCompanyScope } from '@/lib/db-scope';
+import { cerrarPendiente } from '@/guards/liberar-conexion';
 import { eq } from 'drizzle-orm';
 
 function monthStart(monthsAgo: number): string {
@@ -36,7 +38,7 @@ function monthStart(monthsAgo: number): string {
  */
 export const insights = new Elysia().use(tenantDerive).post(
   '/insights',
-  async ({ companyId, userId, role, set, db }) => {
+  async ({ companyId, userId, role, set, db, request }) => {
     assertClientCapability(role, 'view_dashboard_reports', set);
 
     // CU-868kfvaah: 'ai' token-bucket — ver nota equivalente en modules/chats/index.ts.
@@ -119,41 +121,57 @@ export const insights = new Elysia().use(tenantDerive).post(
       // directiva que pidiéndole al modelo llamar "" a la empresa.
       .filter(Boolean)
       .join('\n\n');
-    const result = await generateInsightNarrative(snapshot, localizedPrompt);
+
+    /*
+     * ═══ LA CONEXIÓN NO PUEDE QUEDARSE ABIERTA MIENTRAS CLAUDE ESCRIBE ═══
+     *
+     * El worker de Excel ya lo hace: transacciones cortas, llamada al modelo FUERA.
+     * `POST /insights` no. El guard reserva una transacción al entrar y la deja
+     * idle durante toda la espera a Anthropic. En producción (2026-08-28) el
+     * watchdog la recogía a los 90 s — exactamente el techo del botón — con origen
+     * `POST /insights`, y el panel caía a "no pudimos generar el insight".
+     *
+     * Commit ahora: hasta acá solo se LEYÓ. `onAfterHandle`/`onError` son no-ops
+     * porque `cerrarPendiente` ya sacó la entrada. Claude corre sin transacción.
+     * Las escrituras van en una transacción nueva, igual que el worker.
+     */
+    await cerrarPendiente(request, true);
+    const result = await generateInsightNarrative(snapshot, localizedPrompt, request.signal);
 
     const insightRequestId = randomUUID();
-    await insertAiUsageEvent(db, {
-      companyId,
-      kind: 'insight',
-      refId: insightRequestId,
-      model: result.model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      cacheReadTokens: result.cacheReadTokens,
-      cacheCreationTokens: result.cacheCreationTokens,
-    });
-    if (creditRule) {
-      await debitCredits(db, {
+    const balanceAfter = await withCompanyScope(companyId, async (db) => {
+      await insertAiUsageEvent(db, {
         companyId,
-        actionKind: 'insight',
-        credits: estimateRequiredCredits(creditRule, 1),
-        creditRuleId: creditRule.id,
+        kind: 'insight',
         refId: insightRequestId,
+        model: result.model,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        cacheReadTokens: result.cacheReadTokens,
+        cacheCreationTokens: result.cacheCreationTokens,
       });
-    }
-    await db.insert(insightRequests).values({
-      id: insightRequestId,
-      companyId,
-      requestedBy: userId,
-      // data model.md §4.21: el texto del PROMPT (congelado), no los datos de
-      // entrada — corregido de una versión anterior que guardaba el snapshot de
-      // métricas aquí por error. Ahora que el prompt es editable (platform_settings),
-      // esto es lo que de verdad puede cambiar entre requests y necesita congelarse.
-      promptSnapshot: localizedPrompt,
-      result: result.narrative,
+      if (creditRule) {
+        await debitCredits(db, {
+          companyId,
+          actionKind: 'insight',
+          credits: estimateRequiredCredits(creditRule, 1),
+          creditRuleId: creditRule.id,
+          refId: insightRequestId,
+        });
+      }
+      await db.insert(insightRequests).values({
+        id: insightRequestId,
+        companyId,
+        requestedBy: userId,
+        // data model.md §4.21: el texto del PROMPT (congelado), no los datos de
+        // entrada — corregido de una versión anterior que guardaba el snapshot de
+        // métricas aquí por error. Ahora que el prompt es editable (platform_settings),
+        // esto es lo que de verdad puede cambiar entre requests y necesita congelarse.
+        promptSnapshot: localizedPrompt,
+        result: result.narrative,
+      });
+      return getCreditBalance(db, companyId);
     });
-
-    const balanceAfter = await getCreditBalance(db, companyId);
     /*
      * `insights` se suma; `narrative` se CONSERVA. No es redundancia: el frontend degrada a
      * `narrative` cuando el modelo no llamó a la herramienta y la lista viene vacía, y así

@@ -167,6 +167,13 @@ export function createApp() {
         }
 
         if (error instanceof AiProviderError) {
+          // Sentry no corre en producción (SENTRY_DSN vacío). Sin esto, la causa
+          // técnica muere en el `cause` y el log de Railway no dice por qué falló
+          // el consejo diario — solo se ve el 503.
+          console.error(
+            `[ai] ${error.operation} falló: ${error.failure}`,
+            error.cause instanceof Error ? error.cause.message : error.cause,
+          );
           set.status = aiFailureStatus(error.failure);
           return { error: aiFailureMessage(error.failure) };
         }
