@@ -47,7 +47,9 @@ describe('cabecera y detalle: el mismo dinero dos veces', () => {
       { nombre: 'LineasOC', rows: DETALLE },
     ]);
     expect(r.get('LineasOC')).toContain('OrdenesCompra');
-    expect(r.get('LineasOC')).toContain('duplicar');
+    // El mensaje dice "el mismo dinero" y no "tus compras": el módulo también descarta
+    // resúmenes de VENTAS, y ahí nombrar compras era falso. Ver el motivo en el módulo.
+    expect(r.get('LineasOC')).toContain('el mismo dinero dos veces');
   });
 
   test('el orden en que llegan las hojas no cambia el resultado', () => {
@@ -108,17 +110,78 @@ describe('lo que NO debe descartarse', () => {
     ).toBe(0);
   });
 
-  test('dos hojas con el mismo número de filas no se tocan', () => {
-    // Sin una cabecera clara —una con menos filas que la otra— no se puede decir cuál es el
-    // detalle, y elegir al azar podría descartar la buena.
+  test('mismo número de filas y las dos se bastan solas: no se tocan', () => {
+    /*
+     * Cuando las dos hojas traen contraparte y fecha, la autosuficiencia no las distingue y
+     * lo único que queda es el tamaño. Con el mismo número de filas no hay cabecera clara, y
+     * elegir al azar podría descartar la buena.
+     */
     const a = [...CABECERA];
-    const b = [['IDOC', 'Otro', 'MontoTotal'], ['OC-0001', 'x', 48610], ['OC-0002', 'y', 21000], ['OC-0003', 'z', 30390]]; // prettier-ignore
+    const b = [['IDOC', 'IDProveedor', 'FechaOrden', 'Otro', 'MontoTotal'], ['OC-0001', 'PRV-01', 45300, 'x', 48610], ['OC-0002', 'PRV-02', 45310, 'y', 21000], ['OC-0003', 'PRV-01', 45320, 'z', 30390]]; // prettier-ignore
     expect(
       detectarDetalleDuplicado([
         { nombre: 'A', rows: a },
         { nombre: 'B', rows: b },
       ]).size,
     ).toBe(0);
+  });
+
+  /*
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   * REGRESIÓN KapePrueba (2026-08-28): UN RESUMEN NO ES UNA CABECERA
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * El libro de demo traía `Ventas` (481 filas, con Fecha y Cliente) y su propio consolidado
+   * `Resumen_Mensual` (11 filas, un total por mes). Con "menos filas = cabecera" se
+   * descartaron las 481 ventas para conservar el resumen — y el resumen lo descartaba después
+   * otro filtro, así que el dashboard del cliente quedó sin una sola venta.
+   *
+   * Se usan pocas filas a propósito: el defecto NO era de escala, era del criterio.
+   */
+  const VENTAS = [
+    ['Fecha', 'Mes', 'Documento', 'Cliente', 'Venta neta'],
+    [46024, 46023, 'VD-001', 'Mostrador', 100],
+    [46055, 46054, 'VD-002', 'Café Central', 200],
+    [46083, 46054, 'VD-003', 'Mostrador', 300],
+    [46114, 46054, 'VD-004', 'La Bodeguita', 400],
+  ]; // prettier-ignore
+
+  const RESUMEN = [
+    ['Mes', 'Venta neta total'],
+    [46023, 300],
+    [46054, 700],
+  ]; // prettier-ignore
+
+  test('se conserva el DETALLE con contraparte, no el resumen mensual', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Ventas', rows: VENTAS },
+      { nombre: 'Resumen_Mensual', rows: RESUMEN },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Resumen_Mensual')).toBe(true);
+  });
+
+  test('el orden en que llegan las hojas no cambia el veredicto', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Resumen_Mensual', rows: RESUMEN },
+      { nombre: 'Ventas', rows: VENTAS },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Resumen_Mensual')).toBe(true);
+  });
+
+  test('si la conservada no va a producir movimientos, no se descarta NADA', () => {
+    /*
+     * La otra mitad del fallo de KapePrueba: el dedup conservaba una hoja que el filtro
+     * siguiente descartaba por su cuenta. Las dos decisiones eran defendibles por separado y
+     * juntas dejaban el dashboard en cero. Acá se invierte la autosuficiencia para forzar que
+     * la ganadora sea la marcada como no procesable.
+     */
+    const r = detectarDetalleDuplicado([
+      { nombre: 'OrdenesCompra', rows: CABECERA, puedeProducirMovimientos: false },
+      { nombre: 'LineasOC', rows: DETALLE, puedeProducirMovimientos: true },
+    ]);
+    expect(r.size).toBe(0);
   });
 
   test('hojas que no se parecen en montos se dejan en paz', () => {

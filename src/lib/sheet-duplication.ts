@@ -37,6 +37,8 @@
  * sería cambiar un dato bueno por dos malos.
  */
 
+import { pareceLibroDeMovimientos } from './sheet-classifier';
+
 /** Convierte a número lo que Excel entrega como número o como texto con separadores. */
 function aNumero(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
@@ -65,6 +67,14 @@ export interface HojaParaComparar {
   nombre: string;
   /** Filas con el encabezado YA localizado en la posición 0. */
   rows: unknown[][];
+  /**
+   * `false` si OTRO filtro del pipeline va a descartar esta hoja igual.
+   *
+   * Una hoja así NUNCA puede ser la conservada: ver el bloque "LA CONSERVADA TIENE QUE
+   * SOBREVIVIR" abajo. Se omite por defecto (`true`) para no obligar a todos los llamadores
+   * a calcularlo, pero el worker SÍ lo pasa.
+   */
+  puedeProducirMovimientos?: boolean;
 }
 
 /**
@@ -116,6 +126,85 @@ function sumasDeColumnasDeDinero(rows: unknown[][]): number[] {
   return sumas;
 }
 
+/**
+ * ¿Hay una columna que es una FECHA por fila?
+ *
+ * Se juzga por el CONTENIDO y no por el nombre, igual que `noPuedeProducirMovimientos`: una
+ * hoja cuya columna se llame "Emisión" o "Corte" no tiene ninguna palabra que un vocabulario
+ * reconozca, pero sus celdas siguen trayendo fechas.
+ */
+function tieneColumnaDeFecha(rows: unknown[][]): boolean {
+  const datos = rows.slice(1);
+  if (datos.length === 0) return false;
+  const ancho = Math.max(...rows.map((f) => f.length));
+
+  for (let c = 0; c < ancho; c++) {
+    let cuantos = 0;
+    let fechas = 0;
+    for (const f of datos) {
+      const v = f[c];
+      if (v === null || v === undefined || v === '') continue;
+      cuantos++;
+      if (v instanceof Date) fechas++;
+      else {
+        const n = aNumero(v);
+        if (n !== null && ES_SERIAL_DE_FECHA(n)) fechas++;
+      }
+    }
+    // 0,8 y no 1,0: un archivo real trae una fila a medio llenar en la columna de fecha.
+    if (cuantos > 0 && fechas >= cuantos * 0.8) return true;
+  }
+  return false;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ¿LAS FILAS DE ESTA HOJA SE BASTAN SOLAS? — LA PREGUNTA QUE DECIDE CUÁL SE CONSERVA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El criterio original era "más filas = el detalle", y la razón nº1 escrita arriba para
+ * conservar la cabecera es que "sus filas se bastan solas: traen contraparte y fecha, que es
+ * lo que el detalle no tiene". O sea: la justificación siempre fue la AUTOSUFICIENCIA, y el
+ * conteo de filas era un proxy de ella. **Nadie verificaba la premisa**, y el día que el proxy
+ * apuntó al revés se llevó la contabilidad completa de un cliente.
+ *
+ * ═══ LO QUE COSTÓ (2026-08-28, archivo de demo de KapePrueba) ═══
+ *
+ * El libro trae, además del detalle, su propio CONSOLIDADO:
+ *
+ *     Ventas           481 filas · Fecha · Cliente · Venta neta       = 239.588,62
+ *     Compras           43 filas · Fecha · Proveedor · Subtotal neto  =  62.836,71
+ *     Resumen_Mensual    11 filas · Mes   · (nadie)  · Venta neta total = 239.588,62  ← lo mismo
+ *
+ * `Resumen_Mensual` dice de sí mismo "Consolidado automático desde la hoja Ventas", así que
+ * empatar no es casualidad: **es su naturaleza**. Con "menos filas = cabecera", las 481 ventas
+ * y las 43 compras se descartaron y se conservó el resumen de 11 filas. Y un resumen mensual
+ * empata contra TODAS las hojas de detalle del libro, así que UNA hoja así lo vacía entero.
+ *
+ * Es exactamente el error inverso al que el módulo vino a evitar: en vez de contar el dinero
+ * dos veces, no lo contó ninguna.
+ *
+ * ═══ POR QUÉ LA CONTRAPARTE Y NO OTRA SEÑAL ═══
+ *
+ * Una cabecera y su detalle son el mismo dinero a dos granularidades de LOS MISMOS
+ * DOCUMENTOS; un resumen es un AGREGADO POR PERÍODO. Lo que los separa no es el tamaño —el
+ * resumen es más chico que la cabecera y la cabecera más chica que el detalle, así que el
+ * conteo no puede distinguirlos— sino que **un agregado no tiene contraparte**: no se le vende
+ * a "enero". `Resumen_Mensual` tiene fecha (su columna `Mes` son seriales de Excel de verdad),
+ * y por eso la fecha sola tampoco alcanza; la contraparte sí.
+ *
+ * Medido sobre los dos archivos que gobiernan este módulo, el veredicto NO cambia donde ya era
+ * correcto — cambia el motivo, que pasa de un proxy a la premisa:
+ *
+ *     OrdenesCompra   Proveedor ✓  Fecha ✓  → se basta sola → SE CONSERVA (como antes)
+ *     LineasOC        —            Fecha ✓  → no            → se descarta (como antes)
+ *     Ventas          Cliente   ✓  Fecha ✓  → se basta sola → SE CONSERVA (antes: descartada)
+ *     Resumen_Mensual —            Mes   ✓  → no            → se descarta (antes: conservada)
+ */
+function seBastaSola(rows: unknown[][]): boolean {
+  return pareceLibroDeMovimientos(rows[0] ?? []) && tieneColumnaDeFecha(rows);
+}
+
 /** Encabezados que las dos hojas comparten: la llave por la que se relacionan. */
 function encabezadosCompartidos(a: unknown[][], b: unknown[][]): number {
   const ea = new Set((a[0] ?? []).map(normalizar).filter((x) => x !== ''));
@@ -137,7 +226,11 @@ function encabezadosCompartidos(a: unknown[][], b: unknown[][]): number {
  */
 export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string, string> {
   const aOmitir = new Map<string, string>();
-  const conSumas = hojas.map((h) => ({ ...h, sumas: sumasDeColumnasDeDinero(h.rows) }));
+  const conSumas = hojas.map((h) => ({
+    ...h,
+    sumas: sumasDeColumnasDeDinero(h.rows),
+    seBasta: seBastaSola(h.rows),
+  }));
 
   for (let i = 0; i < conSumas.length; i++) {
     for (let j = i + 1; j < conSumas.length; j++) {
@@ -150,16 +243,57 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
       if (!coinciden) continue;
       if (encabezadosCompartidos(a.rows, b.rows) === 0) continue;
 
-      // Más filas = el detalle. Se conserva la cabecera, que trae contraparte y fecha.
-      const detalle = a.rows.length >= b.rows.length ? a : b;
-      const cabecera = detalle === a ? b : a;
-      if (detalle.rows.length === cabecera.rows.length) continue; // sin cabecera clara, no se toca
+      /*
+       * SE CONSERVA LA QUE SE BASTA SOLA. Ver el bloque de `seBastaSola`: la autosuficiencia
+       * (contraparte + fecha por fila) siempre fue la razón para conservar la cabecera, y el
+       * conteo de filas era solo un proxy de ella. Cuando exactamente una de las dos la
+       * cumple, se decide por la premisa y no por el proxy.
+       */
+      let cabecera: typeof a;
+      let detalle: typeof a;
+      if (a.seBasta !== b.seBasta) {
+        cabecera = a.seBasta ? a : b;
+        detalle = a.seBasta ? b : a;
+      } else {
+        // Ninguna o las dos: no hay nada que las distinga salvo el tamaño, y ahí el proxy
+        // sigue siendo lo mejor que se tiene. Más filas = el detalle.
+        detalle = a.rows.length >= b.rows.length ? a : b;
+        cabecera = detalle === a ? b : a;
+        if (detalle.rows.length === cabecera.rows.length) continue; // sin cabecera clara, no se toca
+      }
 
-      aOmitir.set(
-        detalle.nombre,
-        `sus montos ya están contados en la hoja "${cabecera.nombre}" (las dos suman lo mismo): ` +
-          'se usó esa para no duplicar tus compras',
-      );
+      /*
+       * ═══ LA CONSERVADA TIENE QUE SOBREVIVIR, O NO SE DESCARTA NADA ═══
+       *
+       * Descartar una hoja "porque su dinero ya está contado en otra" solo es cierto si esa
+       * otra de verdad se procesa. En el archivo de KapePrueba no se procesaba: el dedup
+       * conservaba `Resumen_Mensual` y el filtro SIGUIENTE
+       * (`noPuedeProducirMovimientos`) la descartaba por su cuenta. Las dos decisiones eran
+       * defendibles por separado y juntas dejaron el dashboard del cliente en cero.
+       *
+       * Ningún reordenamiento de filtros arregla esto en general —siempre hay un filtro
+       * después—, así que la condición se afirma acá: si la conservada no va a producir
+       * movimientos, el par se deja intacto. El peor caso pasa a ser contar de más, que se
+       * ve; el que se elimina es contar CERO, que no se ve.
+       */
+      if (cabecera.puedeProducirMovimientos === false) continue;
+
+      /*
+       * El texto dice "el mismo dinero" y no "tus compras": mientras el módulo solo conocía el
+       * par cabecera/detalle de una orden de compra, "compras" era exacto. Con el resumen
+       * mensual de ventas de KapePrueba pasó a ser falso — el cliente leía que no se
+       * duplicaron sus compras a propósito de su hoja de ventas.
+       *
+       * `has` y no sobrescribir: un resumen empata contra VARIAS hojas de detalle, y sin esto
+       * el mensaje nombraba a la última con la que empató en vez de a la primera.
+       */
+      if (!aOmitir.has(detalle.nombre)) {
+        aOmitir.set(
+          detalle.nombre,
+          `sus montos ya están contados en la hoja "${cabecera.nombre}" (las dos suman lo ` +
+            'mismo): se usó esa para no contar el mismo dinero dos veces',
+        );
+      }
     }
   }
   return aOmitir;
