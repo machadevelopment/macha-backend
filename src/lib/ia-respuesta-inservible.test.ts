@@ -74,8 +74,12 @@ mock.module('@anthropic-ai/sdk', () => ({
         maxTokensPedido = params.max_tokens;
         return { finalMessage: async () => conUso(siguiente()) };
       },
-      create: async (params: { messages: unknown[] }, options?: { signal?: AbortSignal }) => {
+      create: async (
+        params: { messages: unknown[]; max_tokens?: number },
+        options?: { signal?: AbortSignal },
+      ) => {
         mensajesDeLaUltimaLlamada = params.messages;
+        if (typeof params.max_tokens === 'number') maxTokensPedido = params.max_tokens;
         // CU-868ktvqjm: se guarda para comprobar que la señal llega hasta el SDK. Sin eso,
         // "cancelar" sería solo dejar de escuchar mientras la llamada sigue y se paga.
         senalDeLaUltimaLlamada = options?.signal;
@@ -294,14 +298,23 @@ describe('el consejo diario no se degrada en silencio (CU-868ktm2m2)', () => {
     expect(r.narrative).toContain('Cobra las facturas vencidas.');
   });
 
-  test('stop_reason=max_tokens lanza aunque haya insights: el JSON pudo cortarse', async () => {
+  test('stop_reason=max_tokens CON insights usables los sirve, no los tira', async () => {
     /*
-     * El caso que más engaña. Con la herramienta forzada, un corte a mitad del JSON puede
-     * dejar algunos insights bien formados y perder el resto — y sin mirar `stop_reason`
-     * eso pasa por una respuesta completa. Un consejo al que le faltan dos de tres puntos
-     * no se distingue de uno de un solo punto.
+     * La versión anterior lanzaba. En producción eso era la pantalla de error del
+     * consejo diario: Claude contestó, parseó al menos un insight, y se descartaba
+     * por el stop_reason. El último elemento pudo cortarse; parseInsights ya lo
+     * descarta. Tirar los enteros convertía un recorte en "no pudimos generar".
      */
     respuestas = [{ ...insightsDe('Solo el primero llegó.'), stop_reason: 'max_tokens' }];
+
+    const r = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt');
+    expect(r.insights).toHaveLength(1);
+    expect(r.narrative).toContain('Solo el primero llegó.');
+    expect(maxTokensPedido).toBe(4096);
+  });
+
+  test('stop_reason=max_tokens SIN insights usables sí lanza', async () => {
+    respuestas = [{ stop_reason: 'max_tokens', content: [] }];
 
     const error = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt').catch(
       (e: unknown) => e,
@@ -309,6 +322,13 @@ describe('el consejo diario no se degrada en silencio (CU-868ktm2m2)', () => {
 
     expect(error).toBeInstanceOf(AiProviderError);
     expect((error as AiProviderError).failure).toBe('incomplete');
+  });
+
+  test('la señal de aborto llega hasta el SDK, igual que en el chat', async () => {
+    respuestas = [insightsDe('Cobra las facturas vencidas.')];
+    const ac = new AbortController();
+    await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt', ac.signal);
+    expect(senalDeLaUltimaLlamada).toBe(ac.signal);
   });
 
   test('sin insights y sin texto lanza un error de DOMINIO, no un Error pelado', async () => {

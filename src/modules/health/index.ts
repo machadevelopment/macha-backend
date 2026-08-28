@@ -4,33 +4,37 @@ import { medirSaludDelPool, describirSalud } from '@/lib/db-health';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
- * DOS CHEQUEOS, Y LA DIFERENCIA IMPORTA (caída del 2026-08-26)
+ * DOS CHEQUEOS, Y LA DIFERENCIA IMPORTA (caída del 2026-08-26 · deploy fallido 2026-08-28)
  * ═══════════════════════════════════════════════════════════════════════════════════════════
  *
- * `GET /health` no toca la base a propósito: responde si el proceso está vivo y atendiendo. Eso
- * es correcto para lo que es, y **es exactamente por lo que engañó** durante la caída del
- * 2026-08-26: se le pegaron 20 llamadas seguidas con el producto muerto y devolvió 200 en las
- * 20, así que sirvió para DESCARTAR el backend justo cuando el backend era el problema.
+ * `GET /health` no toca la base a propósito: responde si el proceso está vivo y atendiendo.
+ * Eso es correcto para lo que es, y **es exactamente por lo que engañó** durante la caída
+ * del 2026-08-26: se le pegaron 20 llamadas seguidas con el producto muerto y devolvió 200
+ * en las 20.
  *
- * La causa era el pool de `macha_app` agotado (`max: 10`) por una transacción colgada. Un
- * chequeo que no toca la base no puede verlo ni en principio.
+ * `GET /health/db` SÍ toca la base. Es el healthcheck de Railway. Contesta una sola
+ * pregunta: **¿ESTE proceso puede hablar con Postgres?** `SELECT 1` ok → 200; no se pudo
+ * → 503.
  *
- * `GET /health/db` es el que sí lo ve, y por eso es **el que debe configurarse como healthcheck
- * del servicio en Railway**. Con el pool agotado devuelve 503, Railway reinicia, las conexiones
- * se cierran y el rollback ocurre solo: la caída de aquel día se habría curado sin nadie
- * mirando.
+ * ⚠️ NO DEVUELVE 503 POR FUGAS DEL POOL. Esa fue la trampa del 2026-08-28: Railway solo
+ * mira este endpoint AL DESPLEGAR (*"does not monitor the healthcheck after the deployment
+ * has gone live"*). Un 503 por transacciones `idle in transaction` del contenedor VIEJO
+ * —las que deja `POST /insights` mientras espera a Claude— hace que el replica NUEVO
+ * nunca se ponga healthy. El deploy muere, la fuga se queda, y el arreglo no entra. Es
+ * un candado que se cierra a sí mismo.
+ *
+ * Las fugas las cura `pool-watch` (cada 2 min) y el watchdog de `db-scope` (90 s). Este
+ * endpoint las NOMBRA en el cuerpo (`atencion`) para que un `curl` las vea, y sigue
+ * diciendo 200 para que Railway deje pasar al proceso que sí puede atender.
  */
 export const health = new Elysia({ prefix: '/health' })
   .get('/', () => ({ status: 'ok', service: 'macha-backend' }))
   /**
    * ⚠️ ESTE es el healthcheck del servicio en Railway, no `/health`.
    *
-   * Devuelve 503 en dos casos, y los dos son "la app no puede atender":
-   *   · la consulta de sondeo no se pudo hacer (base caída, o **pool sin conexiones libres**);
-   *   · el pool está comprometido según `lib/db-health.ts` (fuga o varias sesiones bloqueadas).
-   *
-   * El segundo es el que convierte esto en algo útil: sin él, una conexión libre entre diez
-   * atascadas seguiría devolviendo 200 mientras los usuarios ven errores.
+   * 503 solo si ESTE proceso no pudo sondear la base (caída, o pool local sin
+   * conexiones libres — `SELECT 1` espera y lanza). Una fuga en otra sesión no es
+   * eso: el sondeo acaba de funcionar.
    */
   .get('/db', async ({ set }) => {
     try {
@@ -42,14 +46,7 @@ export const health = new Elysia({ prefix: '/health' })
 
       const salud = await medirSaludDelPool();
       if (salud.requiereAtencion) {
-        /*
-         * 503 y no 200-con-aviso: el punto de este endpoint es que un orquestador pueda ACTUAR
-         * sin leer el cuerpo. Un 200 con un campo `degradado: true` obliga a que alguien
-         * programe la lectura de ese campo, y mientras nadie lo haga el chequeo no sirve —que
-         * es la situación en la que estábamos.
-         */
-        set.status = 503;
-        return { db: 'degradado', razon: describirSalud(salud) };
+        return { db: 'ok', atencion: describirSalud(salud) };
       }
 
       return { db: 'ok' };
