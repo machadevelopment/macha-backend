@@ -119,6 +119,20 @@ Conventions & gotchas:
      **EXCEPCIÓN: la firma `existencias` ya no se tira** (CU-868krkfrh, 2026-08-16). Seguía el
      mismo camino que el resto y era el bug "Inventario no carga datos con ningún archivo":
      producción descartaba 211 filas de inventario por carga, en cada una de las tres empresas.
+     ⚠️ **Y una CARTERA DE CLIENTES que no se reconoce como catálogo se vuelve ingresos falsos**
+     (2026-08-28, mismo archivo de KapePrueba). `Clientes_B2B` —`Cliente · NIT · Tipo · Contacto
+     · Teléfono · Condiciones · Venta neta acumulada · Unidades · Última compra · Saldo por
+     cobrar`— daba 2 coincidencias contra el mínimo de 3 de la firma `contactos`: faltaba
+     `nombre`, porque la columna se llama "Cliente". Se fue al modelo, y el modelo hizo lo único
+     que podía con ella: leyó `Última compra` como la fecha y `Saldo por cobrar` como el monto.
+     Los **Q 13.362,75** que Jose vio en el dashboard son la suma exacta de esa columna, o sea
+     **cartera pendiente de cobro presentada como ingresos del trimestre** — y fueron la ÚNICA
+     cifra que llegó. `nit` y `condiciones` entraron a la firma porque son de la misma naturaleza
+     que el resto (cómo se FICHA a una contraparte, no cómo se registra un hecho) y no aparecen
+     en una hoja de movimientos: una línea de venta no lleva las condiciones de crédito de su
+     cliente. La lección que generaliza: una columna ACUMULADA o de SALDO es tan legible como una
+     de monto, así que una hoja derivada que llegue al modelo no falla — produce cifras
+     plausibles y equivocadas.
      Ahora `firmaDeCatalogo()` dice CUÁL catálogo es y esa hoja va a `lib/inventory-import.ts`,
      **sin pasar por el modelo** — sus encabezados son predecibles y mandarla a la IA desharía
      lo que este mismo filtro vino a lograr. La cantidad del archivo se trata como un CONTEO,
@@ -141,12 +155,32 @@ Conventions & gotchas:
   4. **Cabecera y detalle del mismo dinero** (`lib/sheet-duplication.ts`, 2026-08-14). Un archivo
      real trae `OrdenesCompra` (60 filas, Q 2.707.318) y `LineasOC` (220 filas, Q 2.707.318):
      **la misma plata a dos granularidades**. Si las dos producen movimientos, las compras del
-     cliente se cuentan DOS VECES. Se conserva la CABECERA (sus filas traen contraparte y fecha;
-     el detalle no) y se pierde el desglose por producto — el mensaje al cliente lo nombra.
-     **Corre solo sobre las hojas que sobrevivieron a 2 y 3**: contra todas, el catálogo
+     cliente se cuentan DOS VECES. Se conserva la hoja **cuyas filas se bastan solas** —las que
+     traen CONTRAPARTE y fecha— y se pierde el desglose por producto; el mensaje al cliente lo
+     nombra. **Corre solo sobre las hojas que sobrevivieron a 2 y 3**: contra todas, el catálogo
      `Productos` empataba con `Ventas` y habría descartado 520 ventas reales. Y las columnas de
      FECHA se excluyen de la comparación — un serial de Excel vale ~45.000, así que sesenta
      fechas suman más que la columna de dinero de su propia hoja.
+     ⚠️ **La conservada NO se elige por tener menos filas, y confundirlo vació un libro entero**
+     (2026-08-28, archivo de demo de KapePrueba). El criterio era "menos filas = cabecera", que
+     siempre fue un PROXY de la autosuficiencia; nadie verificaba la premisa. El libro traía su
+     propio consolidado (`Resumen_Mensual`, 11 filas, *"Consolidado automático desde la hoja
+     Ventas"*), así que empatar con `Ventas` (481 filas) y `Compras` (43) **no era casualidad
+     sino su naturaleza**: se descartaron las 524 filas reales para conservar el resumen. Y un
+     resumen empata contra TODAS las hojas de detalle del libro, así que UNA hoja así lo vacía
+     entero. Lo que separa una cabecera de un resumen no es el tamaño —el resumen es más chico
+     que la cabecera y la cabecera más chica que el detalle— sino que **un agregado por período
+     no tiene contraparte: no se le vende a "enero"**. La fecha sola no alcanza (la columna `Mes`
+     del resumen son seriales de Excel de verdad). El veredicto de `OrdenesCompra`/`LineasOC` no
+     cambia; cambia el motivo, que pasa de un proxy a la premisa.
+     ⚠️ **Y la conservada TIENE QUE SOBREVIVIR a los filtros siguientes, o no se descarta nada.**
+     La otra mitad del mismo fallo: `Resumen_Mensual` ganaba el dedup y el paso siguiente
+     (`noPuedeProducirMovimientos`) lo descartaba por su cuenta. Las dos decisiones eran
+     defendibles por separado y juntas dejaron el dashboard del cliente en CERO. Ningún
+     reordenamiento de filtros lo arregla en general —siempre hay un filtro después—, así que la
+     condición se afirma dentro del dedup (`puedeProducirMovimientos`, que el worker calcula con
+     el mismo predicado). El peor caso pasa a ser contar de más, que se VE; se elimina contar
+     cero, que no se ve.
   5. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
      el cliente resube su contabilidad completa cada semana. La huella lleva un **ordinal**
      contado por CONTENIDO, no por posición, para que dos ventas idénticas el mismo día no se
