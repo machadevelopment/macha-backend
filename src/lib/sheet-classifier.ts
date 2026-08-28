@@ -127,9 +127,43 @@ const CATALOG_SIGNATURES: {
   prohibidas?: string[];
 }[] = [
   {
-    // Clientes / Proveedores: contacto de una persona o empresa.
+    /*
+     * Clientes / Proveedores: contacto de una persona o empresa.
+     *
+     * ═══ `nit` Y `condiciones` SE AGREGARON POR UNA CARTERA QUE SE VOLVIÓ INGRESOS ═══
+     *
+     * La hoja `Clientes_B2B` de un archivo real (2026-08-28) es una cartera de clientes con
+     * DATOS FISCALES en vez de personales:
+     *
+     *     Cliente · NIT · Tipo · Contacto · Teléfono · Condiciones ·
+     *     Venta neta acumulada · Unidades · Última compra · Saldo por cobrar
+     *
+     * Daba 2 coincidencias contra el mínimo de 3 —`contacto` y `telefono`, pero NO `nombre`,
+     * porque la columna se llama "Cliente"— así que se fue al modelo. Y el modelo hizo lo
+     * único que podía con ella: leyó `Última compra` como la fecha y `Saldo por cobrar` como
+     * el monto, y registró Q 13.362,75 de INGRESOS que no son una venta del período sino la
+     * cartera pendiente de cobro. Fue la única cifra que llegó al dashboard de ese cliente.
+     *
+     * Las dos columnas nuevas son de la MISMA naturaleza que el resto de la firma —cómo se
+     * ficha a una contraparte, no cómo se registra un hecho— y no aparecen en una hoja de
+     * movimientos: una línea de venta no lleva las condiciones de crédito de su cliente.
+     * `nombre` se queda porque sigue cubriendo los catálogos de personas.
+     *
+     * El empate con `looksFinancial` sigue mandando al modelo, así que una hoja que ADEMÁS
+     * traiga columna de dinero Y de fecha reconocidas no se descarta por esto.
+     */
     name: 'contactos',
-    needed: ['email', 'telefono', 'contacto', 'nombre', 'apellido', 'nivellealtad', 'genero'],
+    needed: [
+      'email',
+      'telefono',
+      'contacto',
+      'nombre',
+      'apellido',
+      'nivellealtad',
+      'genero',
+      'nit',
+      'condiciones',
+    ],
     min: 3,
   },
   {

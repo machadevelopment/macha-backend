@@ -409,7 +409,11 @@ export function startExcelIngestWorker(): Promise<string> {
          * resúmenes; lo que queda son movimientos compitiendo contra movimientos, que es el
          * único caso donde esta comparación significa algo.
          */
-        const vivas: { nombre: string; rows: unknown[][] }[] = [];
+        const vivas: {
+          nombre: string;
+          rows: unknown[][];
+          puedeProducirMovimientos: boolean;
+        }[] = [];
         for (const nombre of workbook.SheetNames) {
           const hoja = workbook.Sheets[nombre];
           if (!hoja) continue;
@@ -421,7 +425,23 @@ export function startExcelIngestWorker(): Promise<string> {
           const desdeEncabezado = crudas.slice(detectarFilaDeEncabezado(crudas));
           if (analizarFormaDeHoja(desdeEncabezado).esReporte) continue;
           if (canSkipSheet(desdeEncabezado[0] ?? [])) continue;
-          vivas.push({ nombre, rows: desdeEncabezado });
+          /*
+           * `puedeProducirMovimientos` se calcula ACÁ, con el mismo predicado que el filtro de
+           * la segunda pasada, para que el dedup no pueda conservar una hoja que ese filtro va
+           * a descartar unas líneas después. Ver "LA CONSERVADA TIENE QUE SOBREVIVIR" en
+           * `lib/sheet-duplication.ts`: en el archivo de KapePrueba esa combinación descartó
+           * las 481 ventas y las 43 compras del cliente para conservar un resumen de 11 filas
+           * que tampoco se procesó.
+           */
+          vivas.push({
+            nombre,
+            rows: desdeEncabezado,
+            puedeProducirMovimientos: !noPuedeProducirMovimientos(
+              desdeEncabezado,
+              asDate,
+              asNumber,
+            ),
+          });
         }
         const detalleDuplicado = detectarDetalleDuplicado(vivas);
 

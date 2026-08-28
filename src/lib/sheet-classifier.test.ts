@@ -445,3 +445,46 @@ describe('una hoja que no puede producir movimientos se descarta', () => {
     ).toBe(false);
   });
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * REGRESIÓN KapePrueba (2026-08-28): UNA CARTERA DE CLIENTES NO ES UNA HOJA DE INGRESOS
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `Clientes_B2B` daba 2 coincidencias contra el mínimo de 3 —`contacto` y `telefono`, pero NO
+ * `nombre`, porque la columna se llama "Cliente"— así que se iba al modelo. El modelo hizo lo
+ * único que podía con ella: leyó `Última compra` como fecha y `Saldo por cobrar` como monto, y
+ * registró Q 13.362,75 de INGRESOS que no son ventas del período sino cartera pendiente de
+ * cobro. Fue la ÚNICA cifra que llegó al dashboard de ese cliente.
+ */
+describe('una cartera de clientes con datos fiscales es catálogo', () => {
+  const CARTERA_B2B = [
+    'Cliente',
+    'NIT',
+    'Tipo',
+    'Contacto',
+    'Teléfono',
+    'Condiciones',
+    'Venta neta acumulada',
+    'Unidades',
+    'Última compra',
+    'Saldo por cobrar',
+  ];
+
+  test('se descarta sin llamar al modelo', () => {
+    expect(classifySheet(CARTERA_B2B)).toBe('catalog');
+    expect(canSkipSheet(CARTERA_B2B)).toBe(true);
+    expect(firmaDeCatalogo(CARTERA_B2B)).toBe('contactos');
+  });
+
+  test('una hoja de VENTAS que nombra al cliente y su NIT NO se descarta', () => {
+    /*
+     * El riesgo de ensanchar la firma: una factura legítimamente trae el NIT de quien compra.
+     * Lo que la salva es que no trae los datos de FICHA de la contraparte —contacto, teléfono,
+     * condiciones de crédito— que solo tienen sentido en un maestro.
+     */
+    const ventas = ['Fecha', 'Documento', 'Cliente', 'NIT', 'Cantidad', 'Precio unitario', 'Total'];
+    expect(classifySheet(ventas)).toBe('financial');
+    expect(canSkipSheet(ventas)).toBe(false);
+  });
+});
