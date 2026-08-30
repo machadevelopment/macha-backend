@@ -167,10 +167,47 @@ Conventions & gotchas:
         **producen movimientos**, no contra todas — contra todas, los conceptos de KapePrueba
         aparecen en su `Estado_Resultados` y su `Punto_Equilibrio` (derivados que no se
         procesan) y el solape también daba 100 %, o sea que la señal se apagaba entera.
+     5. **Ningún renglón es la ARITMÉTICA de los otros** (2026-08-30). Las guardas 2 y 4 fallan
+        las dos contra un estado escrito con etiquetas GENÉRICAS: `Ingresos / Egresos /
+        Diferencia`. Ninguna está en la lista de agregados —ni puede estarlo: "ingresos" es
+        también el nombre legítimo de un rubro— y sus conceptos no aparecen en otra hoja, así
+        que el solape da cero. Pasaba las cuatro y duplicaba toda la contabilidad; la única
+        razón por la que no explotó en la primera corrida es que ese negocio daba pérdida y el
+        negativo lo atrapó la guarda 1. **La señal no es cómo se LLAMAN los renglones sino cómo
+        se RELACIONAN**: un estado financiero es por definición un conjunto donde alguno se
+        calcula a partir de los otros, y `Ingresos = Egresos + Diferencia` es la misma identidad
+        que `Utilidad = Ventas − Costos` con otras palabras. Eso se mide, y a diferencia de una
+        lista de palabras no se queda corta con el próximo rótulo que alguien invente.
+        Dos formas, y la diferencia decide qué hacer: **suma de TODOS los demás** → se rechaza
+        la hoja (es un estado, y sus renglones también viven en las hojas de detalle);
+        **suma de un BLOQUE CONTIGUO de arriba** → se excluye solo ese renglón (es un subtotal
+        anidado, `Servicios` = Agua + Luz, y rechazar la hoja perdería alquiler y sueldos, que
+        son gastos reales). El bloque contiguo no es arbitrario: es como se escribe un subtotal
+        en una hoja de cálculo. **La tolerancia es 0,1 %** y eso importa — con 0,5 % apareció un
+        falso positivo enseguida, en una matriz de seis rubros donde `Sueldos` (2.800) quedaba a
+        0,36 % de la suma de los otros cinco (2.790) por casualidad, y la hoja entera se
+        rechazaba. Una identidad contable la calcula una fórmula: es exacta salvo redondeo.
      La columna `Total`/`Promedio` **no** se despivota (no son meses) y la fila `TOTAL` se
      excluye sin descalificar la hoja. **La fecha es el día 1 y no el último**: con el último,
      el mes EN CURSO queda fechado en el futuro y se sale de cualquier filtro "hasta hoy" del
      dashboard — se perdería justo el mes que el cliente mira.
+     **TRIMESTRES Y SEMESTRES también son períodos** (`Q1 2026`, `T1`, `1er trimestre`, `S1
+     2026`): hay negocios que presupuestan así, y sin reconocerlos la hoja ni siquiera se
+     detectaba como reporte — caía al camino normal, se quedaba sin columna de fecha y
+     desaparecía (Q 77.280 medidos). Se mapean al PRIMER MES de su período para que la fecha
+     caiga dentro y el filtro del dashboard la encuentre. Un `Acumulado Q1` NO se reconoce: es
+     el subtotal de los meses de al lado. ⚠️ `pareceNombreDePeriodo` (sheet-shape) y
+     `mesDeEncabezado` (sheet-unpivot) **tienen que coincidir**, o pasa lo peor de los dos
+     mundos: la hoja se marca como reporte y después no se puede despivotar, o sea que se
+     descarta igual. Hay test sobre 24 etiquetas.
+     **El mínimo de períodos baja de 3 a 2 SOLO con año explícito en todas las etiquetas.** Una
+     matriz semestral tiene exactamente dos columnas; `S1 2026` no admite otra lectura, mientras
+     que `Enero` a secas puede ser el nombre de una persona o de una sucursal.
+     **Y el despivotado es un RESCATE ante CUALQUIER descarte, no solo ante el de "reporte".**
+     Se intentaba únicamente tras `analizarFormaDeHoja`, que exige cuatro columnas de período;
+     una matriz de dos o tres caía al filtro siguiente y desaparecía sin dejar una sola fila
+     marcada. Intentarlo antes de tirar la hoja es correcto por construcción: a esa altura ya se
+     iba a la basura, así que solo puede AGREGAR datos, y las cinco guardas corren enteras.
   3. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
      (clientes, proveedores, productos, tiendas) no llegan al modelo. Los archivos
      reales de PYME son volcados operativos completos, no exportes contables: ~31% de las filas.
@@ -250,6 +287,18 @@ Conventions & gotchas:
      condición se afirma dentro del dedup (`puedeProducirMovimientos`, que el worker calcula con
      el mismo predicado). El peor caso pasa a ser contar de más, que se VE; se elimina contar
      cero, que no se ve.
+     ⚠️ **Y dos hojas con el mismo número de filas y el MISMO dinero AL CENTAVO son una copia**
+     (2026-08-30). La regla "sin cabecera clara, no se toca" existe para no elegir al azar entre
+     dos hojas distintas, pero ahí no hay nada que elegir: es la misma tabla dos veces —un
+     respaldo, una hoja duplicada al exportar— y procesarlas las dos daba la facturación al
+     DOBLE. El umbral acá es al CENTAVO y no el 1 % del resto del módulo, y esa diferencia ES la
+     regla: dos conjuntos de datos distintos no suman exactamente lo mismo hasta el último
+     decimal.
+     ⚠️ **`tieneColumnaDeFecha` usa `asDate`, el mismo lector del pipeline** — miraba solo
+     objetos `Date` y seriales, así que una hoja con fechas ISO en TEXTO (como las trae cualquier
+     archivo que pasó por un CSV) no contaba como autosuficiente, empataba contra un agregado y
+     el desempate caía de vuelta al proxy del tamaño. Medido: un libro descartaba sus 48 ventas
+     de detalle para conservar una matriz despivotada de 24 filas sin contraparte.
   5. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
      el cliente resube su contabilidad completa cada semana. La huella lleva un **ordinal**
      contado por CONTENIDO, no por posición, para que dos ventas idénticas el mismo día no se
@@ -558,6 +607,17 @@ Conventions & gotchas:
   `document_ingest_batches`, y un débito por documento necesita la suya. ⚠️ **La columna `unit`
   de `credit_rules` no la lee nadie** (`estimateRequiredCredits` solo mira `ruleType` y
   `creditsPerUnit`): es declarativa, y en producción está en NULL para las cuatro reglas.
+- **Una moneda que NO soportamos no se renombra a la nuestra** (2026-08-30). `asCurrency`
+  devolvía la moneda base ante cualquier cosa que no fuera GTQ o USD, así que una fila que decía
+  `EUR` se guardaba como `GTQ`: **€100 entraban como Q100**, subestimando ~8,4 veces, y
+  `staging-rules` no podía desmentirlo porque el payload ya decía una moneda válida. La
+  confusión era tratar igual la celda VACÍA (la hoja no dice la moneda: usar la de la empresa es
+  correcto y sigue igual) y la celda que SÍ dice una moneda que no manejamos (la hoja lo afirma
+  y nosotros lo ignorábamos). Ahora la segunda se conserva para que la fila se marque
+  `invalid_currency` y vaya a revisión — visible en vez de silenciosamente mal. Hacen falta las
+  DOS listas: los alias de lo que sí manejamos (`Q`, `Qtz`, `US$`, `dólares`) porque sin ellos
+  ensanchar la guarda marcaría filas que hoy pasan, y las monedas reales que no manejamos para
+  poder distinguirlas de un rótulo ilegible, que sigue cayendo a la base.
 - ⚠️ **HUECO CONOCIDO: no hay forma de representar una DEVOLUCIÓN** (verificado 2026-08-30, no
   arreglado). Los cuatro tipos son `revenue`/`cogs`/`opex`/`other` y ninguno significa "reduce
   el ingreso"; `assemblePayload` además hace `Math.abs()` del monto, y esa regla es CORRECTA

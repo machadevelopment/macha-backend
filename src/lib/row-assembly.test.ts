@@ -8,6 +8,7 @@ import {
   type ColumnMap,
   type RowVerdict,
 } from './row-assembly';
+import { evaluateFlagReason } from './staging-rules';
 
 /**
  * Estos tests son la red que hace SEGURO dejar de pedirle los valores al modelo.
@@ -550,5 +551,83 @@ describe('el mes en palabras se lee en español, no solo en inglés', () => {
     expect(asDate('CLI-0001')).toBeNull();
     expect(asDate('SKU-4567')).toBeNull();
     expect(asDate('RUT-001')).toBeNull();
+  });
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA MONEDA QUE NO SOPORTAMOS NO SE RENOMBRA A LA NUESTRA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `asCurrency` devolvía la moneda base ante CUALQUIER cosa que no fuera GTQ o USD, así que una
+ * fila que decía `EUR` se guardaba como `GTQ`: €100 entraban como Q100 —subestimando ~8,4
+ * veces— y `staging-rules` no podía desmentirlo porque el payload ya decía una moneda válida.
+ *
+ * La confusión era tratar igual la celda VACÍA (la hoja no dice la moneda: usar la de la
+ * empresa es lo correcto) y la celda que SÍ dice una moneda que no soportamos (la hoja lo
+ * afirma y nosotros lo estábamos ignorando).
+ */
+describe('la moneda: lo que se afirma se respeta, lo que falta se supone', () => {
+  const MAPA = {
+    date: 0, amount: 1, currency: 2, description: null, counterparty: null, product: null,
+    quantity: null, productCategory: null, store: null, dueDate: null, costTotal: null,
+    costUnit: null,
+  }; // prettier-ignore
+  const leer = (moneda: unknown) =>
+    (
+      assemblePayload({
+        verdict: {
+          i: 0,
+          targetEntity: 'transaction',
+          type: 'revenue',
+          category: 'x',
+          confidence: 1,
+        },
+        row: ['2026-01-15', 500, moneda],
+        columns: MAPA,
+        baseCurrency: 'GTQ',
+      }) as { originalCurrency: string }
+    ).originalCurrency;
+
+  test('una celda vacía usa la moneda de la empresa', () => {
+    expect(leer('')).toBe('GTQ');
+    expect(leer(null)).toBe('GTQ');
+    expect(leer(undefined)).toBe('GTQ');
+  });
+
+  test('las formas en que la gente escribe las dos monedas que sí manejamos', () => {
+    for (const q of ['GTQ', 'gtq', 'Q', 'Q.', 'Qtz', 'quetzales', 'Quetzal']) {
+      expect([q, leer(q)]).toEqual([q, 'GTQ']);
+    }
+    for (const u of ['USD', 'usd', 'US$', 'dólares', 'Dolares', 'dollars']) {
+      expect([u, leer(u)]).toEqual([u, 'USD']);
+    }
+  });
+
+  test('una moneda REAL que no soportamos se conserva, para que la fila se marque', () => {
+    // Marcarla la manda a revisión: visible, en vez de silenciosamente mal.
+    for (const m of ['EUR', 'MXN', 'GBP', 'CRC', 'HNL', 'COP']) {
+      expect([m, leer(m)]).toEqual([m, m]);
+    }
+    expect(
+      evaluateFlagReason({
+        targetEntity: 'transaction',
+        payload: {
+          type: 'revenue',
+          category: 'x',
+          date: '2026-01-15',
+          originalAmount: 500,
+          originalCurrency: 'EUR',
+        },
+        confidence: 1,
+      }),
+    ).toBe('invalid_currency');
+  });
+
+  test('un rótulo que no es NINGUNA moneda sigue cayendo a la base', () => {
+    // Ahí no hay una afirmación que respetar: es basura, un encabezado repetido, una nota.
+    for (const basura of ['xyz', 'Moneda', '---', 'N/A']) {
+      expect([basura, leer(basura)]).toEqual([basura, 'GTQ']);
+    }
   });
 });

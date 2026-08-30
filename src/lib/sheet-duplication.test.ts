@@ -110,20 +110,48 @@ describe('lo que NO debe descartarse', () => {
     ).toBe(0);
   });
 
-  test('mismo número de filas y las dos se bastan solas: no se tocan', () => {
+  test('mismo número de filas y totales PARECIDOS pero no idénticos: no se tocan', () => {
     /*
-     * Cuando las dos hojas traen contraparte y fecha, la autosuficiencia no las distingue y
-     * lo único que queda es el tamaño. Con el mismo número de filas no hay cabecera clara, y
+     * Cuando las dos hojas traen contraparte y fecha, la autosuficiencia no las distingue y lo
+     * único que queda es el tamaño. Con el mismo número de filas no hay cabecera clara, y
      * elegir al azar podría descartar la buena.
+     *
+     * El total de `b` cae dentro del 1 % de `a` —suficiente para que el detector las relacione—
+     * pero NO es el mismo al centavo: son dos conjuntos de datos distintos que se parecen, que
+     * es exactamente el caso que esta regla protege.
      */
     const a = [...CABECERA];
-    const b = [['IDOC', 'IDProveedor', 'FechaOrden', 'Otro', 'MontoTotal'], ['OC-0001', 'PRV-01', 45300, 'x', 48610], ['OC-0002', 'PRV-02', 45310, 'y', 21000], ['OC-0003', 'PRV-01', 45320, 'z', 30390]]; // prettier-ignore
+    const b = [['IDOC', 'IDProveedor', 'FechaOrden', 'Otro', 'MontoTotal'], ['OC-0001', 'PRV-01', 45300, 'x', 48610], ['OC-0002', 'PRV-02', 45310, 'y', 21000], ['OC-0003', 'PRV-01', 45320, 'z', 30100]]; // prettier-ignore
     expect(
       detectarDetalleDuplicado([
         { nombre: 'A', rows: a },
         { nombre: 'B', rows: b },
       ]).size,
     ).toBe(0);
+  });
+
+  test('mismo número de filas y el MISMO dinero al centavo: es una copia', () => {
+    /*
+     * ═══ EL CASO QUE LA REGLA DE ARRIBA DEJABA PASAR (2026-08-30) ═══
+     *
+     * Dos hojas con el mismo número de filas y un total idéntico **al centavo**, que además
+     * comparten encabezados, no son dos conjuntos parecidos: son la misma tabla dos veces —una
+     * copia de respaldo, una hoja duplicada al exportar, `Ventas` y `Ventas (2)`—. Ninguna gana
+     * por autosuficiencia (las dos la tienen) ni por tamaño (son iguales), así que caían en el
+     * `continue` y **las dos se procesaban: la facturación del cliente salía al DOBLE**.
+     *
+     * El umbral acá es al centavo y no el 1 % del resto del módulo, y esa diferencia es la
+     * regla: dos conjuntos distintos no suman exactamente lo mismo hasta el último decimal.
+     */
+    const a = [...CABECERA];
+    const copia = [['MontoTotal', 'IDOC', 'IDProveedor', 'FechaOrden'], [48610, 'OC-0001', 'PRV-01', 45300], [21000, 'OC-0002', 'PRV-02', 45310], [30390, 'OC-0003', 'PRV-01', 45320]]; // prettier-ignore
+    const r = detectarDetalleDuplicado([
+      { nombre: 'OrdenesCompra', rows: a },
+      { nombre: 'OrdenesCompra (respaldo)', rows: copia },
+    ]);
+    expect(r.size).toBe(1);
+    // Da igual cuál se descarte —son la misma tabla—: se conserva la primera del libro.
+    expect(r.has('OrdenesCompra (respaldo)')).toBe(true);
   });
 
   /*
@@ -196,5 +224,56 @@ describe('lo que NO debe descartarse', () => {
         { nombre: 'Ventas', rows: ventas },
       ]).size,
     ).toBe(0);
+  });
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * REGRESIÓN: LA FECHA EN TEXTO TAMBIÉN CUENTA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `tieneColumnaDeFecha` miraba solo objetos `Date` y seriales numéricos. Una hoja con fechas
+ * ISO en texto —como las trae cualquier archivo que pasó por un CSV— no contaba como
+ * autosuficiente, así que empataba en "ninguna se basta sola" contra un agregado y el
+ * desempate caía de vuelta al PROXY del tamaño: el criterio que este módulo dejó de usar
+ * justamente porque vaciaba libros enteros.
+ *
+ * Medido: un libro con `Ventas` (48 filas, Cliente + fecha ISO) y una matriz de ingresos por
+ * categoría despivotada (24 filas, sin contraparte) descartaba las 48 ventas de detalle para
+ * conservar el agregado sintético.
+ */
+describe('la autosuficiencia se mide con el mismo lector de fechas del pipeline', () => {
+  const VENTAS_ISO = [
+    ['Fecha', 'Cliente', 'Producto', 'Monto'],
+    ['2026-01-12', 'Cafetería El Roble', 'Café en grano 1 kg', 500],
+    ['2026-02-08', 'Súper Zona 10', 'Café molido 250 g', 300],
+    ['2026-03-19', 'Bistró La Cuadra', 'Cápsulas x10', 400],
+    ['2026-04-02', 'Cafetería El Roble', 'Café en grano 1 kg', 600],
+  ]; // prettier-ignore
+
+  /** Lo que sale de despivotar una matriz: fecha, concepto y monto. Sin contraparte. */
+  const AGREGADO = [
+    ['Fecha', 'Concepto', 'Monto'],
+    ['2026-01-01', 'Café en grano', 900],
+    ['2026-02-01', 'Café molido', 500],
+    ['2026-03-01', 'Cápsulas', 400],
+  ]; // prettier-ignore
+
+  test('gana la hoja con contraparte, aunque tenga MÁS filas', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Ventas', rows: VENTAS_ISO },
+      { nombre: 'Ventas por categoria', rows: AGREGADO },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Ventas por categoria')).toBe(true);
+  });
+
+  test('el orden en que llegan no cambia el veredicto', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Ventas por categoria', rows: AGREGADO },
+      { nombre: 'Ventas', rows: VENTAS_ISO },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Ventas por categoria')).toBe(true);
   });
 });

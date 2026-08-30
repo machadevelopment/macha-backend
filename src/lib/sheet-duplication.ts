@@ -38,6 +38,7 @@
  */
 
 import { pareceLibroDeMovimientos } from './sheet-classifier';
+import { asDate } from './row-assembly';
 
 /** Convierte a número lo que Excel entrega como número o como texto con separadores. */
 function aNumero(v: unknown): number | null {
@@ -145,11 +146,25 @@ function tieneColumnaDeFecha(rows: unknown[][]): boolean {
       const v = f[c];
       if (v === null || v === undefined || v === '') continue;
       cuantos++;
-      if (v instanceof Date) fechas++;
-      else {
-        const n = aNumero(v);
-        if (n !== null && ES_SERIAL_DE_FECHA(n)) fechas++;
-      }
+      /*
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       * SE PREGUNTA CON `asDate`, EL MISMO LECTOR QUE USA EL PIPELINE (2026-08-30)
+       * ═══════════════════════════════════════════════════════════════════════════════════
+       *
+       * La primera versión miraba solo `Date` y seriales numéricos, y se perdía las fechas
+       * escritas como TEXTO (`2026-01-12`) — que es como las trae cualquier archivo que pasó
+       * por un CSV, y como las escribe medio mundo.
+       *
+       * El efecto es el fallo de KapePrueba con otra piel: una hoja de ventas con fechas de
+       * texto NO cuenta como autosuficiente, así que empata en "ninguna se basta sola" contra
+       * un resumen y el desempate cae de vuelta al PROXY del tamaño — el criterio que este
+       * módulo dejó de usar justamente porque vaciaba libros enteros.
+       *
+       * Medido sobre un libro con `Ventas` (48 filas, con Cliente y fecha ISO) y una matriz de
+       * ingresos por categoría despivotada (24 filas, sin contraparte): se descartaban las 48
+       * ventas de detalle para conservar el agregado sintético.
+       */
+      if (asDate(v) !== null) fechas++;
     }
     // 0,8 y no 1,0: un archivo real trae una fila a medio llenar en la columna de fecha.
     if (cuantos > 0 && fechas >= cuantos * 0.8) return true;
@@ -259,7 +274,31 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
         // sigue siendo lo mejor que se tiene. Más filas = el detalle.
         detalle = a.rows.length >= b.rows.length ? a : b;
         cabecera = detalle === a ? b : a;
-        if (detalle.rows.length === cabecera.rows.length) continue; // sin cabecera clara, no se toca
+        if (detalle.rows.length === cabecera.rows.length) {
+          /*
+           * ═══ EL MISMO NÚMERO DE FILAS Y EL MISMO DINERO AL CENTAVO: ES UNA COPIA ═══
+           *
+           * La regla de arriba —sin cabecera clara, no se toca— existe para no elegir al azar
+           * entre dos hojas distintas. Pero hay un caso donde no hay nada que elegir: dos
+           * hojas con **el mismo número de filas y un total idéntico al centavo**, que además
+           * comparten encabezados. Eso no es coincidencia, es la misma tabla dos veces —una
+           * copia de respaldo, una hoja duplicada al exportar, `Ventas` y `Ventas (2)`.
+           *
+           * Medido: con la regla anterior las dos se procesaban y la facturación del cliente
+           * salía al DOBLE. Ninguna de las dos gana por autosuficiencia (las dos la tienen) ni
+           * por tamaño (son iguales), así que el caso caía en el `continue` y no se descartaba
+           * nada.
+           *
+           * El umbral acá es al CENTAVO y no el 1 % que usa el resto del módulo: dos conjuntos
+           * de datos distintos no suman exactamente lo mismo hasta el último decimal, y esa
+           * exactitud es justamente lo que distingue una copia de dos meses parecidos.
+           */
+          const identico = a.sumas.some((sa) => b.sumas.some((sb) => Math.abs(sa - sb) < 0.005));
+          if (!identico) continue;
+          // Da igual cuál se descarte: son la misma tabla. Se conserva la primera del libro.
+          detalle = b;
+          cabecera = a;
+        }
       }
 
       /*

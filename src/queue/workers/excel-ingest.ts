@@ -539,6 +539,13 @@ export function startExcelIngestWorker(): Promise<string> {
             desdeEncabezado = largo.rows;
           }
           if (canSkipSheet(desdeEncabezado[0] ?? [])) continue;
+          // Mismo rescate que en la pasada 2, y por el mismo motivo que el resto de esta
+          // pasada existe: si acá no se ve la hoja despivotada, el dedup y el esquema del
+          // libro razonan sobre un conjunto de hojas distinto del que se procesa.
+          if (noPuedeProducirMovimientos(desdeEncabezado, asDate, asNumber)) {
+            const rescate = despivotar(nombre, crudas, desdeEncabezado);
+            if (rescate) desdeEncabezado = rescate.rows;
+          }
           /*
            * `puedeProducirMovimientos` se calcula ACÁ, con el mismo predicado que el filtro de
            * la segunda pasada, para que el dedup no pueda conservar una hoja que ese filtro va
@@ -905,7 +912,39 @@ export function startExcelIngestWorker(): Promise<string> {
            * de movimientos cuya columna se llame `Emisión` o `Corte` no tiene ninguna palabra
            * que el vocabulario reconozca, pero sus celdas siguen trayendo fechas.
            */
+          /*
+           * ═════════════════════════════════════════════════════════════════════════════════
+           * ÚLTIMO INTENTO ANTES DE TIRARLA: ¿ES UNA MATRIZ POR PERÍODO? (2026-08-30)
+           * ═════════════════════════════════════════════════════════════════════════════════
+           *
+           * El despivotado se intentaba SOLO cuando `analizarFormaDeHoja` decía "reporte", y esa
+           * señal exige cuatro columnas de período. Una matriz SEMESTRAL tiene dos y una
+           * trimestral corta puede tener tres: no llegan al umbral, así que caían acá y se
+           * descartaban enteras sin que nadie intentara leerlas. Medido: Q 77.280 de gastos
+           * perdidos en una matriz de dos columnas, sin una sola fila marcada que lo delatara.
+           *
+           * Que el despivotado sea un RESCATE ante CUALQUIER descarte, y no solo ante uno, es lo
+           * correcto por construcción: a esta altura la hoja ya se iba a la basura, así que
+           * intentarlo solo puede AGREGAR datos. Y no afloja nada — las cinco guardas de
+           * `sheet-unpivot` corren enteras, incluida la que exige año explícito en las etiquetas
+           * cuando hay menos de tres períodos.
+           */
+          let rescatada = false;
           if (noPuedeProducirMovimientos(rows, asDate, asNumber)) {
+            const rescate = despivotar(sheetName, crudas, rows);
+            if (rescate) {
+              console.info(
+                `[excel-ingest] company=${companyId} hoja "${sheetName}" no tenía columna de ` +
+                  `fecha, pero es una matriz por período: ${rescate.motivo}`,
+              );
+              notaDeDespivotado.set(sheetName, rescate.motivo);
+              rows = rescate.rows;
+              headerRow = rescate.rows[0] ?? [];
+              rescatada = true;
+            }
+          }
+
+          if (!rescatada && noPuedeProducirMovimientos(rows, asDate, asNumber)) {
             totalRowsSkippedPreFiltro += rows.length;
             hojasLeidas.push({
               estado: 'descartada',

@@ -86,6 +86,43 @@ export function mesDeEncabezado(nombre: unknown): { mes: number; anio: number | 
     return mes >= 1 && mes <= 12 ? { mes, anio: Number(m[2]) } : null;
   }
 
+  /*
+   * ═══ TRIMESTRES ═══
+   *
+   * `Q1 2026`, `T1`, `1T`, `1er trimestre`, `Trimestre 2`. Se mapean al PRIMER MES del
+   * trimestre (Q1→enero, Q2→abril, Q3→julio, Q4→octubre), así que la fecha resultante cae
+   * dentro del trimestre y el filtro "Este trimestre" del dashboard la encuentra.
+   *
+   * Una matriz trimestral es la única fuente de gastos de muchos negocios que presupuestan por
+   * trimestre, y sin esto se descartaba entera: Q 77.280 medidos en el libro de prueba.
+   *
+   * El regex va ANCLADO y sin permitir texto delante, para no comerse una columna
+   * `Acumulado Q1` — que es un SUBTOTAL de los meses de al lado, no un período más. Si se
+   * leyera como trimestre, chocaría con los meses que resume y el propio chequeo de unicidad
+   * rechazaría la hoja; mejor no reconocerla y dejar que la ignore por no ser un mes.
+   */
+  // Semestres: `S1 2026`, `1er semestre`. Mapean al primer mes de su mitad del año.
+  let sm = /^(?:s|sem(?:estre)?)[\s.-]*([12])(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (!sm) sm = /^([12])(?:er|do|º|°)?[\s.-]*(?:s|sem(?:estre)?)(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (sm) {
+    const mes = (Number(sm[1]) - 1) * 6 + 1;
+    if (sm[2] === undefined) return { mes, anio: null };
+    let a = Number(sm[2]);
+    if (a < 100) a += 2000;
+    return a >= 1990 && a <= 2100 ? { mes, anio: a } : null;
+  }
+
+  m = /^(?:q|t|trim(?:estre)?)[\s.-]*([1-4])(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (!m)
+    m = /^([1-4])(?:er|do|ro|to|º|°)?[\s.-]*(?:t|trim(?:estre)?)(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (m) {
+    const mes = (Number(m[1]) - 1) * 3 + 1;
+    if (m[2] === undefined) return { mes, anio: null };
+    let a = Number(m[2]);
+    if (a < 100) a += 2000;
+    return a >= 1990 && a <= 2100 ? { mes, anio: a } : null;
+  }
+
   // `enero` · `ene-26` · `enero 2026` · `ene.2026`
   m = /^([a-z]{3,10})\.?[\s./-]*(\d{2,4})?$/.exec(t);
   if (!m) return null;
@@ -186,7 +223,24 @@ export function despivotarReporte(
     const m = mesDeEncabezado(encabezado[i]);
     if (m) columnasDeMes.push({ i, mes: m.mes, anio: m.anio ?? opciones.anioPorDefecto });
   }
-  if (columnasDeMes.length < MIN_PERIODOS) return null;
+  /*
+   * ═══ DOS PERÍODOS BASTAN SI LAS ETIQUETAS TRAEN EL AÑO ═══
+   *
+   * El mínimo de tres existe porque "una columna que parece un mes" es evidencia débil: dos
+   * columnas numéricas cualesquiera no son una matriz por período. Pero una columna rotulada
+   * `S1 2026` no admite otra lectura — dice explícitamente qué período es—, y una matriz
+   * semestral tiene exactamente dos.
+   *
+   * Sin esto, una matriz semestral se descartaba entera (Q 77.280 medidos): ni siquiera
+   * llegaba al modelo, porque sin columna de fecha `noPuedeProducirMovimientos` la tira.
+   *
+   * El año explícito es la condición, no el tipo de período: `Enero`/`Febrero` a secas siguen
+   * necesitando tres, porque un encabezado puede decir "Enero" y ser el nombre de una persona
+   * o de una sucursal.
+   */
+  const todasConAnio = columnasDeMes.every((c) => mesDeEncabezado(encabezado[c.i])?.anio != null);
+  const minimo = todasConAnio ? 2 : MIN_PERIODOS;
+  if (columnasDeMes.length < minimo) return null;
 
   /*
    * Un mes repetido significa dos bloques distintos a lo ancho (`Enero Costo`, `Enero Venta`):
@@ -266,6 +320,95 @@ export function despivotarReporte(
    */
   if (huboNegativo) return null;
   if (utiles.length < 2) return null;
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * QUINTA GUARDA: LA ARITMÉTICA DE LA PROPIA HOJA (2026-08-30)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Las guardas de vocabulario (2) y de solape (4) fallan las dos contra la misma hoja: un
+   * estado de resultados escrito con etiquetas GENÉRICAS.
+   *
+   *     Rubro        Enero  Febrero  …
+   *     Ingresos      8000     8200
+   *     Egresos       3000     3100
+   *     Diferencia    5000     5100
+   *
+   * Ni "Ingresos" ni "Egresos" ni "Diferencia" están en la lista de agregados —y no pueden
+   * estarlo, porque "ingresos" es también el nombre legítimo de un rubro—, y sus conceptos no
+   * aparecen en ninguna otra hoja, así que el solape da cero. Pasa las cuatro guardas y
+   * duplica TODA la contabilidad del cliente. Verificado: la única razón por la que no explotó
+   * en el caso de prueba fue que ese negocio daba pérdida, y el negativo de "Diferencia" lo
+   * atrapó la guarda 1. Con un negocio rentable se cuela.
+   *
+   * ═══ LA SEÑAL NO ES CÓMO SE LLAMAN LOS RENGLONES, ES CÓMO SE RELACIONAN ═══
+   *
+   * Un estado financiero es, por definición, un conjunto de renglones donde alguno se CALCULA
+   * a partir de los otros: `Ingresos = Egresos + Diferencia` es la misma identidad que
+   * `Utilidad = Ventas − Costos`, escrita con otras palabras. Una matriz de gastos no tiene
+   * esa propiedad: alquiler, sueldos y luz son independientes entre sí.
+   *
+   * Eso sí se puede medir, y a diferencia de una lista de palabras no se queda corta con el
+   * próximo cliente que invente un rótulo nuevo.
+   *
+   * Se distinguen DOS formas, y la diferencia decide qué hacer con la hoja:
+   *
+   *   · **Un renglón que es la suma de TODOS los demás** → la hoja es un estado (o trae un
+   *     gran total sin nombrarse "total"). Se RECHAZA entera: quedarse con el resto contaría
+   *     de más igual, porque sus renglones también viven en las hojas de detalle.
+   *   · **Un renglón que es la suma de un BLOQUE CONTIGUO de arriba** → es un subtotal
+   *     anidado ("Servicios" = Agua + Luz). Se EXCLUYE ese renglón y la hoja sigue: los demás
+   *     son gastos reales y perderlos sería el error caro.
+   *
+   * El bloque contiguo no es una restricción arbitraria: es como se escribe un subtotal en una
+   * hoja de cálculo, debajo de lo que suma. Buscar subconjuntos cualesquiera sería exponencial
+   * y encontraría coincidencias falsas.
+   */
+  /*
+   * La tolerancia es ESTRECHA a propósito. Una identidad contable la calcula una fórmula, así
+   * que es exacta salvo redondeo al centavo; el 0,1 % solo absorbe eso.
+   *
+   * Con una tolerancia del 0,5 % apareció un falso positivo enseguida, y de los caros: en una
+   * matriz de seis rubros, `Sueldos` (2.800) quedaba a 0,36 % de la suma de los otros cinco
+   * (2.790) por pura casualidad, y la hoja entera se rechazaba — el cliente volvía a ver cero
+   * en gastos. Cuanto más floja la tolerancia, más probable es que una coincidencia numérica
+   * se lea como una identidad.
+   */
+  const CASI_IGUAL = (a: number, b: number) =>
+    Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b), 1) * 0.001;
+  const vectorDe = (u: (typeof utiles)[number]) =>
+    columnasDeMes.map((c) => asNumber(u.fila[c.i]) ?? 0);
+  const vectores = utiles.map(vectorDe);
+  /** ¿`x` es, mes a mes, la suma de `partes`? */
+  const esLaSuma = (x: number[], partes: number[][]) =>
+    x.every((v, m) =>
+      CASI_IGUAL(
+        v,
+        partes.reduce((a, p) => a + (p[m] ?? 0), 0),
+      ),
+    );
+
+  if (utiles.length >= 3) {
+    for (let i = 0; i < utiles.length; i++) {
+      const resto = vectores.filter((_, j) => j !== i);
+      if (esLaSuma(vectores[i]!, resto)) return null;
+    }
+  }
+
+  const anidados = new Set<number>();
+  for (let i = 1; i < utiles.length; i++) {
+    for (let j = 0; j <= i - 2; j++) {
+      const bloque = vectores.slice(j, i).filter((_, k) => !anidados.has(j + k));
+      if (bloque.length >= 2 && esLaSuma(vectores[i]!, bloque)) {
+        anidados.add(i);
+        break;
+      }
+    }
+  }
+  const finales = utiles.filter((_, i) => !anidados.has(i));
+  if (finales.length < 2) return null;
+  utiles.length = 0;
+  utiles.push(...finales);
 
   /*
    * ═══════════════════════════════════════════════════════════════════════════════════════
