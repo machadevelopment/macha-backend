@@ -10,3 +10,6 @@ dist
 # Material de trabajo de una sesión de depuración (generadores de archivos hostiles y
 # harness offline). No es producto: no se lintea ni se versiona.
 scratch/
+
+# Scratch de depuración (no versionado)
+scratch/

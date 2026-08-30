@@ -1,4 +1,5 @@
 import { asDate } from './row-assembly';
+import { pareceLibroDeMovimientos } from './sheet-classifier';
 
 /**
  * Distingue una TABLA de movimientos de un REPORTE, sin llamar al modelo.
@@ -212,7 +213,39 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
     const meses = new Set(marcadores.map((p) => p.mes)).size;
     const dias = new Set(marcadores.map((p) => p.dia));
     const diaCoherente = dias.size === 1 || marcadores.every((p) => p.finDeMes);
-    if (meses / marcadores.length > 0.9 && diaCoherente) {
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * UN PAGO RECURRENTE TAMBIÉN CAE SIEMPRE EL MISMO DÍA (2026-08-30)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * La coherencia de día se justificó arriba con "un movimiento ocurre el día que ocurre,
+     * así que sus días varían". Es cierto de una venta y **falso del gasto fijo de cualquier
+     * PYME**: el alquiler se paga el 1, la planilla el 30, la cuota del préstamo el 15. O sea
+     * que la guarda escrita para no confundir un resumen con movimientos reales golpeaba
+     * justo a los movimientos más previsibles que existen — y con más fuerza en el día 1 y en
+     * el último del mes, que son precisamente los dos que `finDeMes` y `dias.size === 1`
+     * declaran marcador.
+     *
+     * Medido con una hoja de ocho pagos de mantenimiento, uno por mes, todos el día 20:
+     * `Fecha · Proveedor · Rubro · Importe · Moneda` se descartaba entera. No es un dato que
+     * falta: deja el resultado del período INFLADO, que es el fallo que esta casa ya pagó con
+     * la matriz de gastos de KapePrueba.
+     *
+     * La señal que los separa es la de siempre y no una nueva: **un movimiento involucra a
+     * alguien**. Se le paga a un proveedor, se le vende a un cliente. Un resumen por período
+     * no tiene contraparte — no se le vende a "enero" —, y las dos hojas que motivaron esta
+     * señal lo confirman: `Mes · Venta Neta · Unidades` y `Mes · Ingresos · Gastos · Utilidad`
+     * no nombran a nadie.
+     *
+     * Es un VETO, no un requisito, y ese matiz importa: la presencia de contraparte prueba que
+     * hay movimientos, pero su ausencia no prueba lo contrario (la hoja de gastos de una PYME
+     * a menudo no nombra proveedor). Por eso solo desactiva esta señal cuando la contraparte
+     * está, y no se usa para afirmar nada cuando falta.
+     *
+     * Solo aplica acá y no a la señal 6: allá la primera columna dice "Enero", que no es una
+     * fecha de movimiento en ningún libro.
+     */
+    if (meses / marcadores.length > 0.9 && diaCoherente && !pareceLibroDeMovimientos(encabezado)) {
       return {
         esReporte: true,
         motivo:
