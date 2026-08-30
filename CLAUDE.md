@@ -23,6 +23,9 @@ bun run build          # production build
 bun run typecheck      # tsc --noEmit
 bun run lint           # eslint
 bun test               # tests unitarios (solo src/, no tocan Postgres)
+                       # Corren en un clon LIMPIO: `bunfig.toml` precarga
+                       # test-setup/env-de-pruebas.ts, que pone el piso de env.
+                       # Antes fallaban 29 sin un `.env` local que no está en el repo.
 bun run test:db:up     # Postgres efímero para integración (docker compose)
 bun run test:integration  # migraciones + rol macha_app + tests de RLS/append-only/guards
 bun run test:db:down   # baja el Postgres de test y borra su volumen
@@ -32,6 +35,22 @@ bun run db:seed        # data/seed scripts (manual, separate from schema migrati
 ```
 
 Conventions & gotchas:
+- **`bun test` tiene que pasar en un clon RECIÉN CLONADO, y no pasaba** (reportado y arreglado
+  2026-08-30). `lib/env.ts` exige `DATABASE_URL` **al importarse** y media docena de tests la
+  importan de rebote (`src/app.test.ts` monta la app entera para fijar qué rutas son públicas),
+  así que sin la variable son **29 tests en rojo** con `Missing required env var: DATABASE_URL`
+  y nada que explique qué hacer. **No fallaba para todos, y eso es lo que lo hizo durar**: la
+  máquina del dueño tiene un `.env` gitignoreado que Bun carga solo, y CI la define a mano en
+  `ci.yml`. O sea que el requisito estaba escrito en los dos únicos lugares que nadie mira —un
+  YAML de CI y un archivo que no se versiona— y en ninguna parte del repo. Tres archivos de
+  test lo parchaban con `process.env.DATABASE_URL ??=` en su primera línea, lo cual **solo
+  funciona si ese archivo corre antes que los demás**: Bun comparte el proceso entre archivos,
+  así que era una moneda al aire según el orden de carga. Ahora `bunfig.toml` precarga
+  `test-setup/env-de-pruebas.ts`, que es **exclusivo de tests** (no lo ve `bun run dev` ni el
+  bundle) y usa `??=` para que un `.env` real o el `TEST_DATABASE_URL` del job de integración
+  siempre ganen. La URL apunta a un puerto muerto a propósito: si un test unitario intentara
+  conectar de verdad, tiene que fallar fuerte y no colgarse contra una base que alguien tenga
+  levantada.
 - **Guards/`derive` are the enforcement point.** Auth + tenant-scoping live in Elysia `derive`/`guard`; `derive` injects `{ userId, companyId, role }`. Handlers assume these are present and validated.
 - **Admin is a separate namespace.** `/admin/*` is structurally separated from the tenant-scoped guard chain and gated by the `staff` table (`staff`/`super_admin`). Every admin mutation writes `admin_audit_log`.
 - **Validation uses Elysia's TypeBox schemas**, not zod-by-default.
@@ -111,6 +130,47 @@ Conventions & gotchas:
      geométricas (encabezado con huecos + celdas vacías, ancho >40, columnas que son meses,
      nombres de columna repetidos). Los reportes con bloques a lo ancho —una fila = un cliente
      con doce meses al lado— no son movimientos y solo devuelven filas marcadas.
+  2-bis. **Antes de descartar un reporte ancho: ¿se puede convertir en movimientos?**
+     (`lib/sheet-unpivot.ts`, 2026-08-30). `analizarFormaDeHoja` acierta al decir "esto no es
+     una tabla" y aun así descartarlo **pierde plata real**: la matriz de gastos operativos de
+     una PYME —concepto a la izquierda, un mes por columna— es la ÚNICA fuente de sus gastos,
+     no hay otra hoja de donde sacarlos. Medido: **Q 75.465,90 en el archivo real de
+     KapePrueba**, que es exactamente lo que suma la propia columna `Total` de esa hoja. Y
+     descartarla no es "conservador": deja el resultado del período **INFLADO**, o sea que la
+     cifra que sí se muestra está mal. El cliente ve utilidad neta = utilidad bruta, o sea que
+     el producto le dice que operar su negocio no cuesta nada.
+     ⚠️ **Es el módulo con más potencial de daño del pipeline**: `Estado_Resultados` y
+     `Flujo_Caja` tienen EXACTAMENTE la misma forma y despivotarlos duplicaría los ingresos.
+     Por eso es una **lista blanca** y ante cualquier duda devuelve `null` y la hoja sigue el
+     camino que ya seguía. **Su peor caso es no mejorar nada; nunca es contar de más.** Las
+     cuatro guardas se exigen JUNTAS porque cada una sola tiene contraejemplo:
+     1. **Ningún valor negativo.** El signo es la firma de un estado financiero (el costo se
+        resta del ingreso); una matriz de gastos es toda de la misma naturaleza y va toda en
+        positivo. No alcanza sola: hay estados escritos todo en positivo.
+     2. **Ningún renglón con vocabulario de AGREGADO** (utilidad, saldo, margen, resultado,
+        ventas netas, costo de ventas…). La lista es de agregados y no de rubros, y por eso no
+        crece sin fin: el vocabulario contable de los renglones calculados es cerrado, el de
+        los rubros no. Es **todo-o-nada por hoja**: si la hoja es un estado, sus renglones de
+        gasto TAMBIÉN están en la hoja de detalle que los origina.
+     3. **≥3 columnas de mes, sin repetir.** Un mes repetido significa bloques a lo ancho
+        (`Enero Costo`, `Enero Venta`) y ahí una celda no dice QUÉ es ese número.
+     4. **Sus conceptos NO son ya las categorías de otra hoja de movimientos.** La cuarta salió
+        del corpus real y es la que ninguna de las otras tres podía ver, porque **la señal no
+        está en la hoja sino en el LIBRO**: `02_Restaurante_ElFogon` trae `CostosYGastos` (180
+        filas de detalle con columna `Categoria`, Q 1.094.637) y `ReporteMensualGastos` (6
+        categorías × 12 meses, Q 1.082.854, subtítulo *"Resumen ya consolidado, uso interno de
+        gerencia"*). Mirando la hoja sola es **indistinguible** de la matriz legítima de
+        KapePrueba y pasaba las tres primeras guardas, duplicando los gastos del restaurante.
+        `sheet-duplication` tampoco lo atrapa: los totales difieren 1,08 % —el detalle cubre 20
+        meses y el resumen 12— contra su umbral del 1 %. Medido: **100 % de solape de conceptos
+        en el restaurante contra 0 % en KapePrueba**. La comparación es contra las hojas que
+        **producen movimientos**, no contra todas — contra todas, los conceptos de KapePrueba
+        aparecen en su `Estado_Resultados` y su `Punto_Equilibrio` (derivados que no se
+        procesan) y el solape también daba 100 %, o sea que la señal se apagaba entera.
+     La columna `Total`/`Promedio` **no** se despivota (no son meses) y la fila `TOTAL` se
+     excluye sin descalificar la hoja. **La fecha es el día 1 y no el último**: con el último,
+     el mes EN CURSO queda fechado en el futuro y se sale de cualquier filtro "hasta hoy" del
+     dashboard — se perdería justo el mes que el cliente mira.
   3. **Pre-filtro por encabezados** (`lib/sheet-classifier.ts`): las hojas de catálogo
      (clientes, proveedores, productos, tiendas) no llegan al modelo. Los archivos
      reales de PYME son volcados operativos completos, no exportes contables: ~31% de las filas.
@@ -152,6 +212,15 @@ Conventions & gotchas:
      costo) y las demás solo su cantidad: tomar los de la última haría que el nombre dependiera
      del orden de las tiendas. El camino serializado no se ve afectado — cada serie es única, así
      que cada grupo tiene una sola fila.
+  ⚠️ **Y el resumen transpuesto también viene con el período escrito como FECHA** (2026-08-30).
+     La señal 6 de `sheet-shape` reconoce "Enero" y "ene-26", no lo que una fórmula de Excel
+     pone de verdad en esa columna: **el serial 46023, o sea 2026-01-01**. Es el agujero de
+     KapePrueba con el período escrito de otra forma, y su costo es duplicar la facturación
+     entera (Q 364.788 contados dos veces contra el libro de prueba). La guarda contra el falso
+     positivo es la **coherencia de DÍA**: un marcador de período no elige el día —lo pone la
+     fórmula y sale siempre el 1, o el último del mes— y un movimiento sí, así que ocho
+     movimientos reales repartidos en ocho meses no caen acá. "Una fila por mes" a secas sería
+     demasiado laxo y perdería la contabilidad de una PYME chica.
   4. **Cabecera y detalle del mismo dinero** (`lib/sheet-duplication.ts`, 2026-08-14). Un archivo
      real trae `OrdenesCompra` (60 filas, Q 2.707.318) y `LineasOC` (220 filas, Q 2.707.318):
      **la misma plata a dos granularidades**. Si las dos producen movimientos, las compras del
@@ -204,6 +273,30 @@ Conventions & gotchas:
   **positivo** (la dirección la lleva `type`, y `staging-rules` exige positivo) y las fechas
   son **seriales de Excel** con época 1899-12-30, acotados a un rango de plausibilidad de
   negocio para que un MONTO en la columna equivocada no se convierta en una fecha creíble.
+  ⚠️ **Leer mal una fecha no borra plata: la MUEVE DE MES, que es peor porque no se ve.** Dos
+  agujeros cerrados el 2026-08-30, los dos con el mismo síntoma —la hoja entera desaparece
+  antes del modelo, porque sin columna de fecha legible `noPuedeProducirMovimientos` la
+  descarta y no quedan ni filas marcadas que alguien pueda revisar:
+  - **El mes en palabras solo se leía en inglés.** La lista blanca de `asDate` decía
+    textualmente que aceptaba `1 de mayo de 2025`; **nunca funcionó** — el regex reconocía la
+    FORMA y después `new Date("15 de enero de 2026")` devolvía `Invalid Date`, porque el
+    parseo de nombres de mes no está en la especificación de JavaScript y V8 solo sabe inglés.
+    Un producto que factura en Guatemala no sabía leer una fecha escrita en español. Ahora hay
+    tabla explícita (ES+EN, con y sin acento, completo y abreviado); delegar en `new Date` o en
+    `Intl` haría que el resultado dependiera del motor y del locale del contenedor.
+  - **`detectarOrdenDeFecha` era CÓDIGO MUERTO.** Estaba escrito, testeado y documentado con el
+    daño que evita ("el 41 % de sus ingresos quedaba mal fechado y el 59 % no quedaba") y **no
+    lo llamaba nadie**: el parámetro `ordenDeFecha` de `assemblePayload` no se pasaba desde
+    ningún sitio, así que todo el producto leía `DD/MM` siempre. El arreglo estaba escrito y
+    nunca se conectó. Un libro exportado en `MM/DD/YYYY` entraba con el 1 de mayo registrado el
+    5 de enero, y con suficientes días mayores a 12 la columna bajaba del 80 % exigido y la
+    hoja se descartaba entera (176 movimientos medidos). **El orden se decide una vez por HOJA
+    y no por lote** —es el modo de fallo que `assertMismoMapa` ya cubre para el mapa de
+    columnas: dos lotes con órdenes distintos partirían la hoja en dos calendarios— y se mira
+    toda la fila y no solo la columna que el modelo llamó `date`, porque el orden es una
+    propiedad del ARCHIVO y así queda resuelto antes de la primera llamada. El filtro de
+    supervivencia (`noPuedeProducirMovimientos`) prueba **los dos órdenes** antes de rendirse:
+    ahí la pregunta no es cuál es el correcto, sino si la columna puede leerse como fechas.
   **`INTAKE_OUTPUT_TOKEN_BUDGET` NO es el reloj** (corregido 2026-08-19, medido). Versiones
   anteriores de este archivo decían que subirlo "vuelve a alargar la espera": es falso. El total
   de tokens de salida de una hoja no depende del tamaño del lote, así que
@@ -465,6 +558,17 @@ Conventions & gotchas:
   `document_ingest_batches`, y un débito por documento necesita la suya. ⚠️ **La columna `unit`
   de `credit_rules` no la lee nadie** (`estimateRequiredCredits` solo mira `ruleType` y
   `creditsPerUnit`): es declarativa, y en producción está en NULL para las cuatro reglas.
+- ⚠️ **HUECO CONOCIDO: no hay forma de representar una DEVOLUCIÓN** (verificado 2026-08-30, no
+  arreglado). Los cuatro tipos son `revenue`/`cogs`/`opex`/`other` y ninguno significa "reduce
+  el ingreso"; `assemblePayload` además hace `Math.abs()` del monto, y esa regla es CORRECTA
+  para lo que la motivó (muchos exportes escriben los egresos en negativo — el libro de
+  `08_Boutique_Elegance` lo dice en su subtítulo: *"Egresos en negativo"*, y sus 139 negativos
+  son todos compras y gastos). Pero una nota de crédito o una devolución de venta es un
+  negativo con SIGNIFICADO, no una convención de formato: hoy se absolutiza y se suma como
+  ingreso, o sea que el error es **2× el monto devuelto**. No se tocó porque **ninguno de los
+  once archivos reales disponibles trae una sola fila así** y arreglarlo bien exige un tipo
+  nuevo que toca el ledger, los rollups y el dashboard — riesgo alto para un caso sin
+  ocurrencia. Cuando aparezca, el arreglo es un tipo `refund`, no relajar el `Math.abs()`.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.

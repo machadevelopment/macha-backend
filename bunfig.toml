@@ -1,0 +1,5 @@
+# `preload` es SOLO de tests: no lo ve `bun run dev` ni el bundle de producción, así que un
+# default de pruebas no puede filtrarse a un entorno real. Ver test-setup/env-de-pruebas.ts
+# para por qué hace falta (los 29 tests que fallaban en un clon recién clonado).
+[test]
+preload = ["./test-setup/env-de-pruebas.ts"]

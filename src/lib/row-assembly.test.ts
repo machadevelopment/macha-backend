@@ -499,3 +499,56 @@ describe('los lectores no inventan datos a partir de un código', () => {
     expect(asDate('2200-01-01')).toBe(null);
   });
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UN MES ESCRITO EN ESPAÑOL ES UNA FECHA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La lista blanca de formatos decía, textualmente, que aceptaba `1 de mayo de 2025`. Nunca
+ * funcionó: el regex reconocía la FORMA y después `new Date("15 de enero de 2026")` devolvía
+ * `Invalid Date`, porque `new Date` solo parsea nombres de mes en inglés.
+ *
+ * El daño no eran filas marcadas: una hoja cuya columna de fecha no se lee pierde su columna
+ * de fecha entera, y `noPuedeProducirMovimientos` la descarta ANTES del modelo. La hoja
+ * desaparece sin dejar rastro. Medido sobre una nómina de 24 filas: 100 % perdido.
+ */
+describe('el mes en palabras se lee en español, no solo en inglés', () => {
+  test('las formas que aparecen en archivos reales', () => {
+    expect(asDate('15 de enero de 2026')).toBe('2026-01-15');
+    expect(asDate('1 de mayo de 2025')).toBe('2025-05-01');
+    expect(asDate('15 de diciembre de 2026')).toBe('2026-12-15');
+    expect(asDate('15-ene-2026')).toBe('2026-01-15');
+    expect(asDate('5 sept 2026')).toBe('2026-09-05');
+    expect(asDate('1 de setiembre de 2026')).toBe('2026-09-01');
+  });
+
+  test('el inglés que ya funcionaba sigue funcionando', () => {
+    expect(asDate('15 Jan 2026')).toBe('2026-01-15');
+    expect(asDate('Jan 15, 2026')).toBe('2026-01-15');
+    expect(asDate('5 August 2026')).toBe('2026-08-05');
+  });
+
+  test('los acentos no cambian el resultado', () => {
+    // Un archivo real escribe "Diciembre" con mayúscula y a veces con acento en otras palabras.
+    expect(asDate('3 de Diciembre de 2026')).toBe('2026-12-03');
+  });
+
+  test('un día que no existe en ese mes NO se corre al mes siguiente', () => {
+    // `new Date(2026, 1, 31)` desborda a marzo en silencio: eso movería el movimiento de mes.
+    expect(asDate('31 de febrero de 2026')).toBeNull();
+    expect(asDate('31 de abril de 2026')).toBeNull();
+  });
+
+  test('un mes que no existe es null, no una fecha inventada', () => {
+    expect(asDate('15 de brumario de 2026')).toBeNull();
+    expect(asDate('15 de xyz de 2026')).toBeNull();
+  });
+
+  test('un código de catálogo NO se convierte en fecha', () => {
+    // La guarda que ya existía: no puede aflojarse por agregar nombres de mes.
+    expect(asDate('CLI-0001')).toBeNull();
+    expect(asDate('SKU-4567')).toBeNull();
+    expect(asDate('RUT-001')).toBeNull();
+  });
+});

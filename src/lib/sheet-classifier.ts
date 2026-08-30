@@ -485,7 +485,12 @@ export function canSkipSheet(headerRow: unknown[]): boolean {
  */
 export function noPuedeProducirMovimientos(
   rows: unknown[][],
-  leerFecha: (v: unknown) => unknown,
+  /*
+   * Acepta el ORDEN de día/mes como segundo argumento —la firma de `asDate`— y este filtro lo
+   * usa. Ver el bloque de abajo: sin eso, una hoja exportada en `MM/DD/YYYY` se descartaba
+   * entera.
+   */
+  leerFecha: (v: unknown, orden?: 'dmy' | 'mdy') => unknown,
   leerNumero: (v: unknown) => unknown,
 ): boolean {
   const muestra = rows.slice(1, 60);
@@ -503,9 +508,31 @@ export function noPuedeProducirMovimientos(
       .filter((v) => v !== null && v !== undefined && v !== '');
     if (valores.length === 0) continue;
 
-    const fechas = valores.filter(
-      (v) => leerFecha(v) !== null && leerFecha(v) !== undefined,
-    ).length;
+    /*
+     * ═════════════════════════════════════════════════════════════════════════════════════
+     * SE PRUEBAN LOS DOS ÓRDENES Y GANA EL MEJOR (2026-08-30)
+     * ═════════════════════════════════════════════════════════════════════════════════════
+     *
+     * `asDate` lee `DD/MM/YYYY` por defecto, que es lo correcto para Guatemala. Pero un libro
+     * exportado de un sistema en inglés trae `MM/DD/YYYY`, y ahí `01/14/2026` da mes 14 →
+     * `null`. Con suficientes días mayores a 12 —o sea, en cualquier hoja de un año entero—
+     * la columna baja del 80 % exigido, la hoja se queda **sin columna de fecha** y este
+     * filtro la descarta ANTES del modelo.
+     *
+     * Medido sobre un `LibroDiario` de 176 movimientos con fechas `MM/DD/YYYY`: la hoja
+     * entera desaparecía, sin una fila marcada que alguien pudiera revisar. Y es la forma más
+     * común en una PYME chica — ingresos, costos y gastos en una sola hoja.
+     *
+     * Acá NO se decide cuál orden es el correcto: eso lo hace `detectarOrdenDeFecha` sobre la
+     * columna entera, más tarde y con toda la evidencia. La única pregunta de este filtro es
+     * "¿esta columna PUEDE leerse como fechas?", y para eso basta el mejor de los dos.
+     */
+    const cuentaConOrden = (orden: 'dmy' | 'mdy') =>
+      valores.filter((v) => {
+        const f = leerFecha(v, orden);
+        return f !== null && f !== undefined;
+      }).length;
+    const fechas = Math.max(cuentaConOrden('dmy'), cuentaConOrden('mdy'));
     // El cero no cuenta: `staging-rules` exige monto POSITIVO.
     const numeros = valores.filter((v) => {
       const n = leerNumero(v);

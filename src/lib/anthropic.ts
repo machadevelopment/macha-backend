@@ -252,7 +252,17 @@ export type VeredictoCrudo = {
  */
 export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
-  params: { rows: unknown[][]; baseCurrency: string; ventaYaRegistradaEnOtraHoja?: boolean },
+  params: {
+    rows: unknown[][];
+    baseCurrency: string;
+    ventaYaRegistradaEnOtraHoja?: boolean;
+    /**
+     * En qué orden vienen día y mes en las fechas con barras de ESTA hoja. Lo decide el
+     * worker sobre la hoja ENTERA (`detectarOrdenDeFecha`), no cada lote por su cuenta: dos
+     * lotes que lleguen a órdenes distintos partirían la hoja en dos calendarios.
+     */
+    ordenDeFecha?: 'dmy' | 'mdy';
+  },
   columns: ColumnMap,
 ): ClassifiedRow[] {
   const out: ClassifiedRow[] = [];
@@ -264,7 +274,13 @@ export function construirFilas(
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
+      payload: assemblePayload({
+        verdict,
+        row,
+        columns,
+        baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
+      }),
     });
 
     /*
@@ -373,6 +389,7 @@ export function construirFilas(
         row,
         columns,
         baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
       });
 
       /*
@@ -396,7 +413,13 @@ export function construirFilas(
     const costo = costoDeLaFila(row, columns);
     if (costo === null || costo === 0) continue;
 
-    const venta = assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency });
+    const venta = assemblePayload({
+      verdict,
+      row,
+      columns,
+      baseCurrency: params.baseCurrency,
+      ordenDeFecha: params.ordenDeFecha,
+    });
     out.push({
       targetEntity: 'transaction',
       confidence: typeof v.cf === 'number' ? v.cf : 0,
@@ -895,6 +918,15 @@ export async function classifySheetRows(params: {
    */
   ventaYaRegistradaEnOtraHoja?: boolean;
   /**
+   * En qué orden vienen día y mes en las fechas con barras de ESTA hoja.
+   *
+   * Lo decide el worker sobre la hoja ENTERA y no cada lote por su cuenta: es el mismo modo
+   * de fallo que `assertMismoMapa` cubre para el mapa de columnas. Dos lotes que lleguen a
+   * órdenes distintos partirían la hoja en dos calendarios, y el desplazamiento no falla
+   * nada — mueve los movimientos de mes, con datos plausibles.
+   */
+  ordenDeFecha?: 'dmy' | 'mdy';
+  /**
    * Fija el NOMBRE de la categoría al que ya usó esta hoja, cuando este lote la bautizó
    * distinto (`ventas` donde el lote 1 dijo `sales`).
    *
@@ -1108,6 +1140,7 @@ export async function classifySheetRows(params: {
         row: params.rows[i]!,
         columns: columnas,
         baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
       }),
     });
   }
@@ -1148,20 +1181,33 @@ export async function classifySheetRows(params: {
 }
 
 /**
- * Categorías del consejo (ronda de QA 2026-08-11, prompt de rediseño §3.4).
+ * Categorías que se le OFRECEN al modelo — CU-868kx7a73 (2026-08-27).
  *
  * Son CÓDIGOS, no etiquetas: el frontend los traduce a ES/EN, igual que hace con
  * `ruleKey` de las alertas. Devolver "Cobranza" desde acá obligaría al backend a saber el
  * idioma del usuario para algo que es una clasificación, no un texto.
  *
- * Son exactamente las tres del ticket. `financial` hace de cajón general a propósito: un
- * insight de costos o de margen entra ahí. Abrir más categorías es una decisión de producto,
- * no una que se toma escribiendo el enum.
+ * Los tres originales (`collections` / `sales` / `financial`) eran demasiado anchos:
+ * `financial` cubría margen, costos y caja a la vez, y Jose leyó el tag "CONTEXTO"
+ * (la severidad `info`) como si fuera el tema. Pedió que el tag dijera de qué habla
+ * el consejo — cashflow, revenue, expenses. `sales` y `financial` siguen existiendo
+ * como alias en `parseInsights` porque el modelo todavía los emite (el snapshot
+ * trae claves `revenue`/`opex`, y la herramienta vieja los nombraba así).
  */
-export const INSIGHT_CATEGORIES = ['collections', 'sales', 'financial'] as const;
+export const INSIGHT_CATEGORIES = ['cashflow', 'revenue', 'expenses', 'collections'] as const;
 export type InsightCategory = (typeof INSIGHT_CATEGORIES)[number];
 
-export type InsightItem = { category: InsightCategory; text: string };
+export const INSIGHT_SEVERITIES = ['critical', 'warning', 'info'] as const;
+export type InsightSeverity = (typeof INSIGHT_SEVERITIES)[number];
+
+export type InsightItem = {
+  category: InsightCategory;
+  text: string;
+  /** Ausente si el modelo no la mandó; el panel la trata como `info`. */
+  severity?: InsightSeverity;
+  /** La acción concreta, cuando hay una. Un consejo de contexto no la trae. */
+  action?: string;
+};
 
 /**
  * Resultado de una narrativa de IA a secas: texto y contabilidad de tokens. Lo devuelve la
@@ -1231,12 +1277,27 @@ const EMIT_INSIGHTS_TOOL: Anthropic.Tool = {
               type: 'string',
               enum: [...INSIGHT_CATEGORIES],
               description:
-                'collections = cobranza y cuentas por cobrar; sales = ventas e ingresos; ' +
-                'financial = margen, costos y salud financiera general.',
+                'cashflow = caja y liquidez; revenue = ventas e ingresos; ' +
+                'expenses = costos y gastos operativos; collections = cobranza y CxC.',
             },
             text: { type: 'string', description: 'El insight, en una o dos frases.' },
+            // CU-868ku6r48: van en el esquema y no en el prompt porque el prompt es
+            // editable desde /admin. Una regla escrita en el template no llega a
+            // producción. severity es obligatoria; action, no — un consejo de
+            // contexto no tiene nada que hacer hoy.
+            severity: {
+              type: 'string',
+              enum: [...INSIGHT_SEVERITIES],
+              description:
+                'critical = hay que actuar hoy; warning = merece atención esta semana; ' +
+                'info = contexto, no urge.',
+            },
+            action: {
+              type: 'string',
+              description: 'La acción concreta a tomar, en una frase. Omitir si no hay una.',
+            },
           },
-          required: ['category', 'text'],
+          required: ['category', 'text', 'severity'],
           additionalProperties: false,
         },
       },
@@ -1345,7 +1406,8 @@ export async function generateInsightNarrative(
       cause: new Error(
         `stop_reason=${message.stop_reason} max_tokens=${INSIGHT_MAX_TOKENS} ` +
           `output_tokens=${message.usage.output_tokens} insights=${insights.length} ` +
-          `texto=${textBlock?.text.length ?? 0} chars`,
+          `texto=${textBlock?.text.length ?? 0} chars ` +
+          `entrada=${resumirEntradaDeHerramienta(toolBlock?.input)}`,
       ),
     });
   }
@@ -1373,24 +1435,105 @@ export async function generateInsightNarrative(
 /**
  * Valida la salida de la herramienta antes de creerle.
  *
- * `tool_use.input` es `unknown` por contrato del SDK, y un modelo puede devolver una
- * categoría fuera del enum aunque el esquema la restrinja. Un elemento inválido se DESCARTA
- * en vez de tumbar la respuesta entera: perder un insight de tres es mejor que perder los
- * tres, y el llamador ya sabe manejar la lista vacía.
+ * `tool_use.input` es `unknown` por contrato del SDK. El modelo NO obedece el enum:
+ * el snapshot que recibe trae claves `revenue` / `opex` / `cogs`, y las copia como
+ * categoría. Medido en producción 2026-08-28: `stop_reason=tool_use`, ~400 tokens de
+ * salida, `insights=0` — Claude SÍ llamó a la herramienta, y `parseInsights` tiró
+ * cada elemento porque `revenue` no estaba en `['collections','sales','financial']`.
+ * El panel decía "la respuesta llegó incompleta". El rename de CU-868kx7a73 actualizó
+ * el esquema de respuesta de Elysia y el frontend; este parser se quedó en los tres
+ * nombres viejos. Por eso a una empresa le funcionaba (el modelo usaba `sales` /
+ * `financial`) y a la de al lado no (usaba las claves del snapshot).
+ *
+ * Un elemento SIN texto sí se descarta: no hay consejo que servir. Una categoría
+ * desconocida con texto se COERCE — perder el tag es mejor que perder el consejo,
+ * y perder los tres era exactamente la pantalla de error.
  */
-function parseInsights(input: unknown): InsightItem[] {
-  if (!input || typeof input !== 'object' || !('insights' in input)) return [];
-  const raw = (input as { insights: unknown }).insights;
-  if (!Array.isArray(raw)) return [];
+export function parseInsights(input: unknown): InsightItem[] {
+  const objeto = objetoDeEntrada(input);
+  if (!objeto) return [];
+  const crudo = objeto.insights;
+  const lista = Array.isArray(crudo) ? crudo : crudo && typeof crudo === 'object' ? [crudo] : [];
 
-  const valid = new Set<string>(INSIGHT_CATEGORIES);
-  return raw.flatMap((item): InsightItem[] => {
+  return lista.flatMap((item): InsightItem[] => {
     if (!item || typeof item !== 'object') return [];
-    const { category, text } = item as { category?: unknown; text?: unknown };
-    if (typeof category !== 'string' || !valid.has(category)) return [];
+    const { category, text, severity, action } = item as {
+      category?: unknown;
+      text?: unknown;
+      severity?: unknown;
+      action?: unknown;
+    };
     if (typeof text !== 'string' || text.trim() === '') return [];
-    return [{ category: category as InsightCategory, text: text.trim() }];
+    const insight: InsightItem = {
+      category: categoriaDe(category),
+      text: text.trim(),
+    };
+    const sev = severidadDe(severity);
+    if (sev) insight.severity = sev;
+    if (typeof action === 'string' && action.trim() !== '') insight.action = action.trim();
+    return [insight];
   });
+}
+
+/** El SDK a veces entrega el JSON de la herramienta como string, no como objeto. */
+function objetoDeEntrada(input: unknown): { insights?: unknown } | null {
+  if (typeof input === 'string') {
+    try {
+      return objetoDeEntrada(JSON.parse(input) as unknown);
+    } catch {
+      return null;
+    }
+  }
+  if (!input || typeof input !== 'object') return null;
+  if ('insights' in input) return input as { insights?: unknown };
+  return null;
+}
+
+/**
+ * Nombres que el modelo emite y ya no se le ofrecen. El snapshot prima `revenue` y
+ * `opex`; la herramienta vieja pedía `sales` y `financial`. Mapearlos conserva el
+ * tag. Lo que no se reconoce cae en `cashflow`: es el cajón general del producto
+ * (antes `financial`) y el panel tiene etiqueta para él.
+ */
+const ALIAS_DE_CATEGORIA: Record<string, InsightCategory> = {
+  sales: 'revenue',
+  financial: 'cashflow',
+  opex: 'expenses',
+  costs: 'expenses',
+  cost: 'expenses',
+  cogs: 'expenses',
+};
+
+const VIGENTES = new Set<string>(INSIGHT_CATEGORIES);
+
+function categoriaDe(raw: unknown): InsightCategory {
+  if (typeof raw !== 'string') return 'cashflow';
+  const clave = raw.trim().toLowerCase();
+  if (VIGENTES.has(clave)) return clave as InsightCategory;
+  return ALIAS_DE_CATEGORIA[clave] ?? 'cashflow';
+}
+
+function severidadDe(raw: unknown): InsightSeverity | undefined {
+  if (raw === 'critical' || raw === 'warning' || raw === 'info') return raw;
+  return undefined;
+}
+
+/** Para el log: claves y categorías, NUNCA el texto del consejo (es dato del cliente). */
+function resumirEntradaDeHerramienta(input: unknown): string {
+  if (input === undefined) return 'sin-bloque';
+  if (typeof input === 'string') return `string(${input.length})`;
+  if (!input || typeof input !== 'object') return typeof input;
+  const keys = Object.keys(input as object).join(',');
+  const lista = (input as { insights?: unknown }).insights;
+  if (!Array.isArray(lista)) return `keys=${keys} insights=${typeof lista}`;
+  const cats = lista
+    .map((item) =>
+      item && typeof item === 'object' && 'category' in item
+        ? String((item as { category: unknown }).category)
+        : '?',
+    )
+    .join('|');
+  return `keys=${keys} n=${lista.length} cats=${cats}`;
 }
 
 const REPORT_SYSTEM_PROMPT = (locale: 'es' | 'en') =>

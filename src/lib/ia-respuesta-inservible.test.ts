@@ -1,6 +1,8 @@
 import { describe, expect, test, mock, beforeEach } from 'bun:test';
 import { AiProviderError } from '@/lib/ai-errors';
 
+process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════
  * UNA RESPUESTA CORTADA O VACÍA NO ES UNA RESPUESTA
@@ -355,6 +357,38 @@ describe('el consejo diario no se degrada en silencio (CU-868ktm2m2)', () => {
     )) as AiProviderError;
 
     expect(error.operation).toBe('insight_narrative');
+  });
+
+  test('las categorías del snapshot (revenue/opex) se sirven, no se tiran', async () => {
+    /*
+     * Medido en producción 2026-08-28 contra un usuario al que le fallaba y otro
+     * al que no: `stop_reason=tool_use`, ~400 tokens, insights=0. El modelo copia
+     * las claves del snapshot. Tirarlas era la pantalla "llegó incompleta".
+     */
+    respuestas = [
+      {
+        stop_reason: 'tool_use',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_ins',
+            name: 'emit_insights',
+            input: {
+              insights: [
+                { category: 'revenue', text: 'Las ventas del mes cayeron.', severity: 'warning' },
+                { category: 'opex', text: 'La nómina se comió el margen.', severity: 'critical' },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    const r = await generateInsightNarrative({ baseCurrency: 'GTQ' }, 'prompt');
+    expect(r.insights).toHaveLength(2);
+    expect(r.insights[0]!.category).toBe('revenue');
+    expect(r.insights[1]!.category).toBe('expenses');
+    expect(r.narrative).toContain('nómina');
   });
 });
 
