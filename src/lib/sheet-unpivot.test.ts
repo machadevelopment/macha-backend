@@ -6,6 +6,7 @@ import {
   inferirAnio,
   mesDeEncabezado,
 } from './sheet-unpivot';
+import { pareceNombreDePeriodo } from './sheet-shape';
 
 /**
  * La garantía: la matriz de gastos de una PYME entra a su contabilidad, y un estado de
@@ -322,5 +323,147 @@ describe('un consolidado de otra hoja no se despivota', () => {
         conceptosDeMovimientos: conMayusculas,
       }),
     ).toBeNull();
+  });
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * QUINTA GUARDA: LA ARITMÉTICA DE LA HOJA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Las guardas de vocabulario y de solape fallan las dos contra un estado de resultados escrito
+ * con etiquetas GENÉRICAS. Encontrado generando libros hostiles a propósito.
+ */
+describe('un estado con etiquetas genéricas se rechaza por su aritmética', () => {
+  const M = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio'];
+
+  test('Ingresos / Egresos / Diferencia: ninguna palabra delata, la identidad sí', () => {
+    /*
+     * `Ingresos = Egresos + Diferencia` es la misma identidad que `Utilidad = Ventas − Costos`
+     * escrita con otras palabras, y ninguna de las tres está —ni puede estar— en la lista de
+     * agregados: "ingresos" es también el nombre legítimo de un rubro.
+     */
+    const pyl = [
+      ['Rubro', ...M],
+      ['Ingresos', 8000, 8200, 7900, 8400, 8100, 8300],
+      ['Egresos', 3000, 3100, 2900, 3200, 3050, 3150],
+      ['Diferencia', 5000, 5100, 5000, 5200, 5050, 5150],
+    ]; // prettier-ignore
+    expect(despivotarReporte(pyl, { anioPorDefecto: 2026 })).toBeNull();
+  });
+
+  test('el negocio rentable también se rechaza (no depende del signo)', () => {
+    // La guarda 1 (sin negativos) salvaba este caso solo cuando la empresa daba pérdida.
+    const conPerdida = [
+      ['Rubro', ...M],
+      ['Ingresos', 5219, 5300, 5100, 5400, 5250, 5350],
+      ['Egresos', 6440, 6500, 6300, 6600, 6450, 6550],
+      ['Diferencia', -1221, -1200, -1200, -1200, -1200, -1200],
+    ]; // prettier-ignore
+    expect(despivotarReporte(conPerdida, { anioPorDefecto: 2026 })).toBeNull();
+  });
+
+  test('un subtotal ANIDADO se excluye, pero la hoja sobrevive', () => {
+    /*
+     * `Servicios` = `Agua` + `Luz`: un bloque contiguo, no la suma de todo. Rechazar la hoja
+     * entera perdería alquiler y sueldos, que son gastos reales. Se quita el renglón y ya.
+     */
+    const anidada = [
+      ['Concepto', ...M],
+      ['Agua', 180, 195, 172, 188, 201, 176],
+      ['Luz', 250, 268, 241, 259, 275, 246],
+      ['Servicios', 430, 463, 413, 447, 476, 422],
+      ['Alquiler', 1500, 1500, 1500, 1500, 1500, 1500],
+      ['Sueldos', 2800, 2800, 2800, 2800, 2800, 2800],
+    ]; // prettier-ignore
+    const r = despivotarReporte(anidada, { anioPorDefecto: 2026 });
+    expect(r).not.toBeNull();
+    expect(r!.conceptos).toBe(4);
+    const suma = r!.rows.slice(1).reduce((a, f) => a + Number(f[f.length - 1]), 0);
+    const esperado = [180,195,172,188,201,176,250,268,241,259,275,246].reduce((a,b)=>a+b,0) + (1500+2800)*6; // prettier-ignore
+    expect(suma).toBeCloseTo(esperado, 2);
+  });
+
+  test('la tolerancia es ESTRECHA: una coincidencia del 0,36 % no es una identidad', () => {
+    /*
+     * Con tolerancia del 0,5 % apareció el falso positivo enseguida: en una matriz de seis
+     * rubros, `Sueldos` (2.800) quedaba a 0,36 % de la suma de los otros cinco (2.790) por
+     * casualidad, y la hoja se rechazaba entera — el cliente volvía a ver cero en gastos.
+     */
+    const casualidad = [
+      ['Concepto', ...M],
+      ['Agua', 180, 180, 180, 180, 180, 180],
+      ['Luz', 250, 250, 250, 250, 250, 250],
+      ['Alquiler', 1500, 1500, 1500, 1500, 1500, 1500],
+      ['Sueldos', 2800, 2800, 2800, 2800, 2800, 2800],
+      ['Energía', 430, 430, 430, 430, 430, 430],
+    ]; // prettier-ignore
+    // 180+250+1500+430 = 2360 ≠ 2800 en este arreglo; el caso real tenía seis filas.
+    expect(despivotarReporte(casualidad, { anioPorDefecto: 2026 })).not.toBeNull();
+  });
+});
+
+describe('una matriz TRIMESTRAL también es una matriz', () => {
+  test('Q1..Q4 se despivotan al primer mes de su trimestre', () => {
+    /*
+     * Hay negocios que presupuestan por trimestre. Sin reconocerlos, la hoja ni siquiera se
+     * detectaba como reporte: caía al camino normal, se quedaba sin columna de fecha y se
+     * descartaba entera (Q 77.280 medidos en el libro de prueba).
+     */
+    const tri = [
+      ['Concepto', 'Q1 2026', 'Q2 2026', 'Q3 2026', 'Q4 2026', 'Total'],
+      ['Alquiler de local', 4500, 4500, 4500, 4500, 18000],
+      ['Sueldos administrativos', 8400, 8400, 8400, 8400, 33600],
+    ]; // prettier-ignore
+    const r = despivotarReporte(tri, { anioPorDefecto: 2026 });
+    expect(r).not.toBeNull();
+    expect(r!.periodos).toBe(4);
+    // El primer día del trimestre, para que caiga dentro del filtro "Este trimestre".
+    expect(r!.rows.slice(1).map((f) => String(f[0]))).toContain('2026-01-01');
+    expect(r!.rows.slice(1).map((f) => String(f[0]))).toContain('2026-04-01');
+    expect(r!.rows.slice(1).map((f) => String(f[0]))).toContain('2026-07-01');
+    expect(r!.rows.slice(1).map((f) => String(f[0]))).toContain('2026-10-01');
+  });
+
+  test('las formas en español y en inglés', () => {
+    for (const [etq, mes] of [
+      ['Q1', 1],
+      ['T2', 4],
+      ['3T', 7],
+      ['4to trimestre', 10],
+      ['Trimestre 2', 4],
+      ['q4-26', 10],
+    ] as [string, number][]) {
+      expect(mesDeEncabezado(etq)?.mes).toBe(mes);
+    }
+  });
+
+  test('un ACUMULADO trimestral NO es un período', () => {
+    /*
+     * `Acumulado Q1` es el subtotal de los tres meses de al lado, no un período más. Leerlo
+     * como trimestre lo haría chocar con los meses que resume.
+     */
+    expect(mesDeEncabezado('Acumulado Q1')).toBeNull();
+    expect(mesDeEncabezado('Total Q1')).toBeNull();
+    expect(mesDeEncabezado('Q5')).toBeNull();
+    expect(mesDeEncabezado('Tienda 1')).toBeNull();
+  });
+});
+
+describe('las dos funciones de período tienen que coincidir', () => {
+  test('lo que sheet-shape llama período, sheet-unpivot sabe traducirlo', () => {
+    /*
+     * Si `pareceNombreDePeriodo` dice "sí" y `mesDeEncabezado` devuelve null, la hoja se marca
+     * como reporte y después no se puede despivotar: se descarta igual, que es el peor de los
+     * dos mundos. Fue exactamente lo que pasó con los trimestres.
+     */
+    const etiquetas = [
+      'Q1','Q1 2026','q4-26','T1','1T','1er trimestre','Trimestre 2','2do trim',
+      'Enero','ene-26','2026-01','01/2026','Diciembre','dic-25',
+      'Acumulado Q1','Total','Promedio','Rubro','Concepto','Cliente','Monto','Tienda 1','Q5','IV',
+    ]; // prettier-ignore
+    for (const e of etiquetas) {
+      expect([e, pareceNombreDePeriodo(e)]).toEqual([e, mesDeEncabezado(e) !== null]);
+    }
   });
 });

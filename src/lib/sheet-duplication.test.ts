@@ -198,3 +198,54 @@ describe('lo que NO debe descartarse', () => {
     ).toBe(0);
   });
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * REGRESIÓN: LA FECHA EN TEXTO TAMBIÉN CUENTA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `tieneColumnaDeFecha` miraba solo objetos `Date` y seriales numéricos. Una hoja con fechas
+ * ISO en texto —como las trae cualquier archivo que pasó por un CSV— no contaba como
+ * autosuficiente, así que empataba en "ninguna se basta sola" contra un agregado y el
+ * desempate caía de vuelta al PROXY del tamaño: el criterio que este módulo dejó de usar
+ * justamente porque vaciaba libros enteros.
+ *
+ * Medido: un libro con `Ventas` (48 filas, Cliente + fecha ISO) y una matriz de ingresos por
+ * categoría despivotada (24 filas, sin contraparte) descartaba las 48 ventas de detalle para
+ * conservar el agregado sintético.
+ */
+describe('la autosuficiencia se mide con el mismo lector de fechas del pipeline', () => {
+  const VENTAS_ISO = [
+    ['Fecha', 'Cliente', 'Producto', 'Monto'],
+    ['2026-01-12', 'Cafetería El Roble', 'Café en grano 1 kg', 500],
+    ['2026-02-08', 'Súper Zona 10', 'Café molido 250 g', 300],
+    ['2026-03-19', 'Bistró La Cuadra', 'Cápsulas x10', 400],
+    ['2026-04-02', 'Cafetería El Roble', 'Café en grano 1 kg', 600],
+  ]; // prettier-ignore
+
+  /** Lo que sale de despivotar una matriz: fecha, concepto y monto. Sin contraparte. */
+  const AGREGADO = [
+    ['Fecha', 'Concepto', 'Monto'],
+    ['2026-01-01', 'Café en grano', 900],
+    ['2026-02-01', 'Café molido', 500],
+    ['2026-03-01', 'Cápsulas', 400],
+  ]; // prettier-ignore
+
+  test('gana la hoja con contraparte, aunque tenga MÁS filas', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Ventas', rows: VENTAS_ISO },
+      { nombre: 'Ventas por categoria', rows: AGREGADO },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Ventas por categoria')).toBe(true);
+  });
+
+  test('el orden en que llegan no cambia el veredicto', () => {
+    const r = detectarDetalleDuplicado([
+      { nombre: 'Ventas por categoria', rows: AGREGADO },
+      { nombre: 'Ventas', rows: VENTAS_ISO },
+    ]);
+    expect(r.has('Ventas')).toBe(false);
+    expect(r.has('Ventas por categoria')).toBe(true);
+  });
+});
