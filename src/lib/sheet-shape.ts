@@ -32,8 +32,121 @@ import { asDate } from './row-assembly';
  * cuesta lo que ya cuesta hoy. Es la misma asimetría que gobierna `sheet-classifier.ts`.
  */
 
-const MESES =
-  'ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|jan|apr|aug|dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA SOLA TABLA DE MESES, Y TOLERA UN TYPO (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Antes había DOS vocabularios: esta alternación de regex y el `MESES_ES` de `sheet-unpivot`.
+ * El propio archivo advertía que tenían que coincidir —"si una dice sí es período y la otra no
+ * sabe cuál es, la hoja se marca como reporte y después no se puede despivotar"— y mantenerlas
+ * a mano es exactamente el modo de fallo que la advertencia describe. Ahora la tabla vive acá
+ * y `mesDeEncabezado` la consume, así que no pueden separarse.
+ *
+ * Y tolera UNA edición, porque un cliente escribe los meses A MANO: `Enrero`, `Febrro`,
+ * `Abrl`, `Agosot`. Sin eso, la matriz de gastos con los meses mal escritos no se detecta como
+ * reporte, no se despivota, se queda sin columna de fecha y **desaparece entera** — el cliente
+ * ve utilidad neta igual a utilidad bruta, o sea que el producto le dice que operar su negocio
+ * no cuesta nada. Medido: Q 48.240 en el libro de prueba.
+ *
+ * ═══ POR QUÉ ES SEGURO AFLOJAR ACÁ ═══
+ *
+ * Un mes suelto no decide nada: la señal de reporte exige **≥4 columnas de período** cubriendo
+ * más del 25 % del encabezado, y el despivotado exige ≥3 sin repetir. Para que un typo haga
+ * daño tendrían que confundirse tres o cuatro columnas a la vez, en la misma hoja.
+ *
+ * La tolerancia se mide contra la palabra del DICCIONARIO y solo desde 5 letras. Por eso
+ * `mayo` (4) exige coincidencia exacta y una columna `Mayor` —libro mayor, que en una hoja
+ * contable es un nombre normal— no se lee como mayo. Las abreviaturas de 3 letras tampoco se
+ * aflojan: `mar` está a una edición de `mes`, `map`, `mor`.
+ */
+const MESES_POR_NOMBRE: Record<string, number> = {
+  enero: 1, ene: 1, febrero: 2, feb: 2, marzo: 3, mar: 3, abril: 4, abr: 4,
+  mayo: 5, may: 5, junio: 6, jun: 6, julio: 7, jul: 7, agosto: 8, ago: 8,
+  septiembre: 9, setiembre: 9, sep: 9, sept: 9, set: 9,
+  octubre: 10, oct: 10, noviembre: 11, nov: 11, diciembre: 12, dic: 12,
+  january: 1, jan: 1, february: 2, march: 3, april: 4, apr: 4, june: 6, july: 7,
+  august: 8, aug: 8, september: 9, october: 10, november: 11, december: 12, dec: 12,
+}; // prettier-ignore
+
+const LARGO_MINIMO_PARA_TOLERAR_TYPO = 5;
+
+/** Distancia de edición 1: sustitución, inserción, borrado o transposición contigua. */
+function aUnaEdicion(a: string, b: string): boolean {
+  const d = a.length - b.length;
+  if (d > 1 || d < -1) return false;
+  if (a.length === b.length) {
+    let i = 0;
+    while (i < a.length && a[i] === b[i]) i++;
+    if (i === a.length) return true;
+    let j = a.length - 1;
+    while (j > i && a[j] === b[j]) j--;
+    if (i === j) return true;
+    return j === i + 1 && a[i] === b[j] && a[j] === b[i];
+  }
+  const [largo, corto] = a.length > b.length ? [a, b] : [b, a];
+  let i = 0;
+  while (i < corto.length && largo[i] === corto[i]) i++;
+  return largo.slice(i + 1) === corto.slice(i);
+}
+
+/**
+ * Qué mes nombra esta palabra, tolerando un typo. `null` si no nombra ninguno.
+ *
+ * Es la ÚNICA fuente de nombres de mes del pipeline: la consume `pareceNombreDePeriodo` de
+ * este módulo y `mesDeEncabezado` de `sheet-unpivot`.
+ */
+export function mesPorNombre(palabra: string, tolerarTypo = false): number | null {
+  const p = palabra
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+  const exacto = MESES_POR_NOMBRE[p];
+  if (exacto !== undefined) return exacto;
+  if (!tolerarTypo) return null;
+  for (const [nombre, mes] of Object.entries(MESES_POR_NOMBRE)) {
+    if (nombre.length >= LARGO_MINIMO_PARA_TOLERAR_TYPO && aUnaEdicion(p, nombre)) return mes;
+  }
+  return null;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL TYPO SE TOLERA POR CONTEXTO, NUNCA EN UNA ETIQUETA SUELTA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La tolerancia por sí sola tiene falsos positivos que importan y el test los encontró antes
+ * de que saliera: `Marca` está a UNA edición de `march` —y una concesionaria tiene esa columna
+ * en su inventario—, igual que `Marco` de `marzo`, `Julia` de `julio` y `Género` de `enero`.
+ * Un nombre de mes corto vive cerca de palabras que son nombres de columna perfectamente
+ * normales, así que aflojar la comparación de una etiqueta AISLADA cambia un fallo por otro.
+ *
+ * Lo que resuelve la ambigüedad es el ENCABEZADO COMPLETO: en una hoja donde varias columnas
+ * ya son meses bien escritos, una casi-coincidencia es un typo; en una hoja donde no hay
+ * ninguno, es una palabra que se le parece. Por eso hacen falta **al menos un mes exacto y al
+ * menos dos casi-coincidencias** para aceptar las segundas. `Marca` sola nunca es marzo, y
+ * `Marca` al lado de un `Mayo` real tampoco (una sola casi-coincidencia no alcanza).
+ *
+ * Medido en la matriz de gastos con los meses escritos a mano —`Enrero · Febrro · Marzoo ·
+ * Abrl · Mayo · Juno · Julioo · Agosot`—: un exacto y siete casi. Sin esto la hoja no se
+ * despivotaba y sus Q 48.240 de gastos desaparecían del dashboard.
+ */
+export function mesesDeEncabezado(nombres: unknown[]): (number | null)[] {
+  const texto = nombres.map((n) => (typeof n === 'string' ? n.trim().replace(/\s+/g, ' ') : ''));
+  const exactos = texto.map((t) => mesDeEtiqueta(t, false));
+  const casi = texto.map((t, i) => (exactos[i] === null ? mesDeEtiqueta(t, true) : null));
+  const nExactos = exactos.filter((m) => m !== null).length;
+  const nCasi = casi.filter((m) => m !== null).length;
+  if (nExactos >= 1 && nCasi >= 2) return exactos.map((m, i) => m ?? casi[i]!);
+  return exactos;
+}
+
+/** Un mes escrito como nombre, con año opcional. No cubre trimestres ni `2026-01`. */
+function mesDeEtiqueta(t: string, tolerarTypo: boolean): number | null {
+  const m = MES_CON_ANIO.exec(t.normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  return m === null ? null : mesPorNombre(m[1]!, tolerarTypo);
+}
 /*
  * Los TRIMESTRES son períodos igual que los meses (`Q1 2026`, `T1`, `1er trimestre`), y hay
  * negocios que presupuestan así. Sin reconocerlos, una matriz trimestral ni siquiera se
@@ -48,10 +161,14 @@ const MESES =
 const TRIMESTRE = String.raw`(?:q|t|trim(?:estre)?)[\s.-]*[1-4](?:[\s./-]*\d{2,4})?|[1-4](?:er|do|ro|to)?[\s.-]*(?:t|trim(?:estre)?)(?:[\s./-]*\d{2,4})?`;
 const SEMESTRE = String.raw`(?:s|sem(?:estre)?)[\s.-]*[12](?:[\s./-]*\d{2,4})?|[12](?:er|do)?[\s.-]*(?:s|sem(?:estre)?)(?:[\s./-]*\d{2,4})?`;
 
+/** Todo lo que es período SIN ser un nombre de mes; los nombres los resuelve `mesPorNombre`. */
 const PERIODO = new RegExp(
-  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4}|${TRIMESTRE}|${SEMESTRE})$`,
+  `^(?:\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4}|${TRIMESTRE}|${SEMESTRE})$`,
   'i',
 );
+
+/** `enero` · `ene-26` · `Enrero 2026` · `ene.2026`: nombre de mes con año opcional. */
+const MES_CON_ANIO = /^([a-z]{3,12})\.?[\s./-]*(\d{0,4})$/i;
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -96,10 +213,40 @@ function periodoDeFecha(v: unknown): { mes: string; dia: number; finDeMes: boole
  */
 export function pareceNombreDePeriodo(nombre: unknown): boolean {
   if (typeof nombre !== 'string') return false;
-  return PERIODO.test(nombre.trim().replace(/\s+/g, ' '));
+  const t = nombre.trim().replace(/\s+/g, ' ');
+  if (PERIODO.test(t)) return true;
+  return mesDeEtiqueta(t, false) !== null;
 }
 
 const vacia = (c: unknown): boolean => c === null || c === undefined || String(c).trim() === '';
+
+/** Largo mínimo para que un texto CUENTE algo. `GTQ` no; `Servicio de vigilancia` sí. */
+const LARGO_MINIMO_DESCRIPTIVO = 5;
+
+/**
+ * Si alguna columna que NO es la primera trae texto que describe el hecho.
+ *
+ * La primera se excluye porque es justamente la que se está juzgando como marcador de período.
+ * De las demás basta una: un libro de movimientos siempre dice qué pasó; un resumen solo dice
+ * cuánto.
+ */
+function tieneColumnaDescriptiva(datos: unknown[][]): boolean {
+  const muestra = datos.slice(0, 60);
+  const ancho = Math.max(...muestra.map((f) => f.length), 0);
+  for (let c = 1; c < ancho; c++) {
+    const valores = muestra.map((f) => f[c]).filter((v) => !vacia(v));
+    if (valores.length === 0) continue;
+    const descriptivos = valores.filter(
+      (v) =>
+        typeof v === 'string' &&
+        v.trim().length >= LARGO_MINIMO_DESCRIPTIVO &&
+        asDate(v) === null &&
+        !/^[\s$Q€]*-?[\d.,\s]+[\s$Q€]*$/.test(v),
+    ).length;
+    if (descriptivos / valores.length > 0.7) return true;
+  }
+  return false;
+}
 
 export interface FormaDeHoja {
   /** `true` = parece un reporte/tabla dinámica, no un listado de movimientos. */
@@ -140,7 +287,15 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
    *
    * Lo que cuesta una hoja chica no son tokens: es contar el mismo dinero dos veces.
    */
-  const periodosEnColumnas = nombradosTodos.filter(pareceNombreDePeriodo).length;
+  /*
+   * La tolerancia a typos se decide sobre el ENCABEZADO ENTERO (ver `mesesDeEncabezado`), no
+   * etiqueta por etiqueta: una casi-coincidencia suelta es una palabra parecida, y varias
+   * junto a un mes bien escrito son una matriz con los meses escritos a mano.
+   */
+  const mesesTolerantes = mesesDeEncabezado(nombradosTodos);
+  const periodosEnColumnas = nombradosTodos.filter(
+    (c, i) => mesesTolerantes[i] !== null || pareceNombreDePeriodo(c),
+  ).length;
   if (periodosEnColumnas >= 4 && periodosEnColumnas / Math.max(nombradosTodos.length, 1) > 0.25) {
     return {
       esReporte: true,
@@ -212,7 +367,42 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
     const meses = new Set(marcadores.map((p) => p.mes)).size;
     const dias = new Set(marcadores.map((p) => p.dia));
     const diaCoherente = dias.size === 1 || marcadores.every((p) => p.finDeMes);
-    if (meses / marcadores.length > 0.9 && diaCoherente) {
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * UN PAGO RECURRENTE TAMBIÉN CAE SIEMPRE EL MISMO DÍA (2026-08-30)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * La coherencia de día se justificó arriba con "un movimiento ocurre el día que ocurre,
+     * así que sus días varían". Es cierto de una venta y **falso del gasto fijo de cualquier
+     * PYME**: el alquiler se paga el 1, la planilla el 30, la cuota del préstamo el 15. O sea
+     * que la guarda escrita para no confundir un resumen con movimientos reales golpeaba
+     * justo a los movimientos más previsibles que existen — y con más fuerza en el día 1 y en
+     * el último del mes, que son precisamente los dos que `finDeMes` y `dias.size === 1`
+     * declaran marcador.
+     *
+     * Medido: dos hojas de gastos recurrentes se descartaban enteras —ocho pagos de
+     * mantenimiento el día 20 y doce de vigilancia el día 15—. No es un dato que falta: deja
+     * el resultado del período INFLADO, que es el fallo que esta casa ya pagó con la matriz de
+     * gastos de KapePrueba.
+     *
+     * ═══ LA SEÑAL ES QUE UN RESUMEN NO TIENE NADA QUE CONTAR, SOLO CUÁNTO ═══
+     *
+     * El primer intento fue vetar por CONTRAPARTE (`pareceLibroDeMovimientos`): no se le paga
+     * a "enero". Correcto y demasiado angosto — ese mismo archivo lo advierte en su comentario:
+     * *"la hoja de gastos de una PYME no nombra proveedor y lo es"*. La hoja
+     * `Fecha · Descripcion · Categoria · Monto` seguía muriendo.
+     *
+     * Lo que sí generaliza: un resumen por período tiene el período y CIFRAS, nada más. Las dos
+     * hojas reales que motivaron esta señal lo confirman — `Mes · Venta Neta · Unidades` y
+     * `Mes · Ingresos Totales · Gastos Totales · Utilidad Estimada`: ni una columna de texto.
+     * Un libro de movimientos siempre trae al menos una que dice QUÉ pasó: el concepto, el
+     * rubro, la contraparte, la descripción.
+     *
+     * El piso de 5 caracteres deja fuera la columna de MONEDA (`GTQ`, `USD`, `Q`), que es texto
+     * y aparece en hojas de las dos clases; sin el piso el veto se cumpliría siempre y la señal
+     * quedaría apagada.
+     */
+    if (meses / marcadores.length > 0.9 && diaCoherente && !tieneColumnaDescriptiva(datos)) {
       return {
         esReporte: true,
         motivo:

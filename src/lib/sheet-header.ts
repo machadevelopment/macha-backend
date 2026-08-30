@@ -236,11 +236,45 @@ export function detectarFilaDeEncabezado(rows: unknown[][]): number {
     anchoTabla === 0 || celdasLlenas(fila) * 2 >= anchoTabla;
 
   if (!cubreLaTabla(rows[0] ?? [])) {
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * ENTRE LAS FILAS QUE CUBREN LA TABLA GANA LA QUE MÁS SE PARECE A UN ENCABEZADO
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * Antes se devolvía **la primera** que cubriera, y `cubreLaTabla` acepta a partir de la
+     * MITAD del ancho del cuerpo. Ese umbral es deliberadamente flojo porque un encabezado
+     * real puede traer columnas sin nombre; el error era usarlo también para ELEGIR.
+     *
+     * Medido sobre un libro con la tabla en la columna E y tres filas de título arriba:
+     *
+     *     [0] "COMERCIALIZADORA XELA, S.A."                        1 celda
+     *     [1] "NIT 7788990-1" · "Periodo: 2026"                    2 celdas
+     *     [2] 2026 · 8 · "Hoja 1 de 1"                             3 celdas  ← se elegía ESTA
+     *     [3] Fecha · Documento · Cliente · Monto · Monto · Moneda  6 celdas  ← el encabezado
+     *
+     * Con un cuerpo de 6 columnas, la fila de pie de página pasa el umbral (3 × 2 ≥ 6) y gana
+     * por ser primera. El daño no es perder la hoja —eso se vería—: es que el mapa de columnas
+     * se arma contra la fila equivocada y **los datos salen de las columnas de al lado**, con
+     * cifras plausibles. Las 32 ventas del archivo entraron en cero.
+     *
+     * `puntaje` es justo el discriminante que hacía falta y ya estaba escrito: un título con
+     * números da 0,40 y el encabezado 0,75, mientras una fila de datos —texto mezclado con
+     * seriales y montos— da 0,60. No se sube el umbral de `cubreLaTabla` porque eso sí
+     * rompería el caso legítimo del encabezado con huecos; se cambia solo el criterio de
+     * DESEMPATE, y el empate se resuelve por la más temprana, que conserva el sesgo de casa.
+     */
+    let mejor = -1;
+    let mejorPuntaje = -1;
     for (let i = 1; i < limite; i++) {
-      if (cubreLaTabla(rows[i]!)) return i;
+      if (!cubreLaTabla(rows[i]!)) continue;
+      const p = puntaje(rows[i]!, anchoMaximo);
+      if (p > mejorPuntaje) {
+        mejor = i;
+        mejorPuntaje = p;
+      }
     }
     // Ninguna fila llena la tabla: no hay tabla que encontrar y se conserva el sesgo de casa.
-    return 0;
+    return mejor === -1 ? 0 : mejor;
   }
 
   const base = puntaje(rows[0] ?? [], anchoMaximo);

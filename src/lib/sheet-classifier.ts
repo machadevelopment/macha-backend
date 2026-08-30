@@ -233,7 +233,25 @@ const CATALOG_SIGNATURES: {
      * "PRECIO INDIVIDUAL MENSUAL - ENERO", que el corpus de hojas reales espera como `unknown`
      * — y ese test es justamente lo que lo atrapó antes de llegar a producción.
      */
-    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa', 'preciounitario'],
+    /*
+     * ⚠️ `preciounitario` SALIÓ de esta lista (2026-08-30), y el motivo es el mismo que la puso
+     * acá: es demasiado genérico. Es la columna de una LÍNEA DE DOCUMENTO —una línea de orden
+     * de compra, una línea de factura—, no de una lista de existencias.
+     *
+     * Medido: `LineasOC` (`No. Orden · Producto · Cantidad · Precio Unitario · Total`) cumplía
+     * la firma entera y se iba a INVENTARIO. No duplicaba dinero (la cabecera `OrdenesCompra`
+     * lo aporta bien), pero metía 36 artículos inventados en el inventario del cliente Y, peor,
+     * la sacaba de `vivas` — o sea que el dedup cabecera/detalle, que existe exactamente para
+     * este par, nunca llegaba a verla. Un filtro que se equivoca temprano apaga a los de abajo.
+     *
+     * La premisa que falla es la que justifica esta firma: "un movimiento siempre tiene fecha
+     * por fila". Una LÍNEA de documento no la tiene — la hereda de su cabecera.
+     *
+     * Los dos casos reales que la motivaron no la necesitan: la ferretería trae `Costo
+     * Unitario` + `Precio Lista` y la boutique `Costo Unitario` + `Precio Venta`. El corpus de
+     * hojas reales lo confirma.
+     */
+    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa'],
     /* Y algo que identifique al ARTÍCULO: sin eso no hay a qué atribuir la existencia. */
     yTambien: ['sku', 'codigo', 'producto', 'articulo', 'insumo', 'idproducto', 'idinsumo'],
     prohibidas: DATE_HINTS,
@@ -254,6 +272,77 @@ const has = (headers: Set<string>, hints: string[]) => hints.some((h) => headers
  *
  * Recibe la primera fila cruda tal como la entrega `sheet_to_json(..., { header: 1 })`.
  */
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LAS FIRMAS DE CATÁLOGO TOLERAN UN TYPO POR COLUMNA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Las firmas se buscan por vocabulario exacto, así que un archivo escrito a mano las apaga
+ * enteras: `Contactoo`, `Telefonoo`, `Condicionees` no coinciden con nada y una cartera de
+ * clientes se va al modelo. Ahí el modelo hace lo ÚNICO que puede con ella —leer `Última
+ * compra` como fecha y `Saldo por cobrar` como monto— y la cobranza pendiente aparece como
+ * ingresos del período. Es el bug de KapePrueba (Q 13.362,75) por otra puerta, y la puerta la
+ * abre cualquiera que escriba mal un encabezado.
+ *
+ * ═══ POR QUÉ ACÁ SÍ Y EN LAS LISTAS DE DINERO NO ═══
+ *
+ * Aflojar una coincidencia siempre corre el riesgo de descartar contabilidad real, que es el
+ * daño que esta casa se niega a hacer en silencio. Acá el riesgo está acotado por tres cosas
+ * que ya existían y no se tocan: hacen falta `min` columnas (3 en la firma de contactos), el
+ * vocabulario es de FICHA y no de hecho (`telefono`, `contacto`, `condiciones` no aparecen en
+ * una línea de venta), y el empate con `looksFinancial` sigue mandando al modelo. Para que un
+ * libro de movimientos se descarte por esto tendrían que fallar las tres a la vez.
+ *
+ * Distancia 1 y no 2, y solo desde 6 caracteres: con 2 sobre palabras cortas, `nit` alcanzaría
+ * a `mes` y `pais` a `plan`. Un typo de verdad es una letra —cambiada, de más, de menos— o dos
+ * transpuestas, que es lo mismo a distancia 1 en la forma en que se compara acá.
+ */
+const LARGO_MINIMO_PARA_TOLERAR_TYPO = 6;
+
+function aUnaEdicion(a: string, b: string): boolean {
+  const d = a.length - b.length;
+  if (d > 1 || d < -1) return false;
+  if (a.length === b.length) {
+    // Sustitución (una sola letra distinta) o transposición de dos contiguas.
+    let i = 0;
+    while (i < a.length && a[i] === b[i]) i++;
+    if (i === a.length) return true;
+    let j = a.length - 1;
+    while (j > i && a[j] === b[j]) j--;
+    if (i === j) return true;
+    return j === i + 1 && a[i] === b[j] && a[j] === b[i];
+  }
+  // Inserción o borrado: el más largo con una letra menos tiene que dar el más corto.
+  const [largo, corto] = a.length > b.length ? [a, b] : [b, a];
+  let i = 0;
+  while (i < corto.length && largo[i] === corto[i]) i++;
+  return largo.slice(i + 1) === corto.slice(i);
+}
+
+/** Pertenencia tolerante a un typo, para el vocabulario de las firmas de catálogo. */
+function tiene(headers: Set<string>, palabra: string): boolean {
+  if (headers.has(palabra)) return true;
+  if (palabra.length < LARGO_MINIMO_PARA_TOLERAR_TYPO) return false;
+  for (const h of headers) if (aUnaEdicion(h, palabra)) return true;
+  return false;
+}
+
+/**
+ * Si el encabezado cumple una firma de catálogo.
+ *
+ * Vive UNA sola vez: `classifySheet` y `firmaDeCatalogo` tienen que dar el mismo veredicto o
+ * una hoja de existencias se declara catálogo y después no se sabe CUÁL, con lo que se
+ * descarta en vez de irse a inventario.
+ */
+function cumpleFirma(sig: (typeof CATALOG_SIGNATURES)[number], headers: Set<string>): boolean {
+  if (sig.needed.filter((h) => tiene(headers, h)).length < sig.min) return false;
+  if (sig.ademas && !sig.ademas.some((h) => tiene(headers, h))) return false;
+  if (sig.yTambien && !sig.yTambien.some((h) => tiene(headers, h))) return false;
+  // Las PROHIBIDAS se comparan exacto: un typo no puede VETAR una firma que sí se cumple.
+  if (sig.prohibidas && sig.prohibidas.some((h) => headers.has(h))) return false;
+  return true;
+}
+
 export function classifySheet(headerRow: unknown[]): SheetKind {
   const headers = new Set(headerRow.map(normalizeHeader).filter(Boolean));
 
@@ -262,14 +351,7 @@ export function classifySheet(headerRow: unknown[]): SheetKind {
 
   const looksFinancial = has(headers, MONEY_HINTS) && has(headers, DATE_HINTS);
 
-  const cumple = (sig: (typeof CATALOG_SIGNATURES)[number]): boolean => {
-    if (sig.needed.filter((h) => headers.has(h)).length < sig.min) return false;
-    if (sig.ademas && !sig.ademas.some((h) => headers.has(h))) return false;
-    if (sig.yTambien && !sig.yTambien.some((h) => headers.has(h))) return false;
-    if (sig.prohibidas && sig.prohibidas.some((h) => headers.has(h))) return false;
-    return true;
-  };
-  const catalogMatch = CATALOG_SIGNATURES.find(cumple);
+  const catalogMatch = CATALOG_SIGNATURES.find((sig) => cumpleFirma(sig, headers));
 
   /*
    * EL EMPATE SE RESUELVE A FAVOR DEL MODELO, y es el caso que más importa.
@@ -573,13 +655,5 @@ export function noPuedeProducirMovimientos(
 export function firmaDeCatalogo(headerRow: unknown[]): string | null {
   if (classifySheet(headerRow) !== 'catalog') return null;
   const headers = new Set(headerRow.map(normalizeHeader).filter(Boolean));
-  return (
-    CATALOG_SIGNATURES.find((sig) => {
-      if (sig.needed.filter((h) => headers.has(h)).length < sig.min) return false;
-      if (sig.ademas && !sig.ademas.some((h) => headers.has(h))) return false;
-      if (sig.yTambien && !sig.yTambien.some((h) => headers.has(h))) return false;
-      if (sig.prohibidas && sig.prohibidas.some((h) => headers.has(h))) return false;
-      return true;
-    })?.name ?? null
-  );
+  return CATALOG_SIGNATURES.find((sig) => cumpleFirma(sig, headers))?.name ?? null;
 }

@@ -126,6 +126,90 @@ Conventions & gotchas:
      firma de `existencias` y la forma de hoja**: las cinco hojas fueron al modelo y el
      archivo costó USD 0,90 por mil filas, el más caro de la semana. Este paso no es uno de
      seis: es el que decide si los otros cinco existen.
+  0-bis. **SIETE FALLOS QUE SOLO APARECEN CON UN ARCHIVO MAL HECHO** (2026-08-30). Los pasos de
+     abajo se escribieron contra archivos reales de clientes, que son desprolijos pero están
+     *bien escritos*. Generando libros **mal hechos** a propósito —typos en los encabezados,
+     columnas corridas, montos escritos a mano, meses mal escritos, fechas imposibles— y
+     midiendo la CIFRA DEL DASHBOARD contra la verdad de campo del archivo, saltaron siete
+     defectos que ningún test por etapa veía. Viven en `lib/hostiles/` (el generador y el doble
+     de modelo), `lib/hostiles-e2e.test.ts` y `tests/integration/hostiles-al-dashboard.test.ts`;
+     `bun run hostiles:generar` los escribe a disco con un `VERDAD.md` al lado.
+     **El doble de modelo es IGNORANTE a propósito**: clasifica muy bien lo que se le da y no
+     sabe nada de lo que no se le dio, así que una hoja que el pipeline debería haber filtrado
+     produce cifras plausibles y equivocadas —igual que el modelo de verdad con la cartera de
+     KapePrueba—. Un doble omnisciente taparía justo lo que hay que medir.
+     1. **`sheet-header` devolvía la PRIMERA fila que cubre la tabla**, y `cubreLaTabla` acepta
+        desde la MITAD del ancho del cuerpo. Un pie de página de 3 celdas (`2026 · 8 · "Hoja 1
+        de 1"`) le ganaba al encabezado de 6. No pierde la hoja: **desplaza el mapa y los datos
+        salen de las columnas de al lado**. 32 ventas en cero. Ahora desempata por `puntaje`,
+        que ya estaba escrito y medía exactamente eso (título con números 0,40 · encabezado
+        0,75 · fila de datos 0,60). El umbral flojo NO se sube: rompería el encabezado con
+        columnas sin nombre, que es legítimo.
+     2. **La coherencia de día declaraba "resumen por período" a los gastos recurrentes.** La
+        justificación escrita —"un movimiento ocurre el día que ocurre, así que sus días
+        varían"— es cierta de una venta y **falsa del gasto fijo de cualquier PYME**: el
+        alquiler se paga el 1, la planilla el 30, la cuota el 15. La guarda golpeaba a los
+        movimientos más previsibles que existen, y con más fuerza en el día 1 y el último del
+        mes, que son los dos que `finDeMes` y `dias.size === 1` declaran marcador. El veto por
+        CONTRAPARTE fue el primer intento y era demasiado angosto (el propio
+        `pareceLibroDeMovimientos` lo advierte: *"la hoja de gastos de una PYME no nombra
+        proveedor y lo es"*). Lo que generaliza: **un resumen por período tiene el período y
+        CIFRAS, nada más** — las dos hojas reales que motivaron la señal no traen una sola
+        columna de texto. El piso de 5 caracteres deja fuera la columna de MONEDA, que si no
+        cumpliría el veto siempre y apagaría la señal entera.
+     3. **Las firmas de catálogo se buscaban por vocabulario EXACTO**, así que `Contactoo ·
+        Telefonoo · Condicionees` las apagaba enteras y la cartera de clientes se iba al
+        modelo — el bug de KapePrueba por otra puerta, y la puerta la abre cualquiera que
+        escriba mal un encabezado. Ahora toleran UNA edición y solo desde 6 caracteres; las
+        `prohibidas` siguen exactas, porque un typo no puede VETAR una firma que sí se cumple.
+        `cumpleFirma` vive una sola vez: `classifySheet` y `firmaDeCatalogo` tienen que dar el
+        mismo veredicto o una hoja de existencias se declara catálogo y después no se sabe
+        cuál, con lo que se descarta en vez de irse a inventario.
+     4. **Un mes con typo apagaba el despivotado entero** (`Enrero`, `Febrro`, `Abrl`,
+        `Agosot`): la matriz no se detectaba como reporte, no se despivotaba, se quedaba sin
+        columna de fecha y desaparecía. Q 48.240 medidos, con el síntoma de siempre — utilidad
+        neta igual a utilidad bruta. ⚠️ **La tolerancia es CONTEXTUAL, no por etiqueta suelta**,
+        y el test existente encontró el falso positivo antes de que saliera: `Marca` está a una
+        edición de `march` y una concesionaria tiene esa columna, igual que `Marco` de `marzo`,
+        `Julia` de `julio` y `Género` de `enero`. Hacen falta **≥1 mes exacto y ≥2
+        casi-coincidencias EN EL MISMO ENCABEZADO**. Y la tabla de meses pasó a vivir **una sola
+        vez** (`mesPorNombre` en `sheet-shape`, consumida por `mesDeEncabezado`): este archivo
+        ya advertía que las dos copias tenían que coincidir, y mantenerlas a mano ES el modo de
+        fallo que la advertencia describe.
+     5. **`asDate` tenía TRES copias de "esta fecha existe" y cada una traía la guarda que a
+        las otras les faltaba.** El camino de barras validaba el desbordamiento y no el año
+        (`15/07/1823` entraba tal cual); el ISO validaba el año y no el desbordamiento, porque
+        delegaba en `new Date` (`2026-02-31` salía como **2026-03-03**); el de mes en palabras
+        tenía las dos, duplicadas. Las dos fallas **MUEVEN la fila de período** sin que nada
+        falle, que es el daño más caro de esta casa. Ahora las dos reglas viven solo en
+        `fechaValida`. Lo destapó la MUTACIÓN: desactivar la guarda en una copia no ponía en
+        rojo el test que cubre a la otra, o sea que el test medía código distinto del que yo
+        creía estar tocando.
+     6. **`preciounitario` salió de la firma `existencias`.** Es la columna de una LÍNEA DE
+        DOCUMENTO, no de una lista de stock: `LineasOC` (`No. Orden · Producto · Cantidad ·
+        Precio Unitario · Total`) cumplía la firma entera y se iba a INVENTARIO. No duplicaba
+        dinero, pero metía 36 artículos inventados **y la sacaba de `vivas`** — o sea que el
+        dedup cabecera/detalle, que existe exactamente para ese par, nunca llegaba a verla. Un
+        filtro que se equivoca temprano apaga a todos los de abajo. La premisa que falla es la
+        que justifica la firma ("un movimiento siempre tiene fecha por fila"): una LÍNEA no la
+        tiene, la hereda de su cabecera. Los dos casos reales que motivaron la firma no
+        necesitan esa palabra (ferretería: `Costo Unitario` + `Precio Lista`; boutique:
+        `Costo Unitario` + `Precio Venta`).
+     7. ⚠️ **HUECO CONOCIDO, medido y NO cerrado: un inventario serializado que ninguna otra
+        hoja referencia entra como GASTO.** `analizarEsquema` solo reconoce una tabla de
+        entidades si otra hoja la referencia; cuando la facturación no nombra el VIN, nada la
+        apunta y los vehículos en stock llegan al modelo. Medido: **Q 1.864.500** de egreso que
+        nadie desembolsó. Es CarsGT (Q 16 M en producción) por la puerta que la señal
+        estructural no cubre. **El arreglo natural se implementó y se REVIRTIÓ**: dejar de
+        exigir la referencia (clave única + no referencia a nadie + nadie la referencia) tiene
+        un contraejemplo exacto en un test que ya existía —`Ventas` (`ID Venta · Monto`) y
+        `Gastos` (`ID Gasto · Monto`) cumplen las tres y pasarían a inventario—, y el veto por
+        contraparte no salva a una hoja de mostrador que no nombra al cliente. Perder la
+        contabilidad de un cliente en silencio es peor que mostrarle un gasto de más, que al
+        menos se ve. Cuando aparezca un archivo real así, el camino es una firma de
+        EXISTENCIAS SERIALIZADAS (clave única + atributos del artículo + costo + **sin** columna
+        de cantidad), no aflojar el esquema del libro. Está fijado con su cifra en
+        `hostiles-e2e.test.ts` para que no se vuelva invisible.
   2. **Forma de hoja** (`lib/sheet-shape.ts`): distingue una TABLA de un REPORTE. Cinco señales
      geométricas (encabezado con huecos + celdas vacías, ancho >40, columnas que son meses,
      nombres de columna repetidos). Los reportes con bloques a lo ancho —una fila = un cliente
