@@ -40,7 +40,9 @@ for (const fabricar of LIBROS) {
     });
 
     test('van a revisión exactamente las filas que no se pueden leer', () => {
-      expect(`${c.marcadas} (${[...c.motivos]})`).toBe(`${libro.marcadas ?? 0} (${[...c.motivos]})`);
+      expect(`${c.marcadas} (${[...c.motivos]})`).toBe(
+        `${libro.marcadas ?? 0} (${[...c.motivos]})`,
+      );
     });
 
     if (libro.destinos) {

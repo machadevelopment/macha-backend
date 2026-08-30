@@ -1,11 +1,5 @@
 import { asNumber as asNumeroDeCelda } from '../row-assembly';
-import {
-  dobleDeModelo,
-  serial,
-  type LibroHostil,
-  type Tipo,
-  type Verdad,
-} from './pipeline-doble';
+import { dobleDeModelo, serial, type LibroHostil, type Tipo, type Verdad } from './pipeline-doble';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -185,7 +179,8 @@ function libroMontosSucios(): LibroHostil {
   const escrituras: ((n: number) => string)[] = [
     (n) => `Q ${n.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
     (n) => `${n.toFixed(2).replace('.', ',')}`,
-    (n) => ` ${n.toLocaleString('en-US', { minimumFractionDigits: 2 })} Q `,
+    // El espacio DURO (\u00a0) es a propósito: es lo que Excel deja al pegar desde la web.
+    (n) => ` ${n.toLocaleString('en-US', { minimumFractionDigits: 2 })}\u00a0Q `,
     (n) => `GTQ${n.toFixed(2)}`,
     (n) => n.toFixed(2),
   ];
@@ -518,7 +513,11 @@ function libroDiario(): LibroHostil {
       const texto = fila.map((c) => String(c ?? '').toUpperCase());
       if (texto.some((t) => t.includes('SALDO'))) return null;
       const cat = String(fila[columns.productCategory ?? -1] ?? '').toLowerCase();
-      const t: Tipo = cat.startsWith('venta') ? 'revenue' : cat.startsWith('mercade') ? 'cogs' : 'opex';
+      const t: Tipo = cat.startsWith('venta')
+        ? 'revenue'
+        : cat.startsWith('mercade')
+          ? 'cogs'
+          : 'opex';
       return { e: 'transaction', t, c: cat || 'general' };
     },
     destinos: { LibroDiario: 'movimientos:24' },

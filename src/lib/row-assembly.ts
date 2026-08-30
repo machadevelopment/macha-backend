@@ -482,11 +482,7 @@ export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | n
 
   const parsed = new Date(s);
   if (Number.isNaN(parsed.getTime())) return null;
-  return fechaValida(
-    parsed.getUTCFullYear(),
-    parsed.getUTCMonth() + 1,
-    parsed.getUTCDate(),
-  );
+  return fechaValida(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, parsed.getUTCDate());
 }
 
 /**

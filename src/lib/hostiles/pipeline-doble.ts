@@ -84,6 +84,12 @@ export interface Corrida {
   motivos: Map<string, number>;
   /** Filas de ledger producidas por entidad, para ver una expansión inesperada. */
   entidades: { transaction: number; invoice: number; bill: number };
+  /**
+   * Lo que el pipeline produjo, hoja por hoja, para que el test de integración lo inserte y
+   * lo promueva de verdad. Sin esto habría que reimplementar el pipeline del lado de la base,
+   * que es exactamente la duplicación que este archivo existe para evitar.
+   */
+  porHoja: { nombre: string; filas: unknown[][]; columnas: ColumnMap; clasificadas: unknown[] }[];
 }
 
 /* ═══════════════════ EL MAPA DE COLUMNAS QUE DARÍA UN BUEN MODELO ═══════════════════ */
@@ -312,6 +318,7 @@ export function correrPipeline(libro: LibroHostil): Corrida {
   const destino = new Map<string, string>();
   const motivos = new Map<string, number>();
   const cuenta = { transaction: 0, invoice: 0, bill: 0 };
+  const porHoja: Corrida['porHoja'] = [];
   let marcadas = 0;
 
   for (const nombre of wb.SheetNames) {
@@ -377,6 +384,8 @@ export function correrPipeline(libro: LibroHostil): Corrida {
       columns,
     );
 
+    porHoja.push({ nombre, filas: datos, columnas: columns, clasificadas });
+
     let movimientos = 0;
     for (const fila of clasificadas) {
       cuenta[fila.targetEntity]++;
@@ -396,7 +405,7 @@ export function correrPipeline(libro: LibroHostil): Corrida {
     destino.set(nombre, `movimientos:${movimientos}${despivotada ? ':despivotada' : ''}`);
   }
 
-  return { totales, destino, marcadas, motivos, entidades: cuenta };
+  return { totales, destino, marcadas, motivos, entidades: cuenta, porHoja };
 }
 
 export function aWorkbook(libro: LibroHostil): XLSX.WorkBook {
