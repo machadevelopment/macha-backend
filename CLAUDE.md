@@ -382,6 +382,20 @@ Conventions & gotchas:
   artículos en pantalla son, por construcción, los de la primera. `compensarInventario` dejaba
   la existencia en cero y el listado filtra por `deleted_at` y **nunca por cantidad**, así que
   el artículo seguía ahí. Medido contra Postgres real: 1 artículo donde debía haber 0.
+  ⚠️ **Y hubo DOS causas más, encontradas auditando producción antes de limpiar** (2026-08-30):
+  (a) **el artículo que nace en CERO no tiene movimiento** —`recordMovement` rechaza cantidad 0,
+  con razón— así que sin `inventory_items.document_id` (migración `0038`) no quedaba rastro de
+  qué carga lo creó: invisible para el revert Y protegido por la limpieza. 240 vehículos
+  medidos. La columna se agregó en vez de relajar `recordMovement` porque el contrato "un
+  movimiento mueve algo" es correcto y lo usa todo el ledger; lo que faltaba era un ATRIBUTO del
+  artículo, no un hecho del inventario. (b) **dos reverts a la vez compensaban dos veces**, y
+  eso deja el inventario en NEGATIVO: 2.460 artículos en −1. Las dos defensas que había —el
+  endpoint sale si ya está `reverted`, la compensación no escribe si el neto es cero— leen un
+  estado que la primera transacción **todavía no commiteó**, y con miles de artículos esa
+  transacción tarda más que el segundo clic. `FOR UPDATE` sobre la fila del documento, ANTES de
+  compensar, es lo único que cierra esa ventana; es la misma reserva que `promoteDocument` ya
+  usaba. **La ventana se ensancha con el tamaño del inventario del cliente**, así que cualquier
+  trabajo nuevo dentro de `deshacerFilas` la agranda.
   **El criterio NO es "la creó esta carga"**, y ahí está todo: un artículo que la carga 1 creó y
   que alguien ajustó A MANO después no puede desaparecer porque se revierta la carga 1 — ese
   conteo es trabajo de una persona. Se da de baja solo si la existencia quedó en cero **Y todos
