@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, sql as rawSql } from 'drizzle-orm';
 import { registerWorker, enqueue, QUEUES } from '@/queue';
 import { withCompanyScope } from '@/lib/db-scope';
 import {
@@ -9,7 +9,15 @@ import {
   type ReglaAprendida,
 } from '@/lib/category-dictionary';
 import { downloadObject } from '@/lib/s3';
-import { documents, documentIngestBatches, companies, ingestedRows } from '@/db/schema';
+import {
+  documents,
+  documentIngestBatches,
+  companies,
+  ingestedRows,
+  transactions,
+  invoices,
+  bills,
+} from '@/db/schema';
 import { intakeConfig } from '@/config/intake';
 import { INTAKE_MESSAGES, summarizeUnusableReasons } from '@/lib/intake-messages';
 import {
@@ -31,6 +39,7 @@ import {
 } from '@/lib/sheet-consensus';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { medirFilas } from '@/lib/reconciliation';
+import { evaluarCuadre, hayDescuadre, type LeidoDelArchivo } from '@/lib/cuadre';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
@@ -396,6 +405,11 @@ export function startExcelIngestWorker(): Promise<string> {
          */
         let lotesPorDiccionario = 0;
         let filasPorDiccionario = 0;
+
+        /** Lo que el archivo traía, por moneda. Alimenta el cuadre de después de promover. */
+        const leidoDelArchivo = new Map<string, LeidoDelArchivo>();
+        /** Filas del archivo que se midieron: el denominador de la expansión. */
+        let filasMedidas = 0;
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -1954,6 +1968,30 @@ export function startExcelIngestWorker(): Promise<string> {
               : {}),
           });
 
+          /*
+           * Se acumula para el CUADRE de abajo: lo leído del archivo, por moneda, sumando
+           * monto y costo (el costo produce su propia fila en el ledger). Ver `lib/cuadre.ts`.
+           */
+          for (const m of medicion.montos) {
+            const previo = leidoDelArchivo.get(m.moneda) ?? {
+              moneda: m.moneda,
+              monto: 0,
+              costo: 0,
+            };
+            previo.monto += m.total;
+            leidoDelArchivo.set(m.moneda, previo);
+          }
+          for (const c of medicion.costos) {
+            const previo = leidoDelArchivo.get(c.moneda) ?? {
+              moneda: c.moneda,
+              monto: 0,
+              costo: 0,
+            };
+            previo.costo += c.total;
+            leidoDelArchivo.set(c.moneda, previo);
+          }
+          filasMedidas += medicion.filasEnviadas;
+
           if (medicion.montos.length > 0) {
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}": ` +
@@ -2110,6 +2148,120 @@ export function startExcelIngestWorker(): Promise<string> {
           console.error(
             `[excel-ingest] company=${companyId} document=${documentId} no se pudo guardar el ` +
               `resumen de lectura (la carga sigue):`,
+            err,
+          );
+        });
+
+        /*
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         * EL CUADRE: ¿LO QUE ATERRIZÓ SE PARECE A LO QUE EL ARCHIVO DECÍA? (2026-08-30)
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         *
+         * `medirFilas` ya escribía cuánto dinero traía cada hoja, y **nadie lo comparaba nunca
+         * contra el resultado**: el lazo estaba abierto. Este bloque lo cierra.
+         *
+         * Importa más que cualquier test y por un motivo que costó siete reportes entender:
+         * los tests cubren archivos que YA VIMOS. Esto es lo único que funciona sobre el que
+         * va a subir el próximo cliente.
+         *
+         * ⚠️ **Va DESPUÉS de promover**, que es cuando existe lo aterrizado, y por eso está
+         * acá y no junto al resumen de lectura.
+         *
+         * **No bloquea nada, y es decisión.** Un falso positivo que frene la promoción deja al
+         * cliente sin su contabilidad por un chequeo que se equivocó — peor que el problema que
+         * viene a resolver. Lo que cambia desde ya es que un descuadre queda ESCRITO: cuando un
+         * cliente reporte "esto no cuadra", la respuesta ya está registrada en vez de haber que
+         * reconstruirla a mano durante horas, que es exactamente lo que pasó las siete veces.
+         *
+         * Un fallo acá NO tumba la carga: la contabilidad ya está promovida y correcta o no
+         * según el pipeline; lo que se pierde es el diagnóstico.
+         */
+        await withCompanyScope(companyId, async (db) => {
+          if (leidoDelArchivo.size === 0) return;
+          const [t, i, b] = await Promise.all([
+            db
+              .select({
+                moneda: transactions.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${transactions.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(transactions)
+              .where(
+                and(
+                  eq(transactions.companyId, companyId),
+                  eq(transactions.documentId, documentId),
+                  isNull(transactions.deletedAt),
+                ),
+              )
+              .groupBy(transactions.originalCurrency),
+            db
+              .select({
+                moneda: invoices.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${invoices.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(invoices)
+              .where(
+                and(
+                  eq(invoices.companyId, companyId),
+                  eq(invoices.documentId, documentId),
+                  isNull(invoices.deletedAt),
+                ),
+              )
+              .groupBy(invoices.originalCurrency),
+            db
+              .select({
+                moneda: bills.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${bills.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(bills)
+              .where(
+                and(
+                  eq(bills.companyId, companyId),
+                  eq(bills.documentId, documentId),
+                  isNull(bills.deletedAt),
+                ),
+              )
+              .groupBy(bills.originalCurrency),
+          ]);
+
+          const porMoneda = new Map<string, number>();
+          let filasEnElLedger = 0;
+          for (const fila of [...t, ...i, ...b]) {
+            porMoneda.set(fila.moneda, (porMoneda.get(fila.moneda) ?? 0) + Number(fila.monto));
+            filasEnElLedger += Number(fila.filas);
+          }
+
+          /*
+           * La EXPANSIÓN se calcula, no se adivina: el pipeline sabe cuántas filas de ledger
+           * produjo por cada fila del archivo porque él mismo las creó. Es lo que convierte la
+           * cota superior del cuadre de una constante imposible de elegir en un cálculo. Ver
+           * el bloque de `MARGEN` en `lib/cuadre.ts`.
+           */
+          const expansion = filasMedidas > 0 ? filasEnElLedger / filasMedidas : 1;
+          const cuadres = evaluarCuadre(
+            [...leidoDelArchivo.values()],
+            [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto })),
+            expansion,
+          );
+
+          for (const c of cuadres) {
+            const linea = `[cuadre] company=${companyId} document=${documentId} ${c.veredicto}: ${c.detalle}`;
+            if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos') console.info(linea);
+            else console.warn(linea);
+          }
+          if (hayDescuadre(cuadres)) {
+            console.warn(
+              `[cuadre] company=${companyId} document=${documentId} DESCUADRE: lo que aterrizó ` +
+                `no se parece a lo que el archivo traía. Es la señal más temprana de una hoja ` +
+                `perdida o contada dos veces.`,
+            );
+          }
+        }).catch((err) => {
+          console.error(
+            `[cuadre] company=${companyId} document=${documentId} no se pudo evaluar (la carga ` +
+              `sigue, la contabilidad no se toca):`,
             err,
           );
         });
