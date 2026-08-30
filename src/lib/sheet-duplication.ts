@@ -69,6 +69,26 @@ export interface HojaParaComparar {
   /** Filas con el encabezado YA localizado en la posición 0. */
   rows: unknown[][];
   /**
+   * Los CONCEPTOS de una hoja que salió de despivotar una matriz por período.
+   *
+   * ═══ POR QUÉ HACE FALTA: EL CHEQUEO DE ENCABEZADOS SE VUELVE VACÍO ═══
+   *
+   * Exigir que dos hojas compartan un encabezado es la condición que evita el falso positivo
+   * caro: dos hojas sin nada en común pueden sumar parecido por casualidad, y descartar una
+   * perdería contabilidad real. Pero una hoja despivotada tiene encabezados **sintéticos** —
+   * siempre `Fecha · Concepto · Monto`—, así que DOS despivotadas comparten los tres por
+   * construcción y el chequeo deja de aportar evidencia. Quedan comparándose solo por la suma,
+   * que es exactamente lo que la condición vino a impedir.
+   *
+   * Encontrado con dos matrices de gastos sin relación —una trimestral y una mensual— cuyos
+   * totales coincidieron: una se descartó entera.
+   *
+   * Cuando las DOS traen conceptos, el solape se mide sobre ellos: dos matrices de los mismos
+   * gastos nombran los mismos rubros, y dos de gastos distintos no. Si solo una es despivotada,
+   * o ninguna, se sigue comparando por encabezados como siempre.
+   */
+  conceptos?: ReadonlySet<string>;
+  /**
    * `false` si OTRO filtro del pipeline va a descartar esta hoja igual.
    *
    * Una hoja así NUNCA puede ser la conservada: ver el bloque "LA CONSERVADA TIENE QUE
@@ -256,7 +276,17 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
         b.sumas.some((sb) => Math.abs(sa - sb) / Math.max(sa, sb) <= 0.01),
       );
       if (!coinciden) continue;
-      if (encabezadosCompartidos(a.rows, b.rows) === 0) continue;
+      /*
+       * Entre dos hojas DESPIVOTADAS el encabezado no dice nada (ver `conceptos`): se compara
+       * lo único que las distingue, que son los rubros que nombran.
+       */
+      if (a.conceptos && b.conceptos) {
+        const comunes = [...a.conceptos].filter((c) => b.conceptos!.has(c)).length;
+        const menor = Math.min(a.conceptos.size, b.conceptos.size);
+        if (menor === 0 || comunes / menor < 0.5) continue;
+      } else if (encabezadosCompartidos(a.rows, b.rows) === 0) {
+        continue;
+      }
 
       /*
        * SE CONSERVA LA QUE SE BASTA SOLA. Ver el bloque de `seBastaSola`: la autosuficiencia

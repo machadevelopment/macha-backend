@@ -249,8 +249,41 @@ export function despivotarReporte(
   const clavesDeMes = new Set(columnasDeMes.map((c) => `${c.anio}-${c.mes}`));
   if (clavesDeMes.size !== columnasDeMes.length) return null;
 
+  const indicesDeMesPreliminar = new Set(columnasDeMes.map((c) => c.i));
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * SI LA HOJA YA TIENE COLUMNA DE FECHA, ES UNA TABLA Y NO UNA MATRIZ (2026-08-30)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Esta guarda es lo que permite llamar a `despivotarReporte` SIN CONDICIONES sobre cualquier
+   * hoja, y esa es la razón de existir del bloque.
+   *
+   * Antes el despivotado solo se intentaba cuando otro filtro estaba por descartar la hoja, y
+   * ahí se colaba un caso: una matriz PEQUEÑA (dos o tres rubros) no llega a las cuatro
+   * columnas de período que exige el detector de reportes NI a las cinco filas que exige
+   * `noPuedeProducirMovimientos`, así que ningún filtro la tocaba, nadie intentaba
+   * despivotarla, y terminaba en el modelo sin columna de fecha: cero movimientos, en
+   * silencio. Medido con una matriz trimestral de dos rubros y una semestral de dos.
+   *
+   * Depender de "algún otro filtro la iba a descartar" es frágil por construcción — hay que
+   * enumerar los filtros y sus umbrales. Que la propia función sepa decir "esto ya es una
+   * tabla" la vuelve segura de llamar siempre, y el llamador deja de tener que razonar.
+   *
+   * Un movimiento tiene su fecha en la fila; una matriz la tiene en el ENCABEZADO. Si alguna
+   * columna que no es de período trae fechas de verdad, la hoja es lo primero.
+   */
+  const ancho = Math.max(encabezado.length, ...datos.map((f) => f.length));
+  for (let c = 0; c < ancho; c++) {
+    if (indicesDeMesPreliminar.has(c)) continue;
+    const valores = datos.map((f) => f[c]).filter((v) => v !== null && v !== undefined && v !== '');
+    if (valores.length === 0) continue;
+    const fechas = valores.filter((v) => asDate(v) !== null).length;
+    if (fechas >= valores.length * 0.8) return null;
+  }
+
   /* ── 2. La columna de CONCEPTO: la primera de texto que no sea un mes ── */
-  const indicesDeMes = new Set(columnasDeMes.map((c) => c.i));
+  const indicesDeMes = indicesDeMesPreliminar;
   let colConcepto = -1;
   for (let i = 0; i < Math.max(encabezado.length, 4); i++) {
     if (indicesDeMes.has(i)) continue;
