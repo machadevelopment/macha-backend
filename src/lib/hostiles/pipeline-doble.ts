@@ -439,9 +439,16 @@ export function dobleDeModelo(config: {
     if (texto.some((c) => /^\s*(total|totales|sub\s*total|suma|gran\s+total)\b/i.test(c))) {
       return null;
     }
-    const monto = columns.amount === null ? null : asNumber(fila[columns.amount]);
+    /*
+     * Una hoja SIN columna de dinero no registra hechos económicos: una hoja de notas, un
+     * instructivo. El modelo lo ve de un vistazo y responde `skip`. Es distinto de una CELDA
+     * ilegible (`#REF!`) dentro de una hoja que sí tiene columna de monto: esa fila el modelo
+     * la clasifica igual —es claramente una venta— y el código la marca `invalid_amount`, que
+     * es lo correcto: visible en la cola, no descartada en silencio.
+     */
+    if (columns.amount === null) return null;
+    const monto = asNumber(fila[columns.amount]);
     const fecha = columns.date === null ? null : asDate(fila[columns.date]);
-    // Sin ninguna de las dos no hay hecho que registrar; el modelo lo declara `skip`.
     if (monto === null && fecha === null) return null;
 
     const declarado = tipos[hoja];

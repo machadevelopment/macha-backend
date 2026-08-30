@@ -305,6 +305,38 @@ function MES_EN_PALABRAS(s: string): string | null {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LAS DOS GUARDAS DE UNA FECHA VIVEN JUNTAS, PORQUE CADA CAMINO TENÍA SOLO UNA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `asDate` tiene dos caminos de texto y cada uno traía la guarda que al otro le faltaba:
+ *
+ *   · el de BARRAS validaba el desbordamiento (`31/02/2026` → `null`, correcto) y **no**
+ *     miraba el año, así que `15/07/1823` entraba tal cual;
+ *   · el ISO validaba el año (1990-2100) y **no** el desbordamiento, porque delegaba en
+ *     `new Date(s)`: `2026-02-31` salía como **2026-03-03**.
+ *
+ * Los dos fallos son el mismo daño y es el peor de esta casa: no borran plata ni la inventan,
+ * la MUEVEN DE PERÍODO. Una fila de febrero aparece en marzo, o desaparece de todo filtro del
+ * dashboard por estar fechada dos siglos atrás, y nada falla — la fecha resultante es válida.
+ *
+ * El rango es de plausibilidad de NEGOCIO, el mismo del camino de seriales: una PYME no
+ * facturó en 1823 ni va a facturar en 2200. Un año fuera de rango casi siempre es un dígito
+ * mal tecleado, y la fila tiene que ir a revisión en vez de entrar mal fechada.
+ */
+const ANIO_MIN = 1990;
+const ANIO_MAX = 2100;
+
+function fechaValida(anio: number, mes: number, dia: number): string | null {
+  if (anio < ANIO_MIN || anio > ANIO_MAX) return null;
+  if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null;
+  const d = new Date(Date.UTC(anio, mes - 1, dia));
+  // Un 31 de febrero desborda al mes siguiente: eso no es una fecha, es un dato malo.
+  if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | null {
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -371,11 +403,7 @@ export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | n
     const b = Number(conBarras[2]);
     const anio = Number(conBarras[3]);
     const [dia, mes] = orden === 'mdy' ? [b, a] : [a, b];
-    if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null;
-    const d = new Date(Date.UTC(anio, mes - 1, dia));
-    // Un 31 de febrero desborda al mes siguiente: eso no es una fecha, es un dato malo.
-    if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
-    return d.toISOString().slice(0, 10);
+    return fechaValida(anio, mes, dia);
   }
 
   /*
@@ -446,16 +474,23 @@ export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | n
   const conMesEnPalabras = MES_EN_PALABRAS(s);
   if (conMesEnPalabras) return conMesEnPalabras;
 
+  /*
+   * Año primero: `2026-02-14`, `2026/02/14`, con hora opcional. Se descompone acá en vez de
+   * delegar en `new Date(s)` justamente por el desbordamiento — `new Date("2026-02-31")`
+   * devuelve el 3 de marzo sin avisar, y eso es una fila que cambia de mes en el dashboard.
+   */
+  const anioPrimero = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T ].*)?$/.exec(s);
+  if (anioPrimero) {
+    return fechaValida(Number(anioPrimero[1]), Number(anioPrimero[2]), Number(anioPrimero[3]));
+  }
+
   const parsed = new Date(s);
   if (Number.isNaN(parsed.getTime())) return null;
-  /*
-   * Rango de plausibilidad de negocio, igual que en el camino numérico: un movimiento de una
-   * PYME no ocurrió en 1901 ni va a ocurrir en 2200. Acota lo que un formato reconocido pero
-   * mal escrito puede producir.
-   */
-  const anio = parsed.getUTCFullYear();
-  if (anio < 1990 || anio > 2100) return null;
-  return parsed.toISOString().slice(0, 10);
+  return fechaValida(
+    parsed.getUTCFullYear(),
+    parsed.getUTCMonth() + 1,
+    parsed.getUTCDate(),
+  );
 }
 
 /**

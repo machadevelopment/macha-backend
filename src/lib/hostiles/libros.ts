@@ -1,4 +1,11 @@
-import { dobleDeModelo, serial, type LibroHostil, type Verdad } from './pipeline-doble';
+import { asNumber as asNumeroDeCelda } from '../row-assembly';
+import {
+  dobleDeModelo,
+  serial,
+  type LibroHostil,
+  type Tipo,
+  type Verdad,
+} from './pipeline-doble';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -235,8 +242,451 @@ function libroMontosSucios(): LibroHostil {
   };
 }
 
+/* ═══════════════════════ 4. DOS TABLAS EN LA MISMA HOJA ═══════════════════════ */
+
+function libroDosTablas(): LibroHostil {
+  const { v, mas } = contador();
+
+  /*
+   * Ventas arriba, tres filas en blanco, y debajo OTRA tabla con su propio encabezado. Es
+   * como escribe una persona que no piensa en hojas separadas, y el encabezado de la segunda
+   * queda a mitad de la hoja donde ningún detector lo busca.
+   */
+  const mezclada: unknown[][] = [['Fecha', 'Cliente', 'Concepto', 'Monto', 'Moneda']];
+  for (let m = 1; m <= 6; m++) {
+    for (let k = 0; k < 5; k++) {
+      const monto = 1500 + m * 80 + k * 20;
+      mas('revenue', monto);
+      mezclada.push([
+        serial(`2026-${String(m).padStart(2, '0')}-${String(3 + k * 4).padStart(2, '0')}`),
+        'Óptica Visión Clara',
+        'Venta de armazones',
+        monto,
+        'GTQ',
+      ]);
+    }
+  }
+  mezclada.push([], [], []);
+  mezclada.push(['Fecha', 'Proveedor', 'Concepto', 'Monto', 'Moneda']);
+  for (let m = 1; m <= 6; m++) {
+    const monto = 2200 + m * 45;
+    // La segunda tabla es de COMPRAS y hoy no hay forma de que el pipeline lo sepa: sus filas
+    // quedan bajo el encabezado de la primera. Se declara `cogs` para medir si al menos el
+    // dinero llega — perder estas filas dejaría el resultado del período inflado.
+    mas('cogs', monto);
+    mezclada.push([
+      serial(`2026-${String(m).padStart(2, '0')}-25`),
+      'Lentes del Norte',
+      'Compra de lentes',
+      monto,
+      'GTQ',
+    ]);
+  }
+
+  return {
+    archivo: '04-dos-tablas-en-una-hoja.xlsx',
+    titulo: 'Dos tablas en la misma hoja',
+    rompe:
+      'Ventas arriba, tres filas en blanco, y debajo una segunda tabla de compras con su ' +
+      'propio encabezado a mitad de hoja. Ningún paso del pipeline busca un encabezado que no ' +
+      'esté arriba, así que la fila de encabezado de la segunda tabla entra como si fuera un ' +
+      'movimiento.',
+    hojas: [['Movimientos', mezclada]],
+    verdad: v,
+    clasificar: ({ fila, columns }) => {
+      // El modelo SÍ ve el cambio de tabla: la fila que repite los nombres de columna es un
+      // encabezado y lo declara `skip`; las de abajo son compras porque nombran proveedor.
+      const texto = fila.map((c) => String(c ?? '').toLowerCase());
+      if (texto.includes('fecha') && texto.includes('monto')) return null;
+      const esCompra = texto.some((t) => t.includes('compra'));
+      const monto = columns.amount === null ? null : asNumeroDeCelda(fila[columns.amount]);
+      if (monto === null) return null;
+      return { e: 'transaction', t: esCompra ? 'cogs' : 'revenue', c: esCompra ? 'compras' : 'ventas' }; // prettier-ignore
+    },
+    destinos: { Movimientos: 'movimientos:36' },
+  };
+}
+
+/* ═══════════════════════ 5. NOMBRES DE MES MAL ESCRITOS ═══════════════════════ */
+
+function libroMesesConTypo(): LibroHostil {
+  const { v, mas } = contador();
+
+  const ventas: unknown[][] = [['Fecha', 'Cliente', 'Producto', 'Monto', 'Moneda']];
+  for (let m = 1; m <= 8; m++) {
+    for (let k = 0; k < 4; k++) {
+      const monto = 1800 + m * 55 + k * 30;
+      mas('revenue', monto);
+      ventas.push([
+        serial(`2026-${String(m).padStart(2, '0')}-${String(7 + k * 5).padStart(2, '0')}`),
+        'Ferretería Central',
+        'Cemento saco 42.5 kg',
+        monto,
+        'GTQ',
+      ]);
+    }
+  }
+
+  /*
+   * Matriz de gastos con los meses MAL ESCRITOS. Es la única fuente de estos gastos: si
+   * `mesDeEncabezado` no los reconoce, la hoja no se despivota, se queda sin columna de fecha
+   * y desaparece entera — el cliente ve utilidad neta igual a utilidad bruta.
+   */
+  const MAL = ['Enrero', 'Febrro', 'Marzoo', 'Abrl', 'Mayo', 'Juno', 'Julioo', 'Agosot'];
+  const matriz: unknown[][] = [['Concepto', ...MAL, 'Total']];
+  for (const [concepto, base] of [
+    ['Alquiler de bodega', 4200],
+    ['Combustible de reparto', 1350],
+    ['Papelería y limpieza', 480],
+  ] as [string, number][]) {
+    matriz.push([concepto, ...MAL.map(() => base), base * 8]);
+    for (let i = 0; i < 8; i++) mas('opex', base);
+  }
+  matriz.push(['TOTAL', ...MAL.map(() => 6030), 48_240]);
+
+  return {
+    archivo: '05-meses-mal-escritos.xlsx',
+    titulo: 'Nombres de mes mal escritos',
+    rompe:
+      'La matriz de gastos tiene los meses escritos a mano y con typos (Enrero, Febrro, ' +
+      'Abrl, Agosot). Sin reconocerlos la hoja no se despivota, se queda sin fecha y ' +
+      'desaparece: el cliente ve utilidad neta = utilidad bruta, o sea que el producto le ' +
+      'dice que operar su negocio no cuesta nada.',
+    hojas: [
+      ['Ventas', ventas],
+      ['Gastos Mensuales', matriz],
+    ],
+    verdad: v,
+    clasificar: dobleDeModelo({ tipos: { Ventas: 'revenue', 'Gastos Mensuales': 'opex' } }),
+    destinos: { Ventas: 'movimientos:32', 'Gastos Mensuales': 'movimientos:24:despivotada' },
+  };
+}
+
+/* ═══════════════════════════ 6. FECHAS IMPOSIBLES ═══════════════════════════ */
+
+function libroFechasImposibles(): LibroHostil {
+  const { v, mas } = contador();
+
+  const filas: unknown[][] = [['Fecha', 'Cliente', 'Concepto', 'Monto', 'Moneda']];
+  /* Ocho formas legítimas de escribir una fecha, todas en la misma columna. */
+  const formas: ((iso: string) => unknown)[] = [
+    (iso) => serial(iso),
+    (iso) => iso,
+    (iso) => `${iso.slice(8)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}`,
+    (iso) => `${Number(iso.slice(8))} de ${MES_ES[Number(iso.slice(5, 7)) - 1]} de ${iso.slice(0, 4)}`, // prettier-ignore
+    (iso) => `${iso.slice(8)}-${MES_ES[Number(iso.slice(5, 7)) - 1]!.slice(0, 3)}-${iso.slice(2, 4)}`, // prettier-ignore
+    (iso) => `${iso.slice(8)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`,
+    (iso) => new Date(`${iso}T00:00:00Z`),
+    (iso) => `${iso.slice(0, 4)}/${iso.slice(5, 7)}/${iso.slice(8)}`,
+  ];
+  let k = 0;
+  for (let m = 1; m <= 8; m++) {
+    for (let j = 0; j < 4; j++) {
+      const monto = 1100 + m * 35 + j * 12;
+      mas('revenue', monto);
+      const iso = `2026-${String(m).padStart(2, '0')}-${String(2 + j * 6).padStart(2, '0')}`;
+      filas.push([formas[k++ % formas.length]!(iso), 'Librería El Saber', 'Venta', monto, 'GTQ']);
+    }
+  }
+  /* Cuatro fechas que NO existen o no son plausibles: a revisión, nunca inventadas. */
+  for (const mala of ['31/02/2026', '2026-13-01', '15/07/1823', 'Sin fecha']) {
+    filas.push([mala, 'Librería El Saber', 'Venta', 500, 'GTQ']);
+  }
+
+  return {
+    archivo: '06-fechas-imposibles.xlsx',
+    titulo: 'Ocho formas de fecha y cuatro imposibles',
+    rompe:
+      'Serial, ISO, DD/MM, español completo, abreviado, con puntos, objeto Date y YYYY/MM/DD ' +
+      'en la MISMA columna, más un 31 de febrero, un mes 13, un año 1823 y un "Sin fecha". ' +
+      'Leer mal una fecha no borra plata: la MUEVE DE MES, que es peor porque no se ve.',
+    hojas: [['Ventas', filas]],
+    verdad: v,
+    clasificar: dobleDeModelo({ tipos: { Ventas: 'revenue' } }),
+    destinos: { Ventas: 'movimientos:32' },
+    marcadas: 4,
+  };
+}
+
+/* ═════════════ 7. CABECERA Y DETALLE, MÁS UNA COINCIDENCIA POR AZAR ═════════════ */
+
+function libroCabeceraDetalle(): LibroHostil {
+  const { v, mas } = contador();
+
+  /* Órdenes de compra (cabecera) y sus líneas: la MISMA plata a dos granularidades. */
+  const cabecera: unknown[][] = [['Fecha', 'No. Orden', 'Proveedor', 'Total', 'Moneda']];
+  const detalle: unknown[][] = [['No. Orden', 'Producto', 'Cantidad', 'Precio Unitario', 'Total']];
+  for (let i = 0; i < 12; i++) {
+    const oc = `OC-2026-${String(100 + i)}`;
+    const lineas = [3200 + i * 40, 1800 + i * 25, 950 + i * 15];
+    const total = lineas.reduce((a, b) => a + b, 0);
+    mas('cogs', total);
+    cabecera.push([
+      serial(`2026-0${(i % 8) + 1}-${String(5 + (i % 20)).padStart(2, '0')}`),
+      oc,
+      'Distribuidora Mayorista',
+      total,
+      'GTQ',
+    ]);
+    for (const [j, linea] of lineas.entries()) {
+      detalle.push([oc, `Artículo ${j + 1}`, 1, linea, linea]);
+    }
+  }
+
+  /*
+   * Y una hoja de gastos que suma EXACTAMENTE lo mismo que las órdenes, por azar. No comparte
+   * ninguna llave con ellas, así que no puede declararse duplicado: si se descarta, se pierde
+   * la contabilidad real del cliente.
+   */
+  const totalOC = v.cogs;
+  const gastos: unknown[][] = [['Fecha', 'Descripcion', 'Categoria', 'Monto', 'Moneda']];
+  const porMes = r2(totalOC / 12);
+  for (let m = 1; m <= 12; m++) {
+    const monto = m === 12 ? r2(totalOC - porMes * 11) : porMes;
+    mas('opex', monto);
+    gastos.push([
+      serial(`2026-${String(m).padStart(2, '0')}-15`),
+      'Servicio de vigilancia',
+      'Seguridad',
+      monto,
+      'GTQ',
+    ]);
+  }
+
+  return {
+    archivo: '07-cabecera-detalle.xlsx',
+    titulo: 'Cabecera, detalle y una coincidencia por azar',
+    rompe:
+      'OrdenesCompra y LineasOC son la misma plata a dos granularidades: procesar las dos ' +
+      'duplica las compras. Y la hoja de gastos suma EXACTAMENTE lo mismo por casualidad, sin ' +
+      'compartir ninguna llave: descartarla perdería contabilidad real. El dedup tiene que ' +
+      'acertar en los dos sentidos a la vez.',
+    hojas: [
+      ['OrdenesCompra', cabecera],
+      ['LineasOC', detalle],
+      ['Gastos', gastos],
+    ],
+    verdad: v,
+    clasificar: dobleDeModelo({ tipos: { OrdenesCompra: 'cogs', LineasOC: 'cogs', Gastos: 'opex' } }), // prettier-ignore
+    destinos: {
+      OrdenesCompra: 'movimientos:12',
+      LineasOC: 'descartada:duplica',
+      Gastos: 'movimientos:12',
+    },
+  };
+}
+
+/* ═══════════════ 8. UN SOLO LIBRO DIARIO CON DEBE Y HABER MEZCLADOS ═══════════════ */
+
+function libroDiario(): LibroHostil {
+  const { v, mas } = contador();
+
+  /*
+   * Ingresos y egresos en la MISMA hoja, con los egresos en negativo (convención de export
+   * muy común) y las fechas en MM/DD/YYYY con días > 12, o sea que solo `mdy` las explica.
+   */
+  const filas: unknown[][] = [
+    ['Fecha', 'Descripcion', 'Contraparte', 'Categoria', 'Monto', 'Moneda'],
+  ];
+  for (let m = 1; m <= 8; m++) {
+    const venta = 5400 + m * 120;
+    mas('revenue', venta);
+    filas.push([`${String(m).padStart(2, '0')}/17/2026`, 'Depósito por ventas del mes', 'Varios clientes', 'Ventas', venta, 'GTQ']); // prettier-ignore
+
+    const compra = 2300 + m * 60;
+    mas('cogs', compra);
+    filas.push([`${String(m).padStart(2, '0')}/19/2026`, 'Compra de mercadería', 'Mayorista Xela', 'Mercadería', -compra, 'GTQ']); // prettier-ignore
+
+    const gasto = 1400 + m * 25;
+    mas('opex', gasto);
+    filas.push([`${String(m).padStart(2, '0')}/28/2026`, 'Pago de planilla', 'Colaboradores', 'Planilla', -gasto, 'GTQ']); // prettier-ignore
+  }
+  filas.push(['', 'SALDO DEL PERIODO', '', '', 18_420, 'GTQ']);
+
+  return {
+    archivo: '08-libro-diario-mezclado.xlsx',
+    titulo: 'Un solo libro diario, egresos en negativo',
+    rompe:
+      'Ingresos, costos y gastos en la misma hoja, los egresos en negativo, y las fechas en ' +
+      'MM/DD/YYYY con todos los días arriba de 12 — leerlas como DD/MM da mes 17 y la hoja ' +
+      'entera se descarta sin dejar una fila marcada. Es la forma más común de contabilidad ' +
+      'de una PYME chica.',
+    hojas: [['LibroDiario', filas]],
+    verdad: v,
+    clasificar: ({ fila, columns }) => {
+      const texto = fila.map((c) => String(c ?? '').toUpperCase());
+      if (texto.some((t) => t.includes('SALDO'))) return null;
+      const cat = String(fila[columns.productCategory ?? -1] ?? '').toLowerCase();
+      const t: Tipo = cat.startsWith('venta') ? 'revenue' : cat.startsWith('mercade') ? 'cogs' : 'opex';
+      return { e: 'transaction', t, c: cat || 'general' };
+    },
+    destinos: { LibroDiario: 'movimientos:24' },
+  };
+}
+
+/* ═════════════════════ 9. HOJAS BASURA ALREDEDOR DE LOS DATOS ═════════════════════ */
+
+function libroHojasBasura(): LibroHostil {
+  const { v, mas } = contador();
+
+  const ventas: unknown[][] = [['Fecha', 'Cliente', 'Producto', 'Monto', 'Moneda']];
+  for (let m = 1; m <= 8; m++) {
+    for (let k = 0; k < 3; k++) {
+      const monto = 2400 + m * 65 + k * 18;
+      mas('revenue', monto);
+      ventas.push([
+        serial(`2026-${String(m).padStart(2, '0')}-${String(8 + k * 6).padStart(2, '0')}`),
+        'Clínica Dental Sonrisa',
+        'Limpieza dental',
+        monto,
+        'GTQ',
+      ]);
+    }
+  }
+
+  /* Una hoja de 120 columnas: un export de sistema con todo el esquema interno al lado. */
+  const anchisima: unknown[][] = [
+    Array.from({ length: 120 }, (_, i) => (i === 0 ? 'ID' : `campo_${i}`)),
+  ];
+  for (let i = 0; i < 10; i++) {
+    anchisima.push(Array.from({ length: 120 }, (_, j) => (j === 0 ? `R-${i}` : j * (i + 1))));
+  }
+
+  return {
+    archivo: '09-hojas-basura.xlsx',
+    titulo: 'Hojas basura alrededor de los datos',
+    rompe:
+      'Una hoja vacía, una con solo un título, una de 120 columnas y una con una sola fila de ' +
+      'datos, todas alrededor de la única hoja que importa. Ninguna puede tumbar la carga ni ' +
+      'aportar una cifra.',
+    hojas: [
+      ['(vacía)', []],
+      ['Instrucciones', [['Llenar la hoja Ventas y enviar a contabilidad']]],
+      ['Ventas', ventas],
+      ['Export_Sistema', anchisima],
+      ['Notas', [['Fecha', 'Nota'], [serial('2026-03-01'), 'Revisar con el contador']]], // prettier-ignore
+    ],
+    verdad: v,
+    clasificar: dobleDeModelo({ tipos: { Ventas: 'revenue' } }),
+    destinos: { Ventas: 'movimientos:24' },
+  };
+}
+
+/* ══════════ 10. EL MEZCLADOR: MONEDAS, FACTURAS, COBROS E INVENTARIO ══════════ */
+
+function libroMezclador(): LibroHostil {
+  const { v, mas } = contador();
+  const TASA = 7.7;
+
+  /* Facturación emitida: devenga su ingreso además de la cuenta por cobrar. */
+  const facturacion: unknown[][] = [
+    ['Fecha Emision', 'No. Documento', 'Cliente', 'Monto', 'Moneda', 'Fecha Vencimiento'],
+  ];
+  for (let i = 0; i < 20; i++) {
+    const usd = i % 3 === 0;
+    const monto = usd ? 1200 + i * 40 : 14_000 + i * 300;
+    mas('revenue', usd ? r2(monto * TASA) : monto);
+    facturacion.push([
+      serial(`2026-0${(i % 8) + 1}-${String(4 + (i % 20)).padStart(2, '0')}`),
+      `FAC-${1000 + i}`,
+      `Cliente ${(i % 5) + 1}`,
+      monto,
+      usd ? 'USD' : 'GTQ',
+      serial(`2026-0${(i % 8) + 1}-28`),
+    ]);
+  }
+
+  /*
+   * Cobros que APUNTAN a esas facturas: es el ESTADO de una venta ya registrada, no una venta
+   * nueva. Si producen ingreso, la facturación se cuenta dos veces.
+   */
+  const cobros: unknown[][] = [['Fecha', 'No. Documento', 'Cliente', 'Monto', 'Moneda']];
+  for (let i = 0; i < 12; i++) {
+    const usd = i % 3 === 0;
+    cobros.push([
+      serial(`2026-0${(i % 8) + 1}-28`),
+      `FAC-${1000 + i}`,
+      `Cliente ${(i % 5) + 1}`,
+      usd ? 1200 + i * 40 : 14_000 + i * 300,
+      usd ? 'USD' : 'GTQ',
+    ]);
+  }
+
+  /* Facturas RECIBIDAS: producen su costo además de la cuenta por pagar. */
+  const porPagar: unknown[][] = [
+    ['Fecha Emision', 'No. Factura', 'Proveedor', 'Monto', 'Moneda', 'Fecha Vencimiento'],
+  ];
+  for (let i = 0; i < 10; i++) {
+    const monto = 6800 + i * 210;
+    mas('cogs', monto);
+    porPagar.push([
+      serial(`2026-0${(i % 8) + 1}-11`),
+      `PRV-${500 + i}`,
+      `Proveedor ${(i % 4) + 1}`,
+      monto,
+      'GTQ',
+      serial(`2026-0${(i % 8) + 1}-30`),
+    ]);
+  }
+
+  /* Inventario serializado: no produce movimientos, va a inventario. */
+  const inventario: unknown[][] = [
+    ['VIN', 'Marca', 'Modelo', 'Anio', 'Costo Adquisicion', 'Fecha Ingreso'],
+  ];
+  for (let i = 0; i < 15; i++) {
+    inventario.push([
+      `3VW${String(100000 + i)}`,
+      'Toyota',
+      'Hilux',
+      2025,
+      118_000 + i * 900,
+      serial('2026-01-15'),
+    ]);
+  }
+
+  /* Una moneda que NO manejamos: se conserva para que la fila se marque, nunca se renombra. */
+  facturacion.push([serial('2026-08-15'), 'FAC-9999', 'Cliente de Madrid', 900, 'EUR', serial('2026-08-30')]); // prettier-ignore
+
+  return {
+    archivo: '10-mezclador.xlsx',
+    titulo: 'Monedas, facturas, cobros e inventario',
+    rompe:
+      'Facturación en GTQ y USD que devenga su ingreso, cobros que apuntan a esas MISMAS ' +
+      'facturas y no deben devengar de nuevo, cuentas por pagar que sí producen su costo, ' +
+      'inventario serializado por VIN que no produce ninguno, y una factura en EUR que no ' +
+      'sabemos convertir. Cinco reglas que se contradicen si alguna se aplica de más.',
+    hojas: [
+      ['Facturacion', facturacion],
+      ['Cobros', cobros],
+      ['CuentasPorPagar', porPagar],
+      ['Inventario', inventario],
+    ],
+    verdad: v,
+    base: 'GTQ',
+    tasas: { USD: TASA },
+    clasificar: dobleDeModelo({
+      tipos: { Facturacion: 'revenue', Cobros: 'revenue', CuentasPorPagar: 'cogs' },
+      entidades: { Facturacion: 'invoice', CuentasPorPagar: 'bill' },
+    }),
+    destinos: {
+      Facturacion: 'movimientos:20',
+      Cobros: 'movimientos:0',
+      CuentasPorPagar: 'movimientos:10',
+      Inventario: 'inventario',
+    },
+    marcadas: 2,
+  };
+}
+
 export const LIBROS: (() => LibroHostil)[] = [
   libroTypos,
   libroColumnasCorridas,
   libroMontosSucios,
+  libroDosTablas,
+  libroMesesConTypo,
+  libroFechasImposibles,
+  libroCabeceraDetalle,
+  libroDiario,
+  libroHojasBasura,
+  libroMezclador,
 ];
