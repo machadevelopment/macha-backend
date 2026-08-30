@@ -34,8 +34,22 @@ import { asDate } from './row-assembly';
 
 const MESES =
   'ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|jan|apr|aug|dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
+/*
+ * Los TRIMESTRES son períodos igual que los meses (`Q1 2026`, `T1`, `1er trimestre`), y hay
+ * negocios que presupuestan así. Sin reconocerlos, una matriz trimestral ni siquiera se
+ * detecta como reporte: cae al camino normal, se queda sin columna de fecha y se descarta
+ * entera. Medido: Q 77.280 de gastos perdidos en el libro de prueba.
+ *
+ * ⚠️ Esta lista tiene que coincidir con `mesDeEncabezado` de `sheet-unpivot.ts`, que es quien
+ * traduce la etiqueta a un mes concreto. Si una dice "sí es período" y la otra no sabe cuál
+ * es, la hoja se marca como reporte y después no se puede despivotar: se descarta igual, que
+ * es el peor de los dos mundos. Hay test que fija la equivalencia.
+ */
+const TRIMESTRE = String.raw`(?:q|t|trim(?:estre)?)[\s.-]*[1-4](?:[\s./-]*\d{2,4})?|[1-4](?:er|do|ro|to)?[\s.-]*(?:t|trim(?:estre)?)(?:[\s./-]*\d{2,4})?`;
+const SEMESTRE = String.raw`(?:s|sem(?:estre)?)[\s.-]*[12](?:[\s./-]*\d{2,4})?|[12](?:er|do)?[\s.-]*(?:s|sem(?:estre)?)(?:[\s./-]*\d{2,4})?`;
+
 const PERIODO = new RegExp(
-  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4})$`,
+  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4}|${TRIMESTRE}|${SEMESTRE})$`,
   'i',
 );
 
