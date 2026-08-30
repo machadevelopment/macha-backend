@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Macha Finance \u2014 CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
+  "description": "Macha Finance — CFO-layer SaaS backend (Bun + Elysia + Drizzle + Postgres).",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "build": "bun build src/index.ts --target bun --env=disable --outdir dist",
@@ -26,7 +26,8 @@
     "audit:staging-data": "bun run scripts/audit-staging-data.ts",
     "verify:isolation": "bun run scripts/verify-isolation.ts",
     "bench:ingest": "bun run scripts/benchmark-ingest.ts",
-    "prepare": "husky"
+    "prepare": "husky",
+    "inventario:limpiar": "bun run scripts/limpiar-inventario-huerfano.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
