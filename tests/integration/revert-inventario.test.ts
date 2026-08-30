@@ -411,3 +411,75 @@ describe('el artículo que nació en CERO también se va', () => {
     ).toBe(1);
   });
 });
+
+describe('dos reverts a la vez no compensan dos veces', () => {
+  /*
+   * ═══ EL BUG DE LOS 2.460 ARTÍCULOS EN −1 ═══
+   *
+   * Medido en producción: `Gym Supplements` tenía 2.460 artículos con existencia NEGATIVA, y el
+   * rastro lo decía entero — el mismo documento compensado dos veces, con diez segundos de
+   * diferencia.
+   *
+   * Las dos defensas que había son correctas por separado y ninguna alcanza: el endpoint sale
+   * temprano si el documento ya está `reverted`, y `compensarInventario` no escribe si el neto
+   * ya es cero. Las dos leen un estado que la primera ejecución **todavía no commiteó**. Con
+   * miles de artículos esa transacción tarda, y el segundo clic entra en el medio.
+   *
+   * Se prueba con dos reverts EN PARALELO de verdad (`Promise.all`), que es la única forma de
+   * ejercitar la ventana: en secuencia, la segunda ya ve el commit de la primera y el test
+   * pasaría sin probar nada.
+   */
+  test('dos reverts concurrentes dejan la existencia en CERO, nunca en negativo', async () => {
+    const [c] = await owner`
+      insert into companies (workos_org_id, name, industry, base_currency)
+      values ('wos_revinv_f', 'Revert Inventario F', 'retail', 'GTQ') returning id
+    `;
+    const co = c!.id;
+    const [u] = await owner`
+      insert into users (workos_user_id, email)
+      values ('wos_revinv_f_u', 'revinvf@test.local') returning id
+    `;
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${co}, ${u!.id}, ${`${co}/f.xlsx`}, 'f.xlsx', 100, 'text/csv', 'promoted')
+      returning id
+    `;
+    await withCompanyScope(co, async (db) => {
+      await createItem(db, co, u!.id, {
+        documentId: d!.id,
+        sku: 'SKU-CARRERA',
+        name: 'Artículo de la carrera',
+        quantityOnHand: 1,
+        unitCost: 10,
+        unitCostCurrency: 'GTQ',
+      });
+    });
+
+    // Los dos a la vez, sin await entre medias: es lo que hace un doble clic.
+    await Promise.all([
+      withCompanyScope(co, (db) => revertDocument(db, co, d!.id)).catch(() => undefined),
+      withCompanyScope(co, (db) => revertDocument(db, co, d!.id)).catch(() => undefined),
+    ]);
+
+    const [item] = await owner`
+      select quantity_on_hand::numeric as cantidad, deleted_at
+        from inventory_items where company_id = ${co} and sku = 'SKU-CARRERA'
+    `;
+    // Cero, no −1: un inventario no puede ser negativo.
+    expect(Number(item!.cantidad)).toBe(0);
+    // Y se dio de baja igual: la carrera no puede dejarlo colgado.
+    expect(item!.deleted_at).not.toBeNull();
+  });
+
+  test('ninguna compensación de más quedó en el historial', async () => {
+    const [n] = await owner`
+      select count(*)::int as n from inventory_movements m
+        join inventory_items i on i.id = m.item_id
+        join companies c on c.id = i.company_id
+       where c.name = 'Revert Inventario F' and m.movement_type = 'adjustment'
+    `;
+    // Exactamente UNA compensación por la carga revertida.
+    expect(Number(n!.n)).toBe(1);
+  });
+});
