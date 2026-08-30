@@ -507,3 +507,61 @@ describe('dos períodos bastan si las etiquetas traen el año', () => {
     expect(mesDeEncabezado('S3')).toBeNull();
   });
 });
+
+describe('una hoja que YA es tabla no se despivota, aunque tenga columnas de mes', () => {
+  /*
+   * Esta guarda es lo que permite llamar a `despivotarReporte` SIN CONDICIONES sobre cualquier
+   * hoja, y por eso importa: antes el despivotado solo se intentaba cuando otro filtro estaba
+   * por descartar la hoja, y ahí se colaba una matriz PEQUEÑA —dos o tres rubros no llegan a
+   * las cuatro columnas de período del detector de reportes ni a las cinco filas de
+   * `noPuedeProducirMovimientos`— que terminaba en el modelo sin fecha y producía cero
+   * movimientos, en silencio.
+   *
+   * Depender de "algún otro filtro la iba a descartar" obliga a enumerar filtros y umbrales.
+   * Que la función sepa decir "esto ya es una tabla" la vuelve segura de llamar siempre.
+   *
+   * Un movimiento trae su fecha EN LA FILA; una matriz la trae en el ENCABEZADO.
+   */
+  const MES = ['Enero', 'Febrero', 'Marzo', 'Abril'];
+
+  test('con columna de fecha por fila se rechaza, aunque el encabezado traiga meses', () => {
+    /*
+     * Un presupuesto por cliente: cada fila es un movimiento fechado Y trae el plan mensual al
+     * lado. Despivotarla reemplazaría los movimientos reales por las cifras de presupuesto.
+     */
+    const mixta = [
+      ['Fecha', 'Cliente', ...MES],
+      ['2026-01-15', 'Cafetería El Roble', 100, 110, 120, 130],
+      ['2026-02-20', 'Súper Zona 10', 200, 210, 220, 230],
+      ['2026-03-11', 'Bistró La Cuadra', 300, 310, 320, 330],
+      ['2026-04-09', 'Panadería El Molino', 400, 410, 420, 430],
+      ['2026-05-02', 'Fundación Semilla', 500, 510, 520, 530],
+    ]; // prettier-ignore
+    expect(despivotarReporte(mixta, { anioPorDefecto: 2026 })).toBeNull();
+  });
+
+  test('la misma hoja SIN la columna de fecha sí se despivota', () => {
+    // El contraste: lo único que cambia es que la fecha deja de estar en la fila.
+    const matriz = [
+      ['Cliente', ...MES],
+      ['Cafetería El Roble', 100, 110, 120, 130],
+      ['Súper Zona 10', 200, 210, 220, 230],
+      ['Bistró La Cuadra', 300, 310, 320, 330],
+      ['Panadería El Molino', 400, 410, 420, 430],
+      ['Fundación Semilla', 500, 510, 520, 530],
+    ]; // prettier-ignore
+    expect(despivotarReporte(matriz, { anioPorDefecto: 2026 })).not.toBeNull();
+  });
+
+  test('las fechas como SERIAL de Excel también cuentan como columna de fecha', () => {
+    const conSerial = [
+      ['Fecha', 'Cliente', ...MES],
+      [46037, 'Cafetería El Roble', 100, 110, 120, 130],
+      [46073, 'Súper Zona 10', 200, 210, 220, 230],
+      [46092, 'Bistró La Cuadra', 300, 310, 320, 330],
+      [46121, 'Panadería El Molino', 400, 410, 420, 430],
+      [46144, 'Fundación Semilla', 500, 510, 520, 530],
+    ]; // prettier-ignore
+    expect(despivotarReporte(conSerial, { anioPorDefecto: 2026 })).toBeNull();
+  });
+});
