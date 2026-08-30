@@ -589,6 +589,45 @@ async function deshacerFilas(
   const now = new Date();
   const match = and(eq(transactions.companyId, companyId), eq(transactions.documentId, documentId));
 
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * SE RESERVA EL DOCUMENTO ANTES DE TOCAR NADA — DOS REVERTS A LA VEZ COMPENSAN DOS VECES
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Medido en producción (2026-08-30): `Gym Supplements` tenía **2.460 artículos con existencia
+   * −1**. Un inventario no puede ser negativo. El rastro lo decía entero:
+   *
+   *     in          +1  (Existencia inicial)
+   *     adjustment  −1  (Se revirtió la carga que originó este movimiento)   18:26:02
+   *     adjustment  −1  (Se revirtió la carga que originó este movimiento)   18:26:12
+   *
+   * El MISMO documento, compensado dos veces, con diez segundos de diferencia.
+   *
+   * ═══ POR QUÉ LAS DEFENSAS QUE YA HABÍA NO ALCANZARON ═══
+   *
+   * Hay dos, y las dos son correctas por separado:
+   *   · el endpoint sale temprano si el documento ya está `reverted`;
+   *   · `compensarInventario` es idempotente — si el neto de la carga ya es cero, no escribe.
+   *
+   * Las dos leen un estado que la primera ejecución **todavía no había commiteado**. Con 2.460
+   * artículos, esa transacción hace ~4.900 consultas secuenciales y tarda bastante más de diez
+   * segundos; el segundo clic entró en el medio, leyó `promoted` y un neto de +1, y compensó
+   * otra vez. Cuanto más grande el inventario del cliente, más ancha la ventana — y el arreglo
+   * de hoy, que además da de baja artículos, la ensancha un poco más.
+   *
+   * `FOR UPDATE` sobre la fila del documento cierra la ventana en el único punto donde las dos
+   * ejecuciones se cruzan: la segunda espera a que la primera COMMITEE, y entonces sí ve
+   * `reverted` y un neto de cero. Es la misma reserva que `promoteDocument` ya usa para que dos
+   * workers no promuevan la misma carga.
+   *
+   * Va PRIMERO, antes de compensar: reservar después de haber escrito no reserva nada.
+   */
+  await db
+    .select({ id: documents.id })
+    .from(documents)
+    .where(eq(documents.id, documentId))
+    .for('update');
+
   // El inventario PRIMERO: lee los movimientos de esta carga, y hacerlo antes de tocar nada
   // más deja la lectura sobre un estado que ninguna otra parte de esta función alteró.
   await compensarInventario(db, companyId, documentId, now);
