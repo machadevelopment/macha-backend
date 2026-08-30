@@ -311,3 +311,103 @@ describe('lo que el arreglo NO debe romper', () => {
     ).toBe(0);
   });
 });
+
+describe('el artículo que nació en CERO también se va', () => {
+  /*
+   * ═══ LA SEGUNDA CAUSA, LA QUE DEJABA 240 VEHÍCULOS FUERA DE ALCANCE ═══
+   *
+   * `createItem` registra el movimiento de apertura solo si la existencia inicial es > 0, y
+   * hace bien: `recordMovement` rechaza una cantidad de cero porque un movimiento de cero no
+   * movió nada. Pero entonces un artículo importado con existencia 0 no tiene NI UN movimiento,
+   * y `document_id` solo vivía en `inventory_movements` — así que no quedaba rastro de qué
+   * carga lo creó.
+   *
+   * El resultado era un artículo invisible para las dos defensas a la vez: el revert no lo
+   * alcanzaba (no hay movimiento que compensar) y el script de limpieza lo PROTEGÍA, porque
+   * "sin movimientos" es justo su señal de que lo dio de alta una persona.
+   *
+   * Medido en producción: 240 vehículos así en una sola empresa.
+   */
+  test('una carga que crea un artículo en cero se lo lleva al revertirse', async () => {
+    const [c] = await owner`
+      insert into companies (workos_org_id, name, industry, base_currency)
+      values ('wos_revinv_d', 'Revert Inventario D', 'retail', 'GTQ') returning id
+    `;
+    const co = c!.id;
+    const [u] = await owner`
+      insert into users (workos_user_id, email)
+      values ('wos_revinv_d_u', 'revinvd@test.local') returning id
+    `;
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${co}, ${u!.id}, ${`${co}/d.xlsx`}, 'd.xlsx', 100, 'text/csv', 'promoted')
+      returning id
+    `;
+
+    await withCompanyScope(co, async (db) => {
+      await createItem(db, co, u!.id, {
+        documentId: d!.id,
+        sku: 'SKU-NACE-EN-CERO',
+        name: 'Vehículo en patio',
+        quantityOnHand: 0,
+        unitCost: 150_000,
+        unitCostCurrency: 'GTQ',
+      });
+    });
+
+    // Guardia: sin movimientos es exactamente lo que lo hacía invisible.
+    expect(
+      await unNumero(
+        owner`select count(*)::int as n from inventory_movements
+              where company_id = ${co}`,
+      ),
+    ).toBe(0);
+
+    await withCompanyScope(co, (db) => revertDocument(db, co, d!.id));
+
+    expect(
+      await unNumero(
+        owner`select count(*)::int as n from inventory_items
+              where company_id = ${co} and deleted_at is null`,
+      ),
+    ).toBe(0);
+  });
+
+  test('un artículo en cero creado A MANO no se toca', async () => {
+    // `document_id` NULL es la señal de que lo dio de alta una persona. Sigue siendo el caso
+    // original y el que la columna nueva no puede pisar.
+    const [c] = await owner`
+      insert into companies (workos_org_id, name, industry, base_currency)
+      values ('wos_revinv_e', 'Revert Inventario E', 'retail', 'GTQ') returning id
+    `;
+    const co = c!.id;
+    const [u] = await owner`
+      insert into users (workos_user_id, email)
+      values ('wos_revinv_e_u', 'revinve@test.local') returning id
+    `;
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${co}, ${u!.id}, ${`${co}/e.xlsx`}, 'e.xlsx', 100, 'text/csv', 'promoted')
+      returning id
+    `;
+    await withCompanyScope(co, async (db) => {
+      await createItem(db, co, u!.id, {
+        sku: 'SKU-A-MANO',
+        name: 'Dado de alta por una persona',
+        quantityOnHand: 0,
+        unitCost: 10,
+        unitCostCurrency: 'GTQ',
+      });
+    });
+    await withCompanyScope(co, (db) => revertDocument(db, co, d!.id));
+
+    expect(
+      await unNumero(
+        owner`select count(*)::int as n from inventory_items
+              where company_id = ${co} and deleted_at is null`,
+      ),
+    ).toBe(1);
+  });
+});
