@@ -135,3 +135,67 @@ describe('el prompt fija la frontera entre costo directo y gasto', () => {
     expect(SYSTEM_PROMPT).toContain('"bill" (cuenta por pagar) devolver TAMBIÉN "t"');
   });
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UN COBRO NO ES UNA VENTA NUEVA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `ventaYaRegistradaEnOtraHoja` protegía ÚNICAMENTE a las filas `invoice`. Una hoja de cobros
+ * tiene fecha, cliente y monto, así que lo natural es que el modelo la clasifique
+ * `transaction/revenue` — y ahí nada la frenaba.
+ *
+ * Medido: `Facturacion` (40 facturas, Q 238.387) + `Cobros` (20 de esas mismas facturas,
+ * apuntando por `Documento`, Q 124.432) daba Q 362.819 de ingreso, **52 % más** que la
+ * facturación real. El dinero de una venta cobrada se contaba al emitirla Y al cobrarla.
+ */
+describe('un cobro liquida una factura, no crea ingreso', () => {
+  const COBROS: ColumnMap = {
+    date: 1, amount: 3, currency: null, description: null, counterparty: 2, product: null,
+    quantity: null, productCategory: null, store: null, dueDate: null, costTotal: null,
+    costUnit: null,
+  }; // prettier-ignore
+  const FILAS = [
+    ['FAC-001', '2026-08-10', 'Cafetería El Roble', 5000],
+    ['FAC-002', '2026-08-14', 'Súper Zona 10', 3200],
+  ];
+  const correr = (yaRegistrada: boolean) =>
+    construirFilas(
+      new Map(
+        FILAS.map((_, i) => [
+          i,
+          { i, e: 'transaction', t: 'revenue', c: 'cobro', cf: 0.95 } as VeredictoCrudo,
+        ]),
+      ),
+      { rows: FILAS, baseCurrency: 'GTQ', ventaYaRegistradaEnOtraHoja: yaRegistrada },
+      COBROS,
+    );
+
+  test('si la venta YA está registrada en otra hoja, el cobro no produce nada', () => {
+    expect(correr(true)).toHaveLength(0);
+  });
+
+  test('una hoja de cobros SUELTA sí registra su dinero', () => {
+    /*
+     * Lo que la guarda NO desactiva: solo actúa cuando el esquema del libro demuestra la
+     * referencia. Sin hoja de facturación al lado, esa hoja ES la única fuente del ingreso y
+     * silenciarla dejaría al cliente en cero — el error simétrico y peor.
+     */
+    expect(correr(false)).toHaveLength(2);
+  });
+
+  test('la guarda corre ANTES de emitir la fila, no después', () => {
+    /*
+     * El primer intento puso el `continue` más abajo, después de que la fila ya se había
+     * empujado a la salida, así que solo evitaba el desdoble del costo y el ingreso duplicado
+     * seguía entrando. Una guarda que corre después de emitir no guarda nada.
+     *
+     * Este test lo fija midiendo el TOTAL emitido, que es lo que llega al dashboard.
+     */
+    const total = correr(true).reduce(
+      (a, f) => a + Number((f.payload as { originalAmount?: number }).originalAmount ?? 0),
+      0,
+    );
+    expect(total).toBe(0);
+  });
+});

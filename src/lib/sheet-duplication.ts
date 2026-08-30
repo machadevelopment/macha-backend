@@ -240,14 +240,55 @@ function seBastaSola(rows: unknown[][]): boolean {
   return pareceLibroDeMovimientos(rows[0] ?? []) && tieneColumnaDeFecha(rows);
 }
 
-/** Encabezados que las dos hojas comparten: la llave por la que se relacionan. */
+/**
+ * Encabezados que las dos hojas comparten, SIN contar los genéricos.
+ *
+ * ═══ POR QUÉ SE EXCLUYEN LOS GENÉRICOS (2026-08-30) ═══
+ *
+ * La condición "comparten al menos un encabezado" existe para no relacionar dos hojas que
+ * suman parecido por casualidad. Pero `fecha`, `monto` y `moneda` los tiene CUALQUIER hoja de
+ * movimientos, así que compartirlos no dice nada: con esos tres, la condición se cumple entre
+ * dos hojas cualesquiera del libro y lo único que queda decidiendo es la suma.
+ *
+ * Medido: en un libro con `Ventas` (una venta de Q 1.500) y `Gastos` (un alquiler de Q 1.500)
+ * —tres hojas de una fila cada una— los gastos se descartaron como "duplicado" de las ventas.
+ * Una venta y un alquiler no son la misma plata; comparten la forma, no el hecho.
+ *
+ * Lo que sí es evidencia de relación es un encabezado ESPECÍFICO del libro: un `IDOC`, un
+ * `Documento`, un `ID Venta`. Esos son la llave por la que una cabecera y su detalle se unen,
+ * y son lo que este detector vino a reconocer.
+ */
+const ENCABEZADOS_GENERICOS = new Set([
+  'fecha', 'fechaemision', 'fechavencimiento', 'fechapago', 'fechamovimiento', 'date',
+  'monto', 'importe', 'total', 'valor', 'moneda', 'currency', 'mes', 'periodo',
+  'descripcion', 'concepto', 'detalle', 'observaciones', 'nota', 'notas', 'estado',
+  'cantidad', 'categoria', 'tipo', 'id', 'no', 'num', 'numero',
+]); // prettier-ignore
+
 function encabezadosCompartidos(a: unknown[][], b: unknown[][]): number {
-  const ea = new Set((a[0] ?? []).map(normalizar).filter((x) => x !== ''));
-  const eb = new Set((b[0] ?? []).map(normalizar).filter((x) => x !== ''));
+  const ea = new Set(
+    (a[0] ?? []).map(normalizar).filter((x) => x !== '' && !ENCABEZADOS_GENERICOS.has(x)),
+  );
+  const eb = new Set(
+    (b[0] ?? []).map(normalizar).filter((x) => x !== '' && !ENCABEZADOS_GENERICOS.has(x)),
+  );
   let n = 0;
   for (const x of ea) if (eb.has(x)) n++;
   return n;
 }
+
+/**
+ * Con muy pocas filas, dos totales iguales son una CASUALIDAD, no evidencia.
+ *
+ * Este detector afirma algo fuerte —"estas dos hojas son el mismo dinero"— y su costo de
+ * equivocarse es tirar la contabilidad de una hoja entera. Esa afirmación necesita masa: dos
+ * hojas de tres filas que suman lo mismo se explican por azar tan bien como por duplicación.
+ *
+ * Los casos que este módulo existe para atrapar son grandes por naturaleza: una cabecera con
+ * su detalle (60 y 220 filas), un consolidado contra su origen (11 y 481). Ninguno se acerca
+ * a este piso, así que exigirlo no le quita nada y le saca el falso positivo caro.
+ */
+const MIN_FILAS_PARA_AFIRMAR = 8;
 
 /**
  * Nombres de las hojas de DETALLE que no deben procesarse, porque su dinero ya está contado
@@ -271,6 +312,10 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
     for (let j = i + 1; j < conSumas.length; j++) {
       const a = conSumas[i]!;
       const b = conSumas[j]!;
+
+      // Ver `MIN_FILAS_PARA_AFIRMAR`: con pocas filas, dos totales iguales son casualidad.
+      if (a.rows.length - 1 < MIN_FILAS_PARA_AFIRMAR) continue;
+      if (b.rows.length - 1 < MIN_FILAS_PARA_AFIRMAR) continue;
 
       const coinciden = a.sumas.some((sa) =>
         b.sumas.some((sb) => Math.abs(sa - sb) / Math.max(sa, sb) <= 0.01),

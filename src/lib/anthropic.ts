@@ -273,6 +273,36 @@ export function construirFilas(
     const row = params.rows[i]!;
     const verdict = { i, targetEntity: v.e, type: v.t, category: v.c, confidence: v.cf };
 
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * UN COBRO NO ES UNA VENTA NUEVA (2026-08-30)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * `ventaYaRegistradaEnOtraHoja` protegía ÚNICAMENTE a las filas clasificadas `invoice`, y
+     * ese era el hueco: una hoja de cobros tiene fecha, cliente y monto, así que lo natural es
+     * que el modelo la clasifique `transaction/revenue` — y ahí nada la frenaba.
+     *
+     * Medido con un libro de `Facturacion` (40 facturas, Q 238.387) + `Cobros` (20 de esas
+     * mismas facturas, apuntando por `Documento`, Q 124.432): el ingreso salió **52 % más
+     * alto** que la facturación real. El dinero de una venta cobrada se contaba al emitirla Y
+     * al cobrarla.
+     *
+     * La señal es la misma que ya gobierna la factura: **esta hoja APUNTA a otra hoja de
+     * movimientos del mismo libro**, o sea que lo que registra es el ESTADO de un hecho que
+     * allá ya se contó. Un cobro liquida una cuenta por cobrar; no crea ingreso.
+     *
+     * ⚠️ VA ANTES DEL PRIMER `out.push`, y ahí está el detalle que costó una vuelta: el primer
+     * intento puso este `continue` más abajo, después de que la fila ya se había emitido, así
+     * que solo evitaba el DESDOBLE del costo y el ingreso duplicado seguía entrando. Una
+     * guarda que corre después de emitir no guarda nada.
+     *
+     * Lo que NO desactiva: solo actúa cuando el ESQUEMA del libro demuestra la referencia. Una
+     * hoja de cobros suelta, sin la de facturación al lado, no apunta a nada, la condición es
+     * falsa y su dinero se registra como corresponde — porque en ese libro esa hoja ES la
+     * única fuente del ingreso.
+     */
+    if (v.e === 'transaction' && params.ventaYaRegistradaEnOtraHoja) continue;
+
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
