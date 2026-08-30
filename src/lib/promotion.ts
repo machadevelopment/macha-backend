@@ -443,6 +443,95 @@ async function compensarInventario(
       documentId,
     });
   }
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * Y EL ARTÍCULO QUE SOLO EXISTÍA POR ESTA CARGA SE DA DE BAJA (2026-08-30)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Dejar la existencia en cero NO es revertir. Reporte de Keneth: *"he subido 4 archivos, les
+   * di revert y toda la data del dashboard se limpia pero el inventario sigue apareciendo lo
+   * del primer excel"*.
+   *
+   * El síntoma señala la causa con precisión, y es más específica de lo que parece: sigue
+   * apareciendo lo del PRIMERO porque el importador trata la cantidad como un CONTEO —la
+   * primera carga CREA el artículo con su nombre, SKU y costo; las siguientes solo ajustan la
+   * cantidad del mismo SKU—. Así que los artículos en pantalla son, por construcción, los que
+   * creó la primera carga.
+   *
+   * La compensación de arriba hacía bien su parte (la existencia queda en cero) pero el listado
+   * filtra por `deleted_at` y **nunca por cantidad**. Para el dueño eso no es un inventario
+   * vacío: es su inventario mostrando cosas que ya revirtió, al lado de un dashboard que sí
+   * quedó limpio. Medido contra Postgres real: 1 artículo donde debía haber 0.
+   *
+   * ═══ EL CRITERIO NO ES "LA CREÓ ESTA CARGA", Y ESA DISTINCIÓN ES TODO ═══
+   *
+   * `inventory_items` no guarda qué documento lo creó —solo los movimientos llevan
+   * `document_id`— pero aunque lo guardara, ese criterio sería el equivocado: un artículo que
+   * la carga 1 creó y que alguien ajustó A MANO después no debe desaparecer porque se revierta
+   * la carga 1. Ese conteo manual es trabajo de una persona y borrarlo sería peor que el bug.
+   *
+   * El criterio correcto es **que no quede nadie más sosteniéndolo**: se da de baja solo si su
+   * existencia quedó en cero Y **todos** sus movimientos vienen de cargas ya revertidas o
+   * canceladas. Un movimiento manual tiene `document_id` NULL, así que su sola presencia salva
+   * al artículo — que es exactamente la garantía que `recordMovement` ya prometía en su
+   * comentario ("sin tocar los conteos que alguien registró a mano después") y que hasta hoy
+   * nada hacía cumplir.
+   *
+   * El documento que se está revirtiendo AHORA cuenta como revertido aunque su fila todavía
+   * diga `promoted`: `deshacerFilas` sella el estado unas líneas más abajo, y esperar a eso
+   * obligaría a partir la transacción.
+   *
+   * Es un soft-delete, igual que el resto del revert: si la carga se vuelve a subir, el
+   * artículo se crea de nuevo con su historia limpia.
+   */
+  const tocados = netos.map((f) => f.itemId);
+  if (tocados.length === 0) return;
+
+  const huerfanos = await db
+    .select({ id: inventoryItems.id })
+    .from(inventoryItems)
+    .where(
+      and(
+        eq(inventoryItems.companyId, companyId),
+        inArray(inventoryItems.id, tocados),
+        isNull(inventoryItems.deletedAt),
+        rawSql`${inventoryItems.quantityOnHand} = 0`,
+        // Ni un solo movimiento que NO venga de una carga revertida: ni manual (document_id
+        // NULL), ni de otra carga que siga viva.
+        rawSql`not exists (
+          select 1 from ${inventoryMovements} m
+           where m.company_id = ${companyId}
+             and m.item_id = ${inventoryItems.id}
+             and (
+               m.document_id is null
+               or (
+                 m.document_id <> ${documentId}
+                 and not exists (
+                   select 1 from ${documents} d
+                    where d.id = m.document_id
+                      and d.status in ('reverted', 'cancelled')
+                 )
+               )
+             )
+        )`,
+      ),
+    );
+
+  if (huerfanos.length > 0) {
+    await db
+      .update(inventoryItems)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(inventoryItems.companyId, companyId),
+          inArray(
+            inventoryItems.id,
+            huerfanos.map((h) => h.id),
+          ),
+        ),
+      );
+  }
 }
 
 /**
