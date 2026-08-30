@@ -299,6 +299,17 @@ Conventions & gotchas:
      archivo que pasó por un CSV) no contaba como autosuficiente, empataba contra un agregado y
      el desempate caía de vuelta al proxy del tamaño. Medido: un libro descartaba sus 48 ventas
      de detalle para conservar una matriz despivotada de 24 filas sin contraparte.
+     ⚠️ **Hace falta MASA y una LLAVE ESPECÍFICA para afirmar duplicación** (2026-08-30). Un
+     libro con `Ventas` (una venta de Q 1.500), `Compras` (Q 700) y `Gastos` (un alquiler de
+     Q 1.500) descartaba los GASTOS como duplicado de las VENTAS: comparten la forma y el total,
+     por azar. Dos defensas independientes, con test de cada una por separado —o una tapa el
+     agujero de la otra y nadie se entera de que se rompió—: (a) los encabezados **genéricos**
+     (`fecha`, `monto`, `moneda`, `concepto`…) ya no cuentan como llave compartida, porque los
+     tiene cualquier hoja de movimientos y la condición se cumplía entre dos hojas cualesquiera
+     del libro; lo que sí es evidencia es un `IDOC` o un `Documento`. (b) Un piso de **8 filas**:
+     con tres, dos totales iguales se explican por azar tan bien como por duplicación, y los
+     casos que este módulo existe para atrapar son grandes por naturaleza (60 y 220 filas en el
+     archivo que lo motivó).
   5. **Huella por fila** (`lib/row-fingerprint.ts` + tabla `ingested_rows`, migración `0024`):
      el cliente resube su contabilidad completa cada semana. La huella lleva un **ordinal**
      contado por CONTENIDO, no por posición, para que dos ventas idénticas el mismo día no se
@@ -618,6 +629,28 @@ Conventions & gotchas:
   DOS listas: los alias de lo que sí manejamos (`Q`, `Qtz`, `US$`, `dólares`) porque sin ellos
   ensanchar la guarda marcaría filas que hoy pasan, y las monedas reales que no manejamos para
   poder distinguirlas de un rótulo ilegible, que sigue cayendo a la base.
+- **Una factura RECIBIDA produce su COSTO además de la cuenta por pagar** (2026-08-30). Es el
+  fallo simétrico del de la factura emitida y estuvo abierto porque el razonamiento se detuvo a
+  mitad de camino: la nota decía *"una `bill` NO produce ingreso: sería registrar como ingreso
+  lo que la empresa debe"* —cierto y vigente— pero faltaba decir que **sí produce un costo**. Se
+  confundió "no es ingreso" con "no es nada", y `rollups.ts` suma `cogs` y `opex` solo de
+  `transactions`, así que el gasto **desaparecía del estado de resultados**. Afecta a toda
+  empresa que registre las facturas de sus proveedores en una hoja de cuentas por pagar, o sea a
+  cualquiera que lleve contabilidad por devengo. **El tipo lo decide el modelo, no un default**:
+  una factura de proveedor puede ser mercadería (`cogs`) o alquiler (`opex`), y elegir `opex`
+  por defecto inflaría el margen de cualquier comercio que compre inventario a crédito; sin
+  tipo no se deriva nada y la fila va a revisión. Y **el prompt ahora define la frontera
+  cogs/opex** (punto 15), que antes quedaba al criterio del modelo: eso hacía que el margen
+  bruto —cifra de portada— saliera distinto entre dos corridas del mismo archivo.
+- **Un COBRO no es una venta nueva** (2026-08-30). `ventaYaRegistradaEnOtraHoja` protegía
+  únicamente a las filas `invoice`, y ese era el hueco: una hoja de cobros tiene fecha, cliente
+  y monto, así que lo natural es que el modelo la clasifique `transaction/revenue` — y ahí nada
+  la frenaba. Medido: `Facturacion` (Q 238.387) + `Cobros` apuntando a esas mismas facturas
+  (Q 124.432) daba **52 % más ingreso** que la facturación real. ⚠️ **La guarda va ANTES del
+  primer `out.push`**: el primer intento la puso después de emitir la fila, así que solo evitaba
+  el desdoble del costo y el ingreso duplicado seguía entrando — una guarda que corre después de
+  emitir no guarda nada. Hay test que mide el TOTAL emitido y no la cantidad de filas,
+  justamente para que esa distinción no se pierda.
 - ⚠️ **HUECO CONOCIDO: no hay forma de representar una DEVOLUCIÓN** (verificado 2026-08-30, no
   arreglado). Los cuatro tipos son `revenue`/`cogs`/`opex`/`other` y ninguno significa "reduce
   el ingreso"; `assemblePayload` además hace `Math.abs()` del monto, y esa regla es CORRECTA
@@ -629,6 +662,38 @@ Conventions & gotchas:
   once archivos reales disponibles trae una sola fila así** y arreglarlo bien exige un tipo
   nuevo que toca el ledger, los rollups y el dashboard — riesgo alto para un caso sin
   ocurrencia. Cuando aparezca, el arreglo es un tipo `refund`, no relajar el `Math.abs()`.
+- **EL CUADRE: se compara lo LEÍDO contra lo ATERRIZADO** (`lib/cuadre.ts`, 2026-08-30).
+  `medirFilas` (`lib/reconciliation.ts`) ya escribía cuánto dinero traía cada hoja y **nadie lo
+  comparaba nunca contra el ledger**: la medición existía, el resultado existía, y no había nada
+  que notara cuando no se parecen. Este módulo cierra ese lazo, y es lo único del pipeline que
+  detecta un fallo en **un archivo que nadie vio nunca** — los tests cubren archivos que ya
+  vimos, y ahí estuvo el hueco durante siete reportes. Contra los defectos reales de la ingesta
+  ninguno cae dentro de una banda razonable: todos son ×0, ×2 o ×1,52.
+  - ⚠️ **La cota superior se CALCULA, no se elige.** Un número fijo es imposible: una expansión
+    legítima llega a 3× (una factura con costo en la línea produce la factura, su ingreso
+    devengado y el costo) mientras el duplicado que hay que atrapar es ×2. La salida es que la
+    expansión no es un misterio — el pipeline SABE cuántas filas de ledger produjo por fila del
+    archivo, porque él mismo las creó (`filasEnElLedger / filasMedidas`) — y la cota sale de ahí
+    con un margen del 15 %. La pregunta pasa de "¿cuánto es demasiado?" a "¿lo aterrizado se
+    parece a lo que este pipeline dijo que iba a producir?", que sí tiene respuesta.
+  - **NO BLOQUEA, y es decisión.** Un falso positivo que frene la promoción deja al cliente sin
+    su contabilidad por un chequeo que se equivocó. Lo que cambia es que un descuadre queda
+    ESCRITO: cuando alguien reporte "esto no cuadra", la respuesta ya está en los logs en vez de
+    haber que reconstruirla a mano, que es literalmente lo que pasó las siete veces.
+  - ⚠️ **Va DESPUÉS de `promoteDocument`.** El primer intento lo puso antes, con el ledger
+    todavía vacío, y reportaba `nada_aterrizo` en TODAS las cargas — un detector que grita
+    siempre es uno que nadie mira. Lo atrapó el test de integración; el orden de dos bloques del
+    worker no se ve desde un test unitario.
+  - **Tres tablas, no una**: `transactions` + `invoices` + `bills`. Olvidar una haría que toda
+    carga de facturas pareciera un descuadre por exceso.
+  - **`en_revision` es un veredicto propio y distinto de `falta`**, porque piden acciones
+    opuestas: lo primero necesita que alguien mire la cola (el trabajo ya tiene dueño), lo
+    segundo que alguien mire el pipeline (hay plata que nadie sabe dónde quedó). En el mismo
+    cajón, el caro se pierde entre decenas del rutinario. Un renglón de TOTAL declarado `skip`
+    se DESCUENTA de lo leído; una fila marcada por `invalid_date` **no**, porque esa sí es plata
+    que el cliente esperaba ver.
+  - **Por moneda y nunca sumado**: un dólar contado como quetzal subestima ~7,7 veces, así que
+    un total mezclado escondería justo el tipo de error que esto busca.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
