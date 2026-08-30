@@ -18,7 +18,7 @@ import {
   fusionarMapaDeColumnas,
   type VeredictoCrudo,
 } from '@/lib/anthropic';
-import { asDate, asNumber, type ColumnMap } from '@/lib/row-assembly';
+import { asDate, asNumber, detectarOrdenDeFecha, type ColumnMap } from '@/lib/row-assembly';
 import { resolveIndustryTemplate } from '@/lib/industry-template';
 import { planBatchSize } from '@/lib/sheet-batching';
 import {
@@ -34,6 +34,7 @@ import { medirFilas } from '@/lib/reconciliation';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
+import { claveDeConceptoAncho, despivotarReporte, inferirAnio } from '@/lib/sheet-unpivot';
 import {
   canSkipSheet,
   firmaDeCatalogo,
@@ -230,6 +231,32 @@ export function startExcelIngestWorker(): Promise<string> {
          * en la misma tanda concurrente. Escribirlo desde varias tareas es seguro: el bucle de
          * eventos de Bun no interrumpe entre el `get` y el `set`.
          */
+        /*
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         * EN QUÉ ORDEN VIENEN DÍA Y MES, DECIDIDO UNA VEZ POR HOJA (2026-08-30)
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         *
+         * `detectarOrdenDeFecha` existía, estaba testeado y documentado con el daño que evita
+         * —"el 41 % de sus ingresos quedaba mal fechado y el 59 % no quedaba"— y **no lo
+         * llamaba nadie**. El parámetro `ordenDeFecha` de `assemblePayload` no se pasaba desde
+         * ningún sitio, así que todo el producto leía `DD/MM` siempre. El arreglo estaba
+         * escrito y nunca se conectó.
+         *
+         * Lo que eso produce es lo peor que puede pasarle a un dato: NO borra ni inventa
+         * plata, la MUEVE DE MES. Un libro exportado en `MM/DD/YYYY` entra con el 1 de mayo
+         * registrado el 5 de enero — otro trimestre del dashboard, sin que nada falle.
+         *
+         * Se decide sobre la hoja ENTERA y no lote a lote: es el mismo modo de fallo que
+         * `assertMismoMapa` cubre para el mapa de columnas. Dos lotes con órdenes distintos
+         * partirían la hoja en dos calendarios.
+         *
+         * Se mira TODA la fila y no solo la columna que el modelo llamó `date`, por dos
+         * motivos: el orden es una propiedad del ARCHIVO (quien lo exportó usó un formato, no
+         * uno por columna), y así el orden ya está resuelto antes de la primera llamada al
+         * modelo, sin depender de que el mapa exista todavía.
+         */
+        const ordenDeFechaPorHoja = new Map<string, 'dmy' | 'mdy'>();
+
         const mapasPorHoja = new Map<string, ColumnMap>();
 
         /**
@@ -409,6 +436,89 @@ export function startExcelIngestWorker(): Promise<string> {
          * resúmenes; lo que queda son movimientos compitiendo contra movimientos, que es el
          * único caso donde esta comparación significa algo.
          */
+        /*
+         * ═══ EL AÑO DE UN REPORTE ANCHO SALE DEL LIBRO, NO DE LA HOJA ═══
+         *
+         * Una matriz de gastos escribe "Enero" y nada más: el año vive en el título, en el
+         * nombre de la hoja, o —el dato más fuerte— en las FECHAS que el resto del libro ya
+         * trae. Equivocarse manda los gastos del cliente a un año donde su dashboard no los va
+         * a buscar nunca, así que se resuelve UNA vez con todo el libro a la vista y no hoja
+         * por hoja.
+         */
+        const fechasDelLibro: unknown[] = [];
+        for (const nombre of workbook.SheetNames) {
+          const hoja = workbook.Sheets[nombre];
+          if (!hoja) continue;
+          const crudas: unknown[][] = XLSX.utils.sheet_to_json(hoja, {
+            header: 1,
+            blankrows: false,
+          });
+          for (const fila of crudas.slice(1, 40)) {
+            for (const celda of fila) if (asDate(celda) !== null) fechasDelLibro.push(celda);
+          }
+        }
+
+        /*
+         * Despivotar es DETERMINISTA y se consulta en las dos pasadas: la primera arma `vivas`
+         * (que alimenta el dedup y el esquema del libro) y la segunda procesa. Si la primera no
+         * viera la hoja despivotada, el dedup no podría compararla contra nada y una matriz que
+         * duplica otra hoja se colaría entera.
+         */
+        /** Hoja → nota, para el resumen que lee el cliente. */
+        const notaDeDespivotado = new Map<string, string>();
+
+        /*
+         * ═══ EL TEXTO DE LAS HOJAS QUE SÍ PRODUCEN MOVIMIENTOS ═══
+         *
+         * Es la cuarta guarda del despivotado: si los conceptos de una matriz ancha ya son las
+         * CATEGORÍAS de otra hoja, esa matriz es un consolidado de ella y despivotarla contaría
+         * doble. Ver el bloque largo en `lib/sheet-unpivot.ts`.
+         *
+         * Se recorre ANTES de considerar ningún despivotado, y solo las hojas que pasan los
+         * filtros por su cuenta: contra TODAS, los derivados del propio libro (un estado de
+         * resultados, un punto de equilibrio) nombran los mismos rubros y el solape sale 100 %
+         * siempre — la señal se apagaría entera.
+         *
+         * Se acotan las filas leídas porque lo que interesa son los conceptos DISTINTOS, que
+         * son decenas y se repiten desde la primera página; recorrer 18.000 filas para llenar
+         * el mismo Set no aporta nada.
+         */
+        const conceptosDeMovimientos = new Set<string>();
+        for (const nombre of workbook.SheetNames) {
+          const hoja = workbook.Sheets[nombre];
+          if (!hoja) continue;
+          const crudas: unknown[][] = XLSX.utils.sheet_to_json(hoja, {
+            header: 1,
+            blankrows: false,
+          });
+          if (crudas.length < 2) continue;
+          const desde = crudas.slice(detectarFilaDeEncabezado(crudas));
+          if (analizarFormaDeHoja(desde).esReporte) continue;
+          if (canSkipSheet(desde[0] ?? [])) continue;
+          if (noPuedeProducirMovimientos(desde, asDate, asNumber)) continue;
+          for (const fila of desde.slice(1, 600)) {
+            for (const celda of fila) {
+              if (typeof celda !== 'string') continue;
+              const clave = claveDeConceptoAncho(celda);
+              if (clave !== '') conceptosDeMovimientos.add(clave);
+            }
+          }
+        }
+
+        const despivotar = (nombre: string, crudas: unknown[][], rows: unknown[][]) => {
+          const filaEnc = crudas.length - rows.length;
+          const titulo = crudas
+            .slice(0, filaEnc)
+            .flat()
+            .filter((c) => typeof c === 'string' && c.trim() !== '')
+            .join(' ');
+          return despivotarReporte(rows, {
+            anioPorDefecto: inferirAnio({ titulo, nombreHoja: nombre, fechasDelLibro }),
+            titulo,
+            conceptosDeMovimientos,
+          });
+        };
+
         const vivas: {
           nombre: string;
           rows: unknown[][];
@@ -422,8 +532,12 @@ export function startExcelIngestWorker(): Promise<string> {
             blankrows: false,
           });
           if (crudas.length < 2) continue;
-          const desdeEncabezado = crudas.slice(detectarFilaDeEncabezado(crudas));
-          if (analizarFormaDeHoja(desdeEncabezado).esReporte) continue;
+          let desdeEncabezado = crudas.slice(detectarFilaDeEncabezado(crudas));
+          if (analizarFormaDeHoja(desdeEncabezado).esReporte) {
+            const largo = despivotar(nombre, crudas, desdeEncabezado);
+            if (!largo) continue;
+            desdeEncabezado = largo.rows;
+          }
           if (canSkipSheet(desdeEncabezado[0] ?? [])) continue;
           /*
            * `puedeProducirMovimientos` se calcula ACÁ, con el mismo predicado que el filtro de
@@ -433,6 +547,9 @@ export function startExcelIngestWorker(): Promise<string> {
            * las 481 ventas y las 43 compras del cliente para conservar un resumen de 11 filas
            * que tampoco se procesó.
            */
+          // El orden de fecha es una propiedad del ARCHIVO, así que se resuelve acá —con la
+          // hoja entera a la vista y antes de la primera llamada al modelo— y no lote a lote.
+          ordenDeFechaPorHoja.set(nombre, detectarOrdenDeFecha(desdeEncabezado.slice(1).flat()));
           vivas.push({
             nombre,
             rows: desdeEncabezado,
@@ -512,11 +629,14 @@ export function startExcelIngestWorker(): Promise<string> {
           const sheet = workbook.Sheets[sheetName];
           if (!sheet) continue;
 
-          const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, {
+          const crudas: unknown[][] = XLSX.utils.sheet_to_json(sheet, {
             header: 1,
             blankrows: false,
           });
-          if (rows.length === 0) continue;
+          if (crudas.length === 0) continue;
+          // `crudas` conserva las filas de título: el despivotado las necesita para sacar el
+          // año, y `rows` las pierde en el `splice` de abajo.
+          let rows: unknown[][] = [...crudas];
 
           /*
            * ═══ EL ENCABEZADO NO SIEMPRE ES LA PRIMERA FILA ═══
@@ -534,7 +654,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * encabezado para armar el mapa de columnas.
            */
           const filaEncabezado = detectarFilaDeEncabezado(rows);
-          const headerRow = rows[filaEncabezado] ?? [];
+          let headerRow = rows[filaEncabezado] ?? [];
           if (filaEncabezado > 0) {
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}": el encabezado está en ` +
@@ -543,6 +663,8 @@ export function startExcelIngestWorker(): Promise<string> {
             );
             rows.splice(0, filaEncabezado);
           }
+          /* Referencia estable: si el despivotado corre, `rows` deja de apuntar acá. */
+          const filasOriginales = rows;
 
           /*
            * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
@@ -585,6 +707,42 @@ export function startExcelIngestWorker(): Promise<string> {
 
           const forma = analizarFormaDeHoja(rows);
           if (forma.esReporte) {
+            /*
+             * ═══════════════════════════════════════════════════════════════════════════════
+             * ANTES DE DESCARTAR UN REPORTE ANCHO: ¿SE PUEDE CONVERTIR EN MOVIMIENTOS?
+             * ═══════════════════════════════════════════════════════════════════════════════
+             *
+             * `analizarFormaDeHoja` acierta al decir "esto no es una tabla" y aun así
+             * descartarlo pierde plata real. La matriz de gastos operativos de una PYME es la
+             * ÚNICA fuente de sus gastos: no hay otra hoja de donde sacarlos, así que
+             * descartarla deja el dashboard con `GTQ 0.00` en Gastos Operativos y —peor— con
+             * el resultado del período INFLADO. No es que falte un dato: la cifra que sí se
+             * muestra queda mal.
+             *
+             * Medido: Q 75.465,90 en el archivo real de KapePrueba, Q 62.486,32 en el archivo
+             * hostil. En los dos, el cliente veía utilidad neta = utilidad bruta, o sea que el
+             * producto le decía que operar su negocio no cuesta nada.
+             *
+             * `despivotarReporte` es una LISTA BLANCA y devuelve `null` ante cualquier duda —
+             * un `Estado_Resultados` o un `Flujo_Caja` tienen la misma forma y despivotarlos
+             * duplicaría los ingresos del cliente. Cuando dice `null`, la hoja sigue exactamente
+             * el camino que ya seguía. Ver `lib/sheet-unpivot.ts` para las tres guardas.
+             */
+            const largo = despivotar(sheetName, crudas, rows);
+            if (largo) {
+              console.info(
+                `[excel-ingest] company=${companyId} hoja "${sheetName}" es un reporte por mes: ` +
+                  `${largo.motivo}`,
+              );
+              // No se empuja una entrada acá: la hoja sigue su curso y empuja la suya de
+              // `movimientos` más abajo. Dos entradas para la misma hoja harían que el resumen
+              // la contara dos veces.
+              notaDeDespivotado.set(sheetName, largo.motivo);
+              rows = largo.rows;
+              headerRow = largo.rows[0] ?? [];
+            }
+          }
+          if (forma.esReporte && rows === filasOriginales) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${forma.motivo}`);
             hojasLeidas.push({
@@ -1092,6 +1250,8 @@ export function startExcelIngestWorker(): Promise<string> {
              */
             columnsCanonicas:
               mapasPorHoja.get(sheetName) ?? perfilesPorHoja.get(sheetName)?.columnMap,
+            // Ver el bloque de `ordenDeFechaPorHoja`: se decide por HOJA, no por lote.
+            ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
             /*
              * Que este lote use el nombre de categoría que ya usó su hoja. Sin esto, dos lotes
              * de `Ventas` devolvieron `sales`, `ventas` y `product_sales` para el mismo
@@ -1283,7 +1443,11 @@ export function startExcelIngestWorker(): Promise<string> {
             noAptas++;
           }
 
-          const rows = construirFilas(porIndice, { rows: batch, baseCurrency }, columnas);
+          const rows = construirFilas(
+            porIndice,
+            { rows: batch, baseCurrency, ordenDeFecha: ordenDeFechaPorHoja.get(sheetName) },
+            columnas,
+          );
           await confirmarLote({
             sheetName,
             batchIndex,
@@ -1328,7 +1492,11 @@ export function startExcelIngestWorker(): Promise<string> {
         }): Promise<void> {
           if (await cancelado()) return;
 
-          const rows = construirFilas(porIndice, { rows: batch, baseCurrency }, columnas);
+          const rows = construirFilas(
+            porIndice,
+            { rows: batch, baseCurrency, ordenDeFecha: ordenDeFechaPorHoja.get(sheetName) },
+            columnas,
+          );
           await confirmarLote({
             sheetName,
             batchIndex,
@@ -1699,6 +1867,9 @@ export function startExcelIngestWorker(): Promise<string> {
             // un `[]` en el resumen se leería como "leí Q 0".
             ...(medicion.montos.length > 0 ? { montos: medicion.montos } : {}),
             ...(medicion.costos.length > 0 ? { costos: medicion.costos } : {}),
+            ...(notaDeDespivotado.has(sheetName)
+              ? { nota: notaDeDespivotado.get(sheetName)! }
+              : {}),
           });
 
           if (medicion.montos.length > 0) {

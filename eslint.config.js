@@ -4,7 +4,9 @@ import tseslint from 'typescript-eslint';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'src/db/migrations'] },
+  // `scratch/` es material de trabajo de depuración (generadores de archivos de prueba y
+  // harness offline), no producto. No se versiona: ver .gitignore.
+  { ignores: ['dist', 'node_modules', 'src/db/migrations', 'scratch'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

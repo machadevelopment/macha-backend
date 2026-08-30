@@ -252,7 +252,17 @@ export type VeredictoCrudo = {
  */
 export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
-  params: { rows: unknown[][]; baseCurrency: string; ventaYaRegistradaEnOtraHoja?: boolean },
+  params: {
+    rows: unknown[][];
+    baseCurrency: string;
+    ventaYaRegistradaEnOtraHoja?: boolean;
+    /**
+     * En qué orden vienen día y mes en las fechas con barras de ESTA hoja. Lo decide el
+     * worker sobre la hoja ENTERA (`detectarOrdenDeFecha`), no cada lote por su cuenta: dos
+     * lotes que lleguen a órdenes distintos partirían la hoja en dos calendarios.
+     */
+    ordenDeFecha?: 'dmy' | 'mdy';
+  },
   columns: ColumnMap,
 ): ClassifiedRow[] {
   const out: ClassifiedRow[] = [];
@@ -264,7 +274,13 @@ export function construirFilas(
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency }),
+      payload: assemblePayload({
+        verdict,
+        row,
+        columns,
+        baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
+      }),
     });
 
     /*
@@ -373,6 +389,7 @@ export function construirFilas(
         row,
         columns,
         baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
       });
 
       /*
@@ -396,7 +413,13 @@ export function construirFilas(
     const costo = costoDeLaFila(row, columns);
     if (costo === null || costo === 0) continue;
 
-    const venta = assemblePayload({ verdict, row, columns, baseCurrency: params.baseCurrency });
+    const venta = assemblePayload({
+      verdict,
+      row,
+      columns,
+      baseCurrency: params.baseCurrency,
+      ordenDeFecha: params.ordenDeFecha,
+    });
     out.push({
       targetEntity: 'transaction',
       confidence: typeof v.cf === 'number' ? v.cf : 0,
@@ -895,6 +918,15 @@ export async function classifySheetRows(params: {
    */
   ventaYaRegistradaEnOtraHoja?: boolean;
   /**
+   * En qué orden vienen día y mes en las fechas con barras de ESTA hoja.
+   *
+   * Lo decide el worker sobre la hoja ENTERA y no cada lote por su cuenta: es el mismo modo
+   * de fallo que `assertMismoMapa` cubre para el mapa de columnas. Dos lotes que lleguen a
+   * órdenes distintos partirían la hoja en dos calendarios, y el desplazamiento no falla
+   * nada — mueve los movimientos de mes, con datos plausibles.
+   */
+  ordenDeFecha?: 'dmy' | 'mdy';
+  /**
    * Fija el NOMBRE de la categoría al que ya usó esta hoja, cuando este lote la bautizó
    * distinto (`ventas` donde el lote 1 dijo `sales`).
    *
@@ -1108,6 +1140,7 @@ export async function classifySheetRows(params: {
         row: params.rows[i]!,
         columns: columnas,
         baseCurrency: params.baseCurrency,
+        ordenDeFecha: params.ordenDeFecha,
       }),
     });
   }
