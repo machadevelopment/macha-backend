@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { despivotarReporte, esRenglonDeTotal, inferirAnio, mesDeEncabezado } from './sheet-unpivot';
+import {
+  claveDeConceptoAncho,
+  despivotarReporte,
+  esRenglonDeTotal,
+  inferirAnio,
+  mesDeEncabezado,
+} from './sheet-unpivot';
 
 /**
  * La garantía: la matriz de gastos de una PYME entra a su contabilidad, y un estado de
@@ -231,5 +237,90 @@ describe('piezas sueltas', () => {
     expect(esRenglonDeTotal('Alquiler de local')).toBe(false);
     // "Total" tiene que ir al PRINCIPIO: un rubro puede nombrarla al pasar.
     expect(esRenglonDeTotal('Servicios con total variable')).toBe(false);
+  });
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA CUARTA GUARDA: EL RESUMEN QUE NINGUNA DE LAS OTRAS TRES PODÍA VER
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `02_Restaurante_ElFogon` (archivo real) trae `CostosYGastos` con 180 filas de detalle y
+ * `ReporteMensualGastos` con 6 categorías × 12 meses, cuyo subtítulo dice literalmente
+ * "Resumen ya consolidado, uso interno de gerencia".
+ *
+ * Ese resumen es INDISTINGUIBLE de la matriz legítima de KapePrueba mirando la hoja sola:
+ * todo positivo, ningún vocabulario de agregado, una fila por rubro. Pasaba las tres primeras
+ * guardas y duplicaba los gastos del restaurante. `sheet-duplication` tampoco lo atrapaba: los
+ * totales difieren 1,08 % —el detalle cubre 20 meses y el resumen 12— contra su umbral del 1 %.
+ *
+ * La señal no está en la hoja: está en el LIBRO. Medido, 100 % de solape en el restaurante
+ * contra 0 % en KapePrueba.
+ */
+describe('un consolidado de otra hoja no se despivota', () => {
+  const RESUMEN_DEL_RESTAURANTE = [
+    ['Categoria', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio'],
+    ['Compra de insumos', 4699, 20673, 6827, 18965, 17850, 21804],
+    ['Renta de Local', 15111, 14242, 15727, 5872, 24517, 8730],
+    ['Planilla', 19252, 11466, 3363, 8378, 17085, 18132],
+    ['Servicios', 3100, 3250, 3080, 3300, 3190, 3410],
+  ]; // prettier-ignore
+
+  /** Lo que trae la columna `Categoria` de la hoja de detalle. */
+  const CATEGORIAS_DEL_DETALLE = new Set(
+    ['Compra de insumos', 'Renta de Local', 'Planilla', 'Servicios', 'Marketing'].map(
+      claveDeConceptoAncho,
+    ),
+  );
+
+  test('sin el contexto del libro se despivota (es lo que hacían las tres guardas)', () => {
+    expect(despivotarReporte(RESUMEN_DEL_RESTAURANTE, { anioPorDefecto: 2026 })).not.toBeNull();
+  });
+
+  test('con el contexto del libro se rechaza', () => {
+    expect(
+      despivotarReporte(RESUMEN_DEL_RESTAURANTE, {
+        anioPorDefecto: 2026,
+        conceptosDeMovimientos: CATEGORIAS_DEL_DETALLE,
+      }),
+    ).toBeNull();
+  });
+
+  test('la matriz legítima NO se rechaza por conceptos ajenos', () => {
+    // Los gastos de KapePrueba no aparecen en ninguna hoja de movimientos de su libro.
+    expect(
+      despivotarReporte(GASTOS, {
+        anioPorDefecto: 2026,
+        conceptosDeMovimientos: CATEGORIAS_DEL_DETALLE,
+      }),
+    ).not.toBeNull();
+  });
+
+  test('UNA coincidencia suelta no tumba una hoja legítima', () => {
+    /*
+     * Un rubro puede llamarse igual que un texto cualquiera de otra hoja por casualidad. Se
+     * exigen al menos dos coincidencias Y la mitad de los conceptos, porque el costo de
+     * rechazar de más es real: el cliente vuelve a ver GTQ 0.00 de gastos.
+     */
+    const casiTodoPropio = new Set([claveDeConceptoAncho('Alquiler de local y bodega')]);
+    expect(
+      despivotarReporte(GASTOS, {
+        anioPorDefecto: 2026,
+        conceptosDeMovimientos: casiTodoPropio,
+      }),
+    ).not.toBeNull();
+  });
+
+  test('el solape se mide sin acentos ni mayúsculas', () => {
+    // "Renta de Local" y "renta de local" son el mismo rubro; compararlos crudos diría que no.
+    const conMayusculas = new Set(
+      ['COMPRA DE INSUMOS', 'Renta  de  Local', 'planilla', 'Servicios'].map(claveDeConceptoAncho),
+    );
+    expect(
+      despivotarReporte(RESUMEN_DEL_RESTAURANTE, {
+        anioPorDefecto: 2026,
+        conceptosDeMovimientos: conMayusculas,
+      }),
+    ).toBeNull();
   });
 });

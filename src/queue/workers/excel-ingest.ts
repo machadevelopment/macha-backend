@@ -34,7 +34,7 @@ import { medirFilas } from '@/lib/reconciliation';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
-import { despivotarReporte, inferirAnio } from '@/lib/sheet-unpivot';
+import { claveDeConceptoAncho, despivotarReporte, inferirAnio } from '@/lib/sheet-unpivot';
 import {
   canSkipSheet,
   firmaDeCatalogo,
@@ -467,6 +467,44 @@ export function startExcelIngestWorker(): Promise<string> {
         /** Hoja → nota, para el resumen que lee el cliente. */
         const notaDeDespivotado = new Map<string, string>();
 
+        /*
+         * ═══ EL TEXTO DE LAS HOJAS QUE SÍ PRODUCEN MOVIMIENTOS ═══
+         *
+         * Es la cuarta guarda del despivotado: si los conceptos de una matriz ancha ya son las
+         * CATEGORÍAS de otra hoja, esa matriz es un consolidado de ella y despivotarla contaría
+         * doble. Ver el bloque largo en `lib/sheet-unpivot.ts`.
+         *
+         * Se recorre ANTES de considerar ningún despivotado, y solo las hojas que pasan los
+         * filtros por su cuenta: contra TODAS, los derivados del propio libro (un estado de
+         * resultados, un punto de equilibrio) nombran los mismos rubros y el solape sale 100 %
+         * siempre — la señal se apagaría entera.
+         *
+         * Se acotan las filas leídas porque lo que interesa son los conceptos DISTINTOS, que
+         * son decenas y se repiten desde la primera página; recorrer 18.000 filas para llenar
+         * el mismo Set no aporta nada.
+         */
+        const conceptosDeMovimientos = new Set<string>();
+        for (const nombre of workbook.SheetNames) {
+          const hoja = workbook.Sheets[nombre];
+          if (!hoja) continue;
+          const crudas: unknown[][] = XLSX.utils.sheet_to_json(hoja, {
+            header: 1,
+            blankrows: false,
+          });
+          if (crudas.length < 2) continue;
+          const desde = crudas.slice(detectarFilaDeEncabezado(crudas));
+          if (analizarFormaDeHoja(desde).esReporte) continue;
+          if (canSkipSheet(desde[0] ?? [])) continue;
+          if (noPuedeProducirMovimientos(desde, asDate, asNumber)) continue;
+          for (const fila of desde.slice(1, 600)) {
+            for (const celda of fila) {
+              if (typeof celda !== 'string') continue;
+              const clave = claveDeConceptoAncho(celda);
+              if (clave !== '') conceptosDeMovimientos.add(clave);
+            }
+          }
+        }
+
         const despivotar = (nombre: string, crudas: unknown[][], rows: unknown[][]) => {
           const filaEnc = crudas.length - rows.length;
           const titulo = crudas
@@ -477,6 +515,7 @@ export function startExcelIngestWorker(): Promise<string> {
           return despivotarReporte(rows, {
             anioPorDefecto: inferirAnio({ titulo, nombreHoja: nombre, fechasDelLibro }),
             titulo,
+            conceptosDeMovimientos,
           });
         };
 

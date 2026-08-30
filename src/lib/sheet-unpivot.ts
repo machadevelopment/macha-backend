@@ -129,6 +129,21 @@ function esLineaDeEstado(etiqueta: string): boolean {
   return PALABRAS_DE_AGREGADO.some((p) => t.includes(p));
 }
 
+/**
+ * Normaliza un concepto para compararlo entre hojas: sin acentos, sin puntuación, minúsculas.
+ *
+ * Es la misma idea que `claveDeConcepto` del diccionario de categorías, y por el mismo motivo:
+ * "Renta de Local" y "renta de local" son el mismo rubro, y compararlos crudos diría que no.
+ */
+export function claveDeConceptoAncho(v: unknown): string {
+  return String(v ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 export interface ReporteDespivotado {
   /** Formato largo con encabezado en la posición 0: `Fecha · Concepto · [Grupo] · Monto`. */
   rows: unknown[][];
@@ -151,7 +166,15 @@ const MIN_PERIODOS = 3;
  */
 export function despivotarReporte(
   rows: unknown[][],
-  opciones: { anioPorDefecto: number; titulo?: string },
+  opciones: {
+    anioPorDefecto: number;
+    titulo?: string;
+    /**
+     * Texto que ya aparece en las hojas del libro que SÍ producen movimientos, normalizado
+     * con `claveDeConceptoAncho`. Ver la cuarta guarda.
+     */
+    conceptosDeMovimientos?: ReadonlySet<string>;
+  },
 ): ReporteDespivotado | null {
   const encabezado = rows[0] ?? [];
   const datos = rows.slice(1);
@@ -243,6 +266,51 @@ export function despivotarReporte(
    */
   if (huboNegativo) return null;
   if (utiles.length < 2) return null;
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * CUARTA GUARDA: ¿MIS CONCEPTOS YA SON LAS CATEGORÍAS DE OTRA HOJA?
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Las tres guardas de arriba miran la hoja SOLA, y hay un caso que ninguna puede ver desde
+   * ahí. El archivo real de un restaurante (`02_Restaurante_ElFogon`) trae:
+   *
+   *     CostosYGastos          180 filas de detalle · columna `Categoria` · Q 1.094.637
+   *     ReporteMensualGastos     6 categorías × 12 meses                  · Q 1.082.854
+   *                              subtítulo: "Resumen ya consolidado, uso interno de gerencia"
+   *
+   * La segunda es un CONSOLIDADO de la primera, y es indistinguible de la matriz de gastos
+   * legítima de KapePrueba: todos sus valores positivos, ningún renglón con vocabulario de
+   * agregado, una fila por rubro. Pasaba las tres guardas y **duplicaba los gastos del
+   * restaurante**, que es exactamente el daño que este módulo existe para no causar.
+   *
+   * `sheet-duplication` tampoco lo atrapa: los dos totales difieren un 1,08 % —el detalle
+   * cubre 20 meses y el resumen 12— y el umbral de ese detector es 1 %. Quedó justo afuera.
+   *
+   * ═══ LA SEÑAL NO ESTÁ EN LA HOJA, ESTÁ EN EL LIBRO ═══
+   *
+   * La MISMA forma es legítima o duplicada según lo que haya alrededor:
+   *
+   *   · KapePrueba: sus conceptos (`Alquiler de local y bodega`, `Sueldos`) no aparecen en
+   *     ninguna hoja de movimientos. Esa matriz ES la fuente de sus gastos. → se despivota.
+   *   · Restaurante: sus conceptos (`Compra de insumos`, `Renta de Local`) son exactamente
+   *     los valores de la columna `Categoria` de la hoja de detalle. → es un resumen de ella.
+   *
+   * Medido sobre los cuatro libros: 100 % de solape en el restaurante, 0 % en los otros tres.
+   * La comparación es contra las hojas que **producen movimientos**, no contra todas: contra
+   * todas, los conceptos de KapePrueba aparecen en su `Estado_Resultados` y su
+   * `Punto_Equilibrio` —que son derivados y no se procesan— y el solape daba 100 % también,
+   * o sea que la señal se apagaba entera.
+   *
+   * El umbral está del lado de NO despivotar, que es la regla de esta casa para este módulo:
+   * refusar de más devuelve el comportamiento que ya había; despivotar de más cuenta doble.
+   */
+  const yaEnElLibro = opciones.conceptosDeMovimientos;
+  if (yaEnElLibro && yaEnElLibro.size > 0) {
+    const repetidos = utiles.filter((u) => yaEnElLibro.has(claveDeConceptoAncho(u.etiqueta)));
+    // Al menos dos, para que una coincidencia suelta no tumbe una hoja legítima.
+    if (repetidos.length >= 2 && repetidos.length / utiles.length >= 0.5) return null;
+  }
 
   /* ── 4. El despivotado ── */
   const salida: unknown[][] = [
