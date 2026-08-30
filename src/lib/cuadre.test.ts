@@ -171,3 +171,54 @@ describe('la cota superior se calcula del pipeline, no se adivina', () => {
     expect(evaluarCuadre(leido(100_000), aterrizado(200_000))[0]!.veredicto).toBe('sobra');
   });
 });
+
+describe('lo que espera revisión no es lo mismo que lo perdido', () => {
+  /*
+   * Un renglón de TOTAL o una fila sin fecha legible se guarda en staging con su monto y
+   * espera a que alguien la resuelva: ese dinero está identificado y con dueño.
+   *
+   * Sin distinguirlo, el detector reportaba `falta` sobre cargas sanas —medido en el test de
+   * integración: una hoja con un subtotal de Q 999.999 daba "falta el 89 %"— y un detector que
+   * grita sobre lo normal es un detector que nadie mira.
+   *
+   * Y separarlos importa porque piden acciones OPUESTAS: `en_revision` necesita que alguien
+   * mire la cola; `falta` necesita que alguien mire el pipeline, porque hay plata que nadie
+   * sabe dónde quedó. En el mismo cajón, el segundo —el caro— se pierde entre decenas del
+   * primero, que es rutina.
+   */
+  test('lo que falta está en revisión: no es un descuadre', () => {
+    const cuadres = evaluarCuadre(
+      leido(1_119_799),
+      aterrizado(119_800),
+      SIN_EXPANSION,
+      aterrizado(999_999),
+    );
+    expect(cuadres[0]!.veredicto).toBe('en_revision');
+    expect(hayDescuadre(cuadres)).toBe(false);
+    expect(cuadres[0]!.detalle).toContain('no falta nada, falta resolverlo');
+  });
+
+  test('si lo pendiente NO explica el hueco, sigue siendo falta', () => {
+    // La revisión no es una excusa universal: si falta plata que nadie tiene identificada,
+    // el detector lo dice igual.
+    const cuadres = evaluarCuadre(
+      leido(100_000),
+      aterrizado(10_000),
+      SIN_EXPANSION,
+      aterrizado(5_000),
+    );
+    expect(cuadres[0]!.veredicto).toBe('falta');
+    expect(hayDescuadre(cuadres)).toBe(true);
+  });
+
+  test('lo pendiente NO tapa un exceso', () => {
+    // Sobra plata: que haya filas en revisión no explica que aterrizara de más.
+    const cuadres = evaluarCuadre(
+      leido(100_000),
+      aterrizado(200_000),
+      SIN_EXPANSION,
+      aterrizado(50_000),
+    );
+    expect(cuadres[0]!.veredicto).toBe('sobra');
+  });
+});

@@ -65,6 +65,16 @@ export interface AterrizadoEnElLedger {
 export type Veredicto =
   /** Lo aterrizado está dentro de la banda esperada. */
   | 'cuadra'
+  /**
+   * Lo que falta está esperando en revisión interna, no perdido.
+   *
+   * Es un estado NORMAL y distinto de `falta`, y separarlos importa porque piden acciones
+   * opuestas: esto necesita que alguien mire la cola de revisión —el trabajo ya está
+   * identificado y tiene dueño—, mientras que `falta` necesita que alguien mire el pipeline
+   * porque hay plata que nadie sabe dónde quedó. Meterlos en el mismo cajón haría que el
+   * segundo, que es el caro, se pierda entre decenas del primero, que es rutina.
+   */
+  | 'en_revision'
   /** No aterrizó NADA habiendo dinero en el archivo. El fallo más caro y más frecuente. */
   | 'nada_aterrizo'
   /** Aterrizó bastante menos de lo que el archivo traía. */
@@ -146,22 +156,33 @@ export function evaluarCuadre(
    * descuadres reporta, y este detector no bloquea nada.
    */
   expansion = 1,
+  /**
+   * Lo que quedó en staging esperando revisión, por moneda. No está perdido: está
+   * identificado y con dueño, y va a entrar en cuanto alguien lo resuelva. Ver `en_revision`.
+   */
+  enRevision: AterrizadoEnElLedger[] = [],
 ): Cuadre[] {
-  const porMoneda = new Map<string, { leido: number; aterrizado: number }>();
+  const porMoneda = new Map<string, { leido: number; aterrizado: number; revision: number }>();
+  const vacio = () => ({ leido: 0, aterrizado: 0, revision: 0 });
   for (const l of leido) {
-    const previo = porMoneda.get(l.moneda) ?? { leido: 0, aterrizado: 0 };
+    const previo = porMoneda.get(l.moneda) ?? vacio();
     // El costo cuenta como dinero leído: produce su propia fila en el ledger.
     previo.leido += l.monto + l.costo;
     porMoneda.set(l.moneda, previo);
   }
   for (const a of aterrizado) {
-    const previo = porMoneda.get(a.moneda) ?? { leido: 0, aterrizado: 0 };
+    const previo = porMoneda.get(a.moneda) ?? vacio();
     previo.aterrizado += a.monto;
     porMoneda.set(a.moneda, previo);
   }
+  for (const r of enRevision) {
+    const previo = porMoneda.get(r.moneda) ?? vacio();
+    previo.revision += r.monto;
+    porMoneda.set(r.moneda, previo);
+  }
 
   const salida: Cuadre[] = [];
-  for (const [moneda, { leido: l, aterrizado: a }] of porMoneda) {
+  for (const [moneda, { leido: l, aterrizado: a, revision: rev }] of porMoneda) {
     if (l <= 0) {
       salida.push({
         moneda,
@@ -180,6 +201,24 @@ export function evaluarCuadre(
     const razon = a / l;
     let veredicto: Veredicto;
     let detalle: string;
+    /*
+     * Lo que falta, ¿está en revisión? Se mira ANTES que cualquier otro veredicto de falta,
+     * porque una carga con filas pendientes no tiene nada malo: el dinero está identificado y
+     * va a entrar en cuanto alguien las resuelva.
+     */
+    if (rev > 0 && (a + rev) / l >= MINIMO && razon < MINIMO) {
+      salida.push({
+        moneda,
+        leido: l,
+        aterrizado: a,
+        razon,
+        veredicto: 'en_revision',
+        detalle:
+          `${moneda} ${a.toFixed(2)} en el dashboard y ${rev.toFixed(2)} esperando revisión, ` +
+          `sobre ${l.toFixed(2)} leídos: no falta nada, falta resolverlo`,
+      });
+      continue;
+    }
     if (razon < CASI_NADA) {
       veredicto = 'nada_aterrizo';
       detalle =
@@ -207,5 +246,7 @@ export function evaluarCuadre(
 
 /** `true` si algún cuadre amerita que alguien lo mire. */
 export function hayDescuadre(cuadres: Cuadre[]): boolean {
-  return cuadres.some((c) => c.veredicto !== 'cuadra' && c.veredicto !== 'sin_datos');
+  return cuadres.some(
+    (c) => c.veredicto !== 'cuadra' && c.veredicto !== 'sin_datos' && c.veredicto !== 'en_revision',
+  );
 }

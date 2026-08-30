@@ -14,6 +14,7 @@ import {
   documentIngestBatches,
   companies,
   ingestedRows,
+  stagingRows,
   transactions,
   invoices,
   bills,
@@ -410,6 +411,12 @@ export function startExcelIngestWorker(): Promise<string> {
         const leidoDelArchivo = new Map<string, LeidoDelArchivo>();
         /** Filas del archivo que se midieron: el denominador de la expansión. */
         let filasMedidas = 0;
+        /**
+         * Monto de las filas que el modelo declaró `skip` (totales, subtotales, títulos).
+         * `medirFilas` las suma a lo leído —y hace bien, el cliente quiere ver lo que su
+         * archivo traía— pero nunca iban a llegar al ledger. Ver el bloque donde se acumula.
+         */
+        const declaradoNoDato = new Map<string, number>();
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -1394,6 +1401,33 @@ export function startExcelIngestWorker(): Promise<string> {
           consenso.registrarLote(result.veredictos);
 
           /*
+           * ═══ LO QUE EL MODELO DECLARÓ QUE NO ERA UN DATO, PARA EL CUADRE ═══
+           *
+           * Un renglón de TOTAL o un subtotal trae un monto legible, así que `medirFilas` lo
+           * SUMA a lo leído del archivo — y hace bien: el resumen que ve el cliente debe decir
+           * lo que el archivo traía, no lo que sobrevivió a los filtros.
+           *
+           * Pero el cuadre compara contra el LEDGER, y esas filas nunca iban a llegar ahí. Sin
+           * descontarlas, una hoja con un subtotal de Q 999.999 reporta que "falta el 89 % de
+           * la contabilidad" cuando el pipeline hizo exactamente lo correcto. Medido en el test
+           * de integración: el detector marcaba `falta 11 %` sobre una carga sana.
+           *
+           * Se descuenta SOLO lo que el modelo declaró `skip` explícitamente. Una fila que se
+           * marcó por `invalid_date` o que se fue a revisión NO se descuenta: esa sí es plata
+           * que el cliente esperaba ver y no está, y esconderla dejaría al detector ciego
+           * justo ante el caso que más importa.
+           */
+          for (const [i, v] of result.veredictos.entries()) {
+            if (v.e !== 'skip') continue;
+            const fila = batch[i];
+            if (!fila) continue;
+            const medicionSkip = medirFilas([fila], result.columns, baseCurrency);
+            for (const m of [...medicionSkip.montos, ...medicionSkip.costos]) {
+              declaradoNoDato.set(m.moneda, (declaradoNoDato.get(m.moneda) ?? 0) + m.total);
+            }
+          }
+
+          /*
            * ═══ LO QUE ESTA CARGA APRENDIÓ (Keneth–Semi, 2026-08-20) ═══
            *
            * Se empareja cada veredicto con la DESCRIPCIÓN de su fila para guardar la regla
@@ -2152,120 +2186,6 @@ export function startExcelIngestWorker(): Promise<string> {
           );
         });
 
-        /*
-         * ═══════════════════════════════════════════════════════════════════════════════════
-         * EL CUADRE: ¿LO QUE ATERRIZÓ SE PARECE A LO QUE EL ARCHIVO DECÍA? (2026-08-30)
-         * ═══════════════════════════════════════════════════════════════════════════════════
-         *
-         * `medirFilas` ya escribía cuánto dinero traía cada hoja, y **nadie lo comparaba nunca
-         * contra el resultado**: el lazo estaba abierto. Este bloque lo cierra.
-         *
-         * Importa más que cualquier test y por un motivo que costó siete reportes entender:
-         * los tests cubren archivos que YA VIMOS. Esto es lo único que funciona sobre el que
-         * va a subir el próximo cliente.
-         *
-         * ⚠️ **Va DESPUÉS de promover**, que es cuando existe lo aterrizado, y por eso está
-         * acá y no junto al resumen de lectura.
-         *
-         * **No bloquea nada, y es decisión.** Un falso positivo que frene la promoción deja al
-         * cliente sin su contabilidad por un chequeo que se equivocó — peor que el problema que
-         * viene a resolver. Lo que cambia desde ya es que un descuadre queda ESCRITO: cuando un
-         * cliente reporte "esto no cuadra", la respuesta ya está registrada en vez de haber que
-         * reconstruirla a mano durante horas, que es exactamente lo que pasó las siete veces.
-         *
-         * Un fallo acá NO tumba la carga: la contabilidad ya está promovida y correcta o no
-         * según el pipeline; lo que se pierde es el diagnóstico.
-         */
-        await withCompanyScope(companyId, async (db) => {
-          if (leidoDelArchivo.size === 0) return;
-          const [t, i, b] = await Promise.all([
-            db
-              .select({
-                moneda: transactions.originalCurrency,
-                monto: rawSql<string>`coalesce(sum(${transactions.originalAmount}), 0)`,
-                filas: rawSql<string>`count(*)`,
-              })
-              .from(transactions)
-              .where(
-                and(
-                  eq(transactions.companyId, companyId),
-                  eq(transactions.documentId, documentId),
-                  isNull(transactions.deletedAt),
-                ),
-              )
-              .groupBy(transactions.originalCurrency),
-            db
-              .select({
-                moneda: invoices.originalCurrency,
-                monto: rawSql<string>`coalesce(sum(${invoices.originalAmount}), 0)`,
-                filas: rawSql<string>`count(*)`,
-              })
-              .from(invoices)
-              .where(
-                and(
-                  eq(invoices.companyId, companyId),
-                  eq(invoices.documentId, documentId),
-                  isNull(invoices.deletedAt),
-                ),
-              )
-              .groupBy(invoices.originalCurrency),
-            db
-              .select({
-                moneda: bills.originalCurrency,
-                monto: rawSql<string>`coalesce(sum(${bills.originalAmount}), 0)`,
-                filas: rawSql<string>`count(*)`,
-              })
-              .from(bills)
-              .where(
-                and(
-                  eq(bills.companyId, companyId),
-                  eq(bills.documentId, documentId),
-                  isNull(bills.deletedAt),
-                ),
-              )
-              .groupBy(bills.originalCurrency),
-          ]);
-
-          const porMoneda = new Map<string, number>();
-          let filasEnElLedger = 0;
-          for (const fila of [...t, ...i, ...b]) {
-            porMoneda.set(fila.moneda, (porMoneda.get(fila.moneda) ?? 0) + Number(fila.monto));
-            filasEnElLedger += Number(fila.filas);
-          }
-
-          /*
-           * La EXPANSIÓN se calcula, no se adivina: el pipeline sabe cuántas filas de ledger
-           * produjo por cada fila del archivo porque él mismo las creó. Es lo que convierte la
-           * cota superior del cuadre de una constante imposible de elegir en un cálculo. Ver
-           * el bloque de `MARGEN` en `lib/cuadre.ts`.
-           */
-          const expansion = filasMedidas > 0 ? filasEnElLedger / filasMedidas : 1;
-          const cuadres = evaluarCuadre(
-            [...leidoDelArchivo.values()],
-            [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto })),
-            expansion,
-          );
-
-          for (const c of cuadres) {
-            const linea = `[cuadre] company=${companyId} document=${documentId} ${c.veredicto}: ${c.detalle}`;
-            if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos') console.info(linea);
-            else console.warn(linea);
-          }
-          if (hayDescuadre(cuadres)) {
-            console.warn(
-              `[cuadre] company=${companyId} document=${documentId} DESCUADRE: lo que aterrizó ` +
-                `no se parece a lo que el archivo traía. Es la señal más temprana de una hoja ` +
-                `perdida o contada dos veces.`,
-            );
-          }
-        }).catch((err) => {
-          console.error(
-            `[cuadre] company=${companyId} document=${documentId} no se pudo evaluar (la carga ` +
-              `sigue, la contabilidad no se toca):`,
-            err,
-          );
-        });
-
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
           const promotion = await promoteDocument(db, companyId, documentId);
 
@@ -2378,6 +2298,155 @@ export function startExcelIngestWorker(): Promise<string> {
           // había visto antes; los nunca vistos se llenan perezosamente en /metrics.
           await refreshExistingRollups(db, companyId);
           return true;
+        });
+
+        /*
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         * EL CUADRE: ¿LO QUE ATERRIZÓ SE PARECE A LO QUE EL ARCHIVO DECÍA? (2026-08-30)
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         *
+         * `medirFilas` ya escribía cuánto dinero traía cada hoja, y **nadie lo comparaba nunca
+         * contra el resultado**: el lazo estaba abierto. Este bloque lo cierra.
+         *
+         * Importa más que cualquier test y por un motivo que costó siete reportes entender:
+         * los tests cubren archivos que YA VIMOS. Esto es lo único que funciona sobre el que
+         * va a subir el próximo cliente.
+         *
+         * ⚠️ **Va DESPUÉS de `promoteDocument`**, y ese orden es todo el punto: antes de
+         * promover el ledger está VACÍO, así que el cuadre leería cero y reportaría
+         * `nada_aterrizo` en TODAS las cargas. El primer intento lo puso antes y produjo
+         * exactamente eso — un falso positivo sistemático, o sea un detector que grita siempre
+         * y al que por lo tanto nadie le haría caso. Lo atrapó el test de integración contra
+         * Postgres real; ningún test unitario podía verlo, porque el orden de dos bloques del
+         * worker no se ve desde afuera.
+         *
+         * **No bloquea nada, y es decisión.** Un falso positivo que frene la promoción deja al
+         * cliente sin su contabilidad por un chequeo que se equivocó — peor que el problema que
+         * viene a resolver. Lo que cambia desde ya es que un descuadre queda ESCRITO: cuando un
+         * cliente reporte "esto no cuadra", la respuesta ya está registrada en vez de haber que
+         * reconstruirla a mano durante horas, que es exactamente lo que pasó las siete veces.
+         *
+         * Un fallo acá NO tumba la carga: la contabilidad ya está promovida y correcta o no
+         * según el pipeline; lo que se pierde es el diagnóstico.
+         */
+        await withCompanyScope(companyId, async (db) => {
+          if (leidoDelArchivo.size === 0) return;
+          const [t, i, b] = await Promise.all([
+            db
+              .select({
+                moneda: transactions.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${transactions.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(transactions)
+              .where(
+                and(
+                  eq(transactions.companyId, companyId),
+                  eq(transactions.documentId, documentId),
+                  isNull(transactions.deletedAt),
+                ),
+              )
+              .groupBy(transactions.originalCurrency),
+            db
+              .select({
+                moneda: invoices.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${invoices.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(invoices)
+              .where(
+                and(
+                  eq(invoices.companyId, companyId),
+                  eq(invoices.documentId, documentId),
+                  isNull(invoices.deletedAt),
+                ),
+              )
+              .groupBy(invoices.originalCurrency),
+            db
+              .select({
+                moneda: bills.originalCurrency,
+                monto: rawSql<string>`coalesce(sum(${bills.originalAmount}), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(bills)
+              .where(
+                and(
+                  eq(bills.companyId, companyId),
+                  eq(bills.documentId, documentId),
+                  isNull(bills.deletedAt),
+                ),
+              )
+              .groupBy(bills.originalCurrency),
+          ]);
+
+          const porMoneda = new Map<string, number>();
+          let filasEnElLedger = 0;
+          for (const fila of [...t, ...i, ...b]) {
+            porMoneda.set(fila.moneda, (porMoneda.get(fila.moneda) ?? 0) + Number(fila.monto));
+            filasEnElLedger += Number(fila.filas);
+          }
+
+          /*
+           * La EXPANSIÓN se calcula, no se adivina: el pipeline sabe cuántas filas de ledger
+           * produjo por cada fila del archivo porque él mismo las creó. Es lo que convierte la
+           * cota superior del cuadre de una constante imposible de elegir en un cálculo. Ver
+           * el bloque de `MARGEN` en `lib/cuadre.ts`.
+           */
+          const expansion = filasMedidas > 0 ? filasEnElLedger / filasMedidas : 1;
+
+          /*
+           * Lo que quedó ESPERANDO REVISIÓN, que no es lo mismo que perdido. Un renglón de
+           * TOTAL o una fila sin fecha legible se guarda en staging con su monto y espera a que
+           * alguien la resuelva; ese dinero está identificado y con dueño.
+           *
+           * Sin esto el detector reportaba `falta` sobre cargas sanas —medido: una hoja con un
+           * subtotal de Q 999.999 daba "falta el 89 %"— y un detector que grita sobre lo normal
+           * es un detector que nadie mira.
+           */
+          const pendientes = await db
+            .select({
+              moneda: rawSql<string>`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`,
+              monto: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric), 0)`,
+            })
+            .from(stagingRows)
+            .where(
+              and(
+                eq(stagingRows.companyId, companyId),
+                eq(stagingRows.documentId, documentId),
+                eq(stagingRows.reviewStatus, 'pending'),
+              ),
+            )
+            .groupBy(rawSql`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`);
+
+          const cuadres = evaluarCuadre(
+            [...leidoDelArchivo.values()].map((l) => ({
+              ...l,
+              // Ver `declaradoNoDato`: un renglón de TOTAL se leyó pero nunca iba al ledger.
+              monto: Math.max(0, l.monto - (declaradoNoDato.get(l.moneda) ?? 0)),
+            })),
+            [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto })),
+            expansion,
+            pendientes.map((p) => ({ moneda: p.moneda, monto: Number(p.monto) })),
+          );
+
+          for (const c of cuadres) {
+            const linea = `[cuadre] company=${companyId} document=${documentId} ${c.veredicto}: ${c.detalle}`;
+            if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos') console.info(linea);
+            else console.warn(linea);
+          }
+          if (hayDescuadre(cuadres)) {
+            console.warn(
+              `[cuadre] company=${companyId} document=${documentId} DESCUADRE: lo que aterrizó ` +
+                `no se parece a lo que el archivo traía. Es la señal más temprana de una hoja ` +
+                `perdida o contada dos veces.`,
+            );
+          }
+        }).catch((err) => {
+          console.error(
+            `[cuadre] company=${companyId} document=${documentId} no se pudo evaluar (la carga ` +
+              `sigue, la contabilidad no se toca):`,
+            err,
+          );
         });
 
         if (promotedThisRun) {
