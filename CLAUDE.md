@@ -374,6 +374,20 @@ Conventions & gotchas:
   the mandatory path for every upload: 0 rows in production against 3,195 in staging, measured 2026-08-06.
   Idempotency is therefore **per row** (`staging_rows.promoted_at`), not per document — the old document-level
   lock blocked the legitimate second pass. Revert = soft-delete by `document_id`.
+  ⚠️ **Y el revert TAMBIÉN se lleva los artículos de inventario que solo esa carga sostenía**
+  (2026-08-30). Reporte de Keneth: *"subí 4 archivos, les di revert, el dashboard se limpia
+  pero el inventario sigue mostrando lo del primer excel"*. El síntoma señala la causa: el
+  importador trata la cantidad como un CONTEO, así que **la primera carga CREA el artículo** (con
+  su nombre, SKU y costo) y las siguientes solo ajustan la cantidad del mismo SKU — los
+  artículos en pantalla son, por construcción, los de la primera. `compensarInventario` dejaba
+  la existencia en cero y el listado filtra por `deleted_at` y **nunca por cantidad**, así que
+  el artículo seguía ahí. Medido contra Postgres real: 1 artículo donde debía haber 0.
+  **El criterio NO es "la creó esta carga"**, y ahí está todo: un artículo que la carga 1 creó y
+  que alguien ajustó A MANO después no puede desaparecer porque se revierta la carga 1 — ese
+  conteo es trabajo de una persona. Se da de baja solo si la existencia quedó en cero **Y todos
+  sus movimientos vienen de cargas revertidas o canceladas**; un movimiento manual tiene
+  `document_id` NULL y su sola presencia lo salva, que es la garantía que `recordMovement` ya
+  prometía en su comentario y que hasta ese día nada hacía cumplir.
 - **Consenso de hoja: se deja de preguntar lo ya contestado** (`lib/sheet-consensus.ts`,
   2026-08-19). Los seis pasos de arriba deciden qué NO mandar al modelo; este decide **cuándo
   dejar de mandarle una hoja que ya se entendió**, y es el ahorro más grande medido hasta ahora.
