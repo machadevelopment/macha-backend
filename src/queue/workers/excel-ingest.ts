@@ -467,6 +467,15 @@ export function startExcelIngestWorker(): Promise<string> {
         /** Hoja → nota, para el resumen que lee el cliente. */
         const notaDeDespivotado = new Map<string, string>();
 
+        /** Los rubros que nombra una hoja despivotada. Ver `conceptos` en `sheet-duplication`. */
+        const conceptosDe = (largas: unknown[][]): ReadonlySet<string> =>
+          new Set(
+            largas
+              .slice(1)
+              .map((f) => claveDeConceptoAncho(f[1]))
+              .filter((c) => c !== ''),
+          );
+
         /*
          * ═══ EL TEXTO DE LAS HOJAS QUE SÍ PRODUCEN MOVIMIENTOS ═══
          *
@@ -483,7 +492,7 @@ export function startExcelIngestWorker(): Promise<string> {
          * son decenas y se repiten desde la primera página; recorrer 18.000 filas para llenar
          * el mismo Set no aporta nada.
          */
-        const conceptosDeMovimientos = new Set<string>();
+        const conceptosPorHoja = new Map<string, Set<string>>();
         for (const nombre of workbook.SheetNames) {
           const hoja = workbook.Sheets[nombre];
           if (!hoja) continue;
@@ -496,14 +505,35 @@ export function startExcelIngestWorker(): Promise<string> {
           if (analizarFormaDeHoja(desde).esReporte) continue;
           if (canSkipSheet(desde[0] ?? [])) continue;
           if (noPuedeProducirMovimientos(desde, asDate, asNumber)) continue;
+          const propios = new Set<string>();
           for (const fila of desde.slice(1, 600)) {
             for (const celda of fila) {
               if (typeof celda !== 'string') continue;
               const clave = claveDeConceptoAncho(celda);
-              if (clave !== '') conceptosDeMovimientos.add(clave);
+              if (clave !== '') propios.add(clave);
             }
           }
+          conceptosPorHoja.set(nombre, propios);
         }
+
+        /*
+         * ⚠️ SE EXCLUYE LA HOJA QUE SE ESTÁ EVALUANDO, y no es un detalle.
+         *
+         * La cuarta guarda pregunta "¿mis conceptos ya son las categorías de OTRA hoja?". Si el
+         * conjunto incluye los propios, una matriz que sobrevive a los filtros —una chica, de
+         * dos o tres rubros, que no llega al umbral de ningún descarte— aporta sus rubros al
+         * conjunto y después **se rechaza a sí misma** con 100 % de solape. El síntoma es el
+         * peor posible: no se despivota, se va al modelo sin columna de fecha y produce cero
+         * movimientos, en silencio.
+         */
+        const conceptosAjenosA = (hoja: string): Set<string> => {
+          const union = new Set<string>();
+          for (const [nombre, propios] of conceptosPorHoja) {
+            if (nombre === hoja) continue;
+            for (const c of propios) union.add(c);
+          }
+          return union;
+        };
 
         const despivotar = (nombre: string, crudas: unknown[][], rows: unknown[][]) => {
           const filaEnc = crudas.length - rows.length;
@@ -515,7 +545,7 @@ export function startExcelIngestWorker(): Promise<string> {
           return despivotarReporte(rows, {
             anioPorDefecto: inferirAnio({ titulo, nombreHoja: nombre, fechasDelLibro }),
             titulo,
-            conceptosDeMovimientos,
+            conceptosDeMovimientos: conceptosAjenosA(nombre),
           });
         };
 
@@ -523,6 +553,8 @@ export function startExcelIngestWorker(): Promise<string> {
           nombre: string;
           rows: unknown[][];
           puedeProducirMovimientos: boolean;
+          /** Solo para las despivotadas: ver `conceptos` en `lib/sheet-duplication.ts`. */
+          conceptos?: ReadonlySet<string>;
         }[] = [];
         for (const nombre of workbook.SheetNames) {
           const hoja = workbook.Sheets[nombre];
@@ -533,19 +565,21 @@ export function startExcelIngestWorker(): Promise<string> {
           });
           if (crudas.length < 2) continue;
           let desdeEncabezado = crudas.slice(detectarFilaDeEncabezado(crudas));
-          if (analizarFormaDeHoja(desdeEncabezado).esReporte) {
-            const largo = despivotar(nombre, crudas, desdeEncabezado);
-            if (!largo) continue;
-            desdeEncabezado = largo.rows;
+          /*
+           * El despivotado se intenta SIN CONDICIONES; sus guardas deciden, incluida la que
+           * rechaza una hoja que ya tiene columna de fecha. Ver el bloque largo de la pasada 2.
+           * Acá tiene que verse el MISMO resultado que allá: si no, el dedup y el esquema del
+           * libro razonan sobre un conjunto de hojas distinto del que se procesa.
+           */
+          let conceptosDespivotados: ReadonlySet<string> | undefined;
+          const largoDeLaHoja = despivotar(nombre, crudas, desdeEncabezado);
+          if (largoDeLaHoja) {
+            desdeEncabezado = largoDeLaHoja.rows;
+            conceptosDespivotados = conceptosDe(largoDeLaHoja.rows);
+          } else if (analizarFormaDeHoja(desdeEncabezado).esReporte) {
+            continue;
           }
           if (canSkipSheet(desdeEncabezado[0] ?? [])) continue;
-          // Mismo rescate que en la pasada 2, y por el mismo motivo que el resto de esta
-          // pasada existe: si acá no se ve la hoja despivotada, el dedup y el esquema del
-          // libro razonan sobre un conjunto de hojas distinto del que se procesa.
-          if (noPuedeProducirMovimientos(desdeEncabezado, asDate, asNumber)) {
-            const rescate = despivotar(nombre, crudas, desdeEncabezado);
-            if (rescate) desdeEncabezado = rescate.rows;
-          }
           /*
            * `puedeProducirMovimientos` se calcula ACÁ, con el mismo predicado que el filtro de
            * la segunda pasada, para que el dedup no pueda conservar una hoja que ese filtro va
@@ -560,6 +594,7 @@ export function startExcelIngestWorker(): Promise<string> {
           vivas.push({
             nombre,
             rows: desdeEncabezado,
+            ...(conceptosDespivotados ? { conceptos: conceptosDespivotados } : {}),
             puedeProducirMovimientos: !noPuedeProducirMovimientos(
               desdeEncabezado,
               asDate,
@@ -670,8 +705,6 @@ export function startExcelIngestWorker(): Promise<string> {
             );
             rows.splice(0, filaEncabezado);
           }
-          /* Referencia estable: si el despivotado corre, `rows` deja de apuntar acá. */
-          const filasOriginales = rows;
 
           /*
            * PRE-FILTRO POR ENCABEZADOS, antes que nada. Los archivos reales de los clientes
@@ -712,44 +745,46 @@ export function startExcelIngestWorker(): Promise<string> {
             continue;
           }
 
-          const forma = analizarFormaDeHoja(rows);
-          if (forma.esReporte) {
-            /*
-             * ═══════════════════════════════════════════════════════════════════════════════
-             * ANTES DE DESCARTAR UN REPORTE ANCHO: ¿SE PUEDE CONVERTIR EN MOVIMIENTOS?
-             * ═══════════════════════════════════════════════════════════════════════════════
-             *
-             * `analizarFormaDeHoja` acierta al decir "esto no es una tabla" y aun así
-             * descartarlo pierde plata real. La matriz de gastos operativos de una PYME es la
-             * ÚNICA fuente de sus gastos: no hay otra hoja de donde sacarlos, así que
-             * descartarla deja el dashboard con `GTQ 0.00` en Gastos Operativos y —peor— con
-             * el resultado del período INFLADO. No es que falte un dato: la cifra que sí se
-             * muestra queda mal.
-             *
-             * Medido: Q 75.465,90 en el archivo real de KapePrueba, Q 62.486,32 en el archivo
-             * hostil. En los dos, el cliente veía utilidad neta = utilidad bruta, o sea que el
-             * producto le decía que operar su negocio no cuesta nada.
-             *
-             * `despivotarReporte` es una LISTA BLANCA y devuelve `null` ante cualquier duda —
-             * un `Estado_Resultados` o un `Flujo_Caja` tienen la misma forma y despivotarlos
-             * duplicaría los ingresos del cliente. Cuando dice `null`, la hoja sigue exactamente
-             * el camino que ya seguía. Ver `lib/sheet-unpivot.ts` para las tres guardas.
-             */
-            const largo = despivotar(sheetName, crudas, rows);
-            if (largo) {
-              console.info(
-                `[excel-ingest] company=${companyId} hoja "${sheetName}" es un reporte por mes: ` +
-                  `${largo.motivo}`,
-              );
-              // No se empuja una entrada acá: la hoja sigue su curso y empuja la suya de
-              // `movimientos` más abajo. Dos entradas para la misma hoja harían que el resumen
-              // la contara dos veces.
-              notaDeDespivotado.set(sheetName, largo.motivo);
-              rows = largo.rows;
-              headerRow = largo.rows[0] ?? [];
-            }
+          /*
+           * ═══════════════════════════════════════════════════════════════════════════════
+           * ¿ES UNA MATRIZ POR PERÍODO QUE SE PUEDE CONVERTIR EN MOVIMIENTOS?
+           * ═══════════════════════════════════════════════════════════════════════════════
+           *
+           * `analizarFormaDeHoja` acierta al decir "esto no es una tabla" y aun así descartarlo
+           * PIERDE PLATA REAL: la matriz de gastos operativos de una PYME es la ÚNICA fuente de
+           * sus gastos, no hay otra hoja de donde sacarlos. Descartarla deja el dashboard con
+           * `GTQ 0.00` en Gastos Operativos y —peor— el resultado del período INFLADO: no es que
+           * falte un dato, la cifra que sí se muestra queda mal. Medido: Q 75.465,90 en el
+           * archivo real de KapePrueba, que es lo que suma la propia columna `Total` de esa hoja.
+           *
+           * **Se intenta SIN CONDICIONES**, y eso es deliberado. Antes se intentaba solo cuando
+           * otro filtro estaba por descartar la hoja, y ahí se colaba una matriz PEQUEÑA: dos o
+           * tres rubros no llegan a las cuatro columnas de período que exige el detector de
+           * reportes ni a las cinco filas que exige `noPuedeProducirMovimientos`, así que ningún
+           * filtro la tocaba, nadie intentaba despivotarla, y terminaba en el modelo sin columna
+           * de fecha — cero movimientos, en silencio. Depender de "algún otro filtro la iba a
+           * descartar" obliga a enumerar filtros y umbrales; que la propia función sepa rechazar
+           * una hoja que YA tiene columna de fecha la vuelve segura de llamar siempre.
+           *
+           * `despivotarReporte` es una LISTA BLANCA y devuelve `null` ante cualquier duda: un
+           * `Estado_Resultados` o un `Flujo_Caja` tienen la misma forma y despivotarlos
+           * duplicaría los ingresos. Cuando dice `null`, la hoja sigue el camino que ya seguía.
+           */
+          const largo = despivotar(sheetName, crudas, rows);
+          if (largo) {
+            console.info(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" es una matriz por ` +
+                `período: ${largo.motivo}`,
+            );
+            // No se empuja una entrada de resumen acá: la hoja sigue su curso y empuja la suya
+            // de `movimientos` más abajo. Dos entradas la contarían dos veces.
+            notaDeDespivotado.set(sheetName, largo.motivo);
+            rows = largo.rows;
+            headerRow = largo.rows[0] ?? [];
           }
-          if (forma.esReporte && rows === filasOriginales) {
+
+          const forma = analizarFormaDeHoja(rows);
+          if (!largo && forma.esReporte) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${forma.motivo}`);
             hojasLeidas.push({
@@ -912,39 +947,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * de movimientos cuya columna se llame `Emisión` o `Corte` no tiene ninguna palabra
            * que el vocabulario reconozca, pero sus celdas siguen trayendo fechas.
            */
-          /*
-           * ═════════════════════════════════════════════════════════════════════════════════
-           * ÚLTIMO INTENTO ANTES DE TIRARLA: ¿ES UNA MATRIZ POR PERÍODO? (2026-08-30)
-           * ═════════════════════════════════════════════════════════════════════════════════
-           *
-           * El despivotado se intentaba SOLO cuando `analizarFormaDeHoja` decía "reporte", y esa
-           * señal exige cuatro columnas de período. Una matriz SEMESTRAL tiene dos y una
-           * trimestral corta puede tener tres: no llegan al umbral, así que caían acá y se
-           * descartaban enteras sin que nadie intentara leerlas. Medido: Q 77.280 de gastos
-           * perdidos en una matriz de dos columnas, sin una sola fila marcada que lo delatara.
-           *
-           * Que el despivotado sea un RESCATE ante CUALQUIER descarte, y no solo ante uno, es lo
-           * correcto por construcción: a esta altura la hoja ya se iba a la basura, así que
-           * intentarlo solo puede AGREGAR datos. Y no afloja nada — las cinco guardas de
-           * `sheet-unpivot` corren enteras, incluida la que exige año explícito en las etiquetas
-           * cuando hay menos de tres períodos.
-           */
-          let rescatada = false;
           if (noPuedeProducirMovimientos(rows, asDate, asNumber)) {
-            const rescate = despivotar(sheetName, crudas, rows);
-            if (rescate) {
-              console.info(
-                `[excel-ingest] company=${companyId} hoja "${sheetName}" no tenía columna de ` +
-                  `fecha, pero es una matriz por período: ${rescate.motivo}`,
-              );
-              notaDeDespivotado.set(sheetName, rescate.motivo);
-              rows = rescate.rows;
-              headerRow = rescate.rows[0] ?? [];
-              rescatada = true;
-            }
-          }
-
-          if (!rescatada && noPuedeProducirMovimientos(rows, asDate, asNumber)) {
             totalRowsSkippedPreFiltro += rows.length;
             hojasLeidas.push({
               estado: 'descartada',
