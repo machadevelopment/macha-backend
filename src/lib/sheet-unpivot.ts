@@ -101,6 +101,17 @@ export function mesDeEncabezado(nombre: unknown): { mes: number; anio: number | 
    * leyera como trimestre, chocaría con los meses que resume y el propio chequeo de unicidad
    * rechazaría la hoja; mejor no reconocerla y dejar que la ignore por no ser un mes.
    */
+  // Semestres: `S1 2026`, `1er semestre`. Mapean al primer mes de su mitad del año.
+  let sm = /^(?:s|sem(?:estre)?)[\s.-]*([12])(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (!sm) sm = /^([12])(?:er|do|º|°)?[\s.-]*(?:s|sem(?:estre)?)(?:[\s./-]*(\d{2,4}))?$/.exec(t);
+  if (sm) {
+    const mes = (Number(sm[1]) - 1) * 6 + 1;
+    if (sm[2] === undefined) return { mes, anio: null };
+    let a = Number(sm[2]);
+    if (a < 100) a += 2000;
+    return a >= 1990 && a <= 2100 ? { mes, anio: a } : null;
+  }
+
   m = /^(?:q|t|trim(?:estre)?)[\s.-]*([1-4])(?:[\s./-]*(\d{2,4}))?$/.exec(t);
   if (!m)
     m = /^([1-4])(?:er|do|ro|to|º|°)?[\s.-]*(?:t|trim(?:estre)?)(?:[\s./-]*(\d{2,4}))?$/.exec(t);
@@ -212,7 +223,24 @@ export function despivotarReporte(
     const m = mesDeEncabezado(encabezado[i]);
     if (m) columnasDeMes.push({ i, mes: m.mes, anio: m.anio ?? opciones.anioPorDefecto });
   }
-  if (columnasDeMes.length < MIN_PERIODOS) return null;
+  /*
+   * ═══ DOS PERÍODOS BASTAN SI LAS ETIQUETAS TRAEN EL AÑO ═══
+   *
+   * El mínimo de tres existe porque "una columna que parece un mes" es evidencia débil: dos
+   * columnas numéricas cualesquiera no son una matriz por período. Pero una columna rotulada
+   * `S1 2026` no admite otra lectura — dice explícitamente qué período es—, y una matriz
+   * semestral tiene exactamente dos.
+   *
+   * Sin esto, una matriz semestral se descartaba entera (Q 77.280 medidos): ni siquiera
+   * llegaba al modelo, porque sin columna de fecha `noPuedeProducirMovimientos` la tira.
+   *
+   * El año explícito es la condición, no el tipo de período: `Enero`/`Febrero` a secas siguen
+   * necesitando tres, porque un encabezado puede decir "Enero" y ser el nombre de una persona
+   * o de una sucursal.
+   */
+  const todasConAnio = columnasDeMes.every((c) => mesDeEncabezado(encabezado[c.i])?.anio != null);
+  const minimo = todasConAnio ? 2 : MIN_PERIODOS;
+  if (columnasDeMes.length < minimo) return null;
 
   /*
    * Un mes repetido significa dos bloques distintos a lo ancho (`Enero Costo`, `Enero Venta`):

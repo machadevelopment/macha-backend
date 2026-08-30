@@ -498,11 +498,62 @@ export function detectarOrdenDeFecha(valores: unknown[]): 'dmy' | 'mdy' {
  * moneda BASE de la empresa. Eso no es una suposición arriesgada: es el mismo default que
  * el modelo aplicaba antes, solo que ahora está escrito donde se puede leer y probar.
  */
+/**
+ * Cómo escribe la gente las dos monedas que el producto sí maneja.
+ *
+ * Reconocerlas no es cosmético: sin esto, una hoja que rotula la columna `Q` o `US$` caía al
+ * `else` de abajo y se marcaba como moneda inválida — o, antes de este arreglo, se relabelaba
+ * en silencio.
+ */
+const ALIAS_DE_MONEDA: Record<string, string> = {
+  GTQ: 'GTQ', Q: 'GTQ', QTZ: 'GTQ', QUETZAL: 'GTQ', QUETZALES: 'GTQ', 'Q.': 'GTQ',
+  USD: 'USD', US$: 'USD', 'US.': 'USD', DOLAR: 'USD', DOLARES: 'USD', DÓLAR: 'USD',
+  'DÓLARES': 'USD', DOLLAR: 'USD', DOLLARS: 'USD', 'U$S': 'USD', USS: 'USD',
+}; // prettier-ignore
+
+/**
+ * Monedas que EXISTEN y que este producto no sabe convertir.
+ *
+ * Se enumeran para poder DISTINGUIRLAS de un rótulo ilegible, y esa distinción es todo el
+ * punto de la lista: ver el bloque de `asCurrency`.
+ */
+const OTRAS_MONEDAS = new Set([
+  'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'CNY', 'MXN', 'COP', 'CRC', 'HNL', 'NIO',
+  'BZD', 'SVC', 'PAB', 'DOP', 'PEN', 'CLP', 'ARS', 'BRL', 'UYU', 'BOB', 'PYG', 'VES',
+]); // prettier-ignore
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA MONEDA QUE NO SOPORTAMOS NO SE RENOMBRA A LA NUESTRA (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La versión anterior era `return upper === 'GTQ' || upper === 'USD' ? upper : baseCurrency`,
+ * o sea que **cualquier cosa que no fuera esas dos se relabelaba a la moneda de la empresa**.
+ * Una fila que dice `EUR` se guardaba como `GTQ`: €100 entraban como Q100, subestimando ~8,4
+ * veces, y `staging-rules` no podía desmentirlo porque el payload ya decía `GTQ`, que es
+ * válido. El dato quedaba mal y nada fallaba.
+ *
+ * La confusión estaba en tratar igual dos cosas distintas:
+ *
+ *   · **La celda está vacía** → la hoja no dice la moneda, y usar la de la empresa es
+ *     correcto: es la suposición que el cliente haría. Sigue igual.
+ *   · **La celda dice una moneda que no soportamos** → la hoja SÍ lo dice, y nosotros lo
+ *     estamos ignorando. Ahí la respuesta honesta es dejar el valor tal cual para que
+ *     `staging-rules` la marque `invalid_currency` y la fila vaya a revisión: visible, en vez
+ *     de silenciosamente mal.
+ *
+ * Un rótulo que no es NINGUNA moneda conocida (basura, un encabezado repetido, una nota) sigue
+ * cayendo a la base, que es el comportamiento de siempre: ahí no hay una afirmación que
+ * respetar. Por eso hacen falta las dos listas y no bastaría con una.
+ */
 function asCurrency(value: unknown, baseCurrency: string): string {
   const s = asText(value);
   if (!s) return baseCurrency;
-  const upper = s.toUpperCase();
-  return upper === 'GTQ' || upper === 'USD' ? upper : baseCurrency;
+  const upper = s.toUpperCase().replace(/\s+/g, '');
+  const alias = ALIAS_DE_MONEDA[upper];
+  if (alias) return alias;
+  if (OTRAS_MONEDAS.has(upper)) return upper;
+  return baseCurrency;
 }
 
 /**

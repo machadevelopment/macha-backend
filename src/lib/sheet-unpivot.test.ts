@@ -467,3 +467,43 @@ describe('las dos funciones de período tienen que coincidir', () => {
     }
   });
 });
+
+describe('dos períodos bastan si las etiquetas traen el año', () => {
+  /*
+   * El mínimo de tres existe porque "una columna que parece un mes" es evidencia débil. Pero
+   * una columna rotulada `S1 2026` no admite otra lectura, y una matriz semestral tiene
+   * exactamente dos. Sin esto se descartaba entera (Q 77.280 medidos) y ni siquiera llegaba al
+   * modelo: sin columna de fecha, `noPuedeProducirMovimientos` la tira antes.
+   */
+  test('una matriz SEMESTRAL con año explícito se despivota', () => {
+    const sem = [
+      ['Concepto', 'S1 2026', 'S2 2026', 'Total'],
+      ['Alquiler de local', 9000, 9000, 18000],
+      ['Sueldos administrativos', 16800, 16800, 33600],
+    ]; // prettier-ignore
+    const r = despivotarReporte(sem, { anioPorDefecto: 2026 });
+    expect(r).not.toBeNull();
+    expect(r!.periodos).toBe(2);
+    expect(r!.rows.slice(1).map((f) => String(f[0])).sort()).toEqual([
+      '2026-01-01', '2026-01-01', '2026-07-01', '2026-07-01',
+    ]); // prettier-ignore
+  });
+
+  test('SIN año explícito siguen haciendo falta tres', () => {
+    // "Enero" puede ser el nombre de una persona o de una sucursal; `S1 2026` no.
+    const dos = [
+      ['Concepto', 'Enero', 'Febrero'],
+      ['Alquiler de local', 1500, 1500],
+      ['Sueldos administrativos', 2800, 2800],
+    ]; // prettier-ignore
+    expect(despivotarReporte(dos, { anioPorDefecto: 2026 })).toBeNull();
+  });
+
+  test('las formas de semestre', () => {
+    expect(mesDeEncabezado('S1 2026')).toEqual({ mes: 1, anio: 2026 });
+    expect(mesDeEncabezado('S2')).toEqual({ mes: 7, anio: null });
+    expect(mesDeEncabezado('1er semestre')).toEqual({ mes: 1, anio: null });
+    expect(mesDeEncabezado('Semestre 2')).toEqual({ mes: 7, anio: null });
+    expect(mesDeEncabezado('S3')).toBeNull();
+  });
+});

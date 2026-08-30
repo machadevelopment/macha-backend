@@ -274,7 +274,31 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
         // sigue siendo lo mejor que se tiene. Más filas = el detalle.
         detalle = a.rows.length >= b.rows.length ? a : b;
         cabecera = detalle === a ? b : a;
-        if (detalle.rows.length === cabecera.rows.length) continue; // sin cabecera clara, no se toca
+        if (detalle.rows.length === cabecera.rows.length) {
+          /*
+           * ═══ EL MISMO NÚMERO DE FILAS Y EL MISMO DINERO AL CENTAVO: ES UNA COPIA ═══
+           *
+           * La regla de arriba —sin cabecera clara, no se toca— existe para no elegir al azar
+           * entre dos hojas distintas. Pero hay un caso donde no hay nada que elegir: dos
+           * hojas con **el mismo número de filas y un total idéntico al centavo**, que además
+           * comparten encabezados. Eso no es coincidencia, es la misma tabla dos veces —una
+           * copia de respaldo, una hoja duplicada al exportar, `Ventas` y `Ventas (2)`.
+           *
+           * Medido: con la regla anterior las dos se procesaban y la facturación del cliente
+           * salía al DOBLE. Ninguna de las dos gana por autosuficiencia (las dos la tienen) ni
+           * por tamaño (son iguales), así que el caso caía en el `continue` y no se descartaba
+           * nada.
+           *
+           * El umbral acá es al CENTAVO y no el 1 % que usa el resto del módulo: dos conjuntos
+           * de datos distintos no suman exactamente lo mismo hasta el último decimal, y esa
+           * exactitud es justamente lo que distingue una copia de dos meses parecidos.
+           */
+          const identico = a.sumas.some((sa) => b.sumas.some((sb) => Math.abs(sa - sb) < 0.005));
+          if (!identico) continue;
+          // Da igual cuál se descarte: son la misma tabla. Se conserva la primera del libro.
+          detalle = b;
+          cabecera = a;
+        }
       }
 
       /*

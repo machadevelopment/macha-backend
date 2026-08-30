@@ -46,9 +46,10 @@ const MESES =
  * es el peor de los dos mundos. Hay test que fija la equivalencia.
  */
 const TRIMESTRE = String.raw`(?:q|t|trim(?:estre)?)[\s.-]*[1-4](?:[\s./-]*\d{2,4})?|[1-4](?:er|do|ro|to)?[\s.-]*(?:t|trim(?:estre)?)(?:[\s./-]*\d{2,4})?`;
+const SEMESTRE = String.raw`(?:s|sem(?:estre)?)[\s.-]*[12](?:[\s./-]*\d{2,4})?|[12](?:er|do)?[\s.-]*(?:s|sem(?:estre)?)(?:[\s./-]*\d{2,4})?`;
 
 const PERIODO = new RegExp(
-  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4}|${TRIMESTRE})$`,
+  `^(?:(?:${MESES})[\\s./-]*\\d{0,4}|\\d{4}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{4}|${TRIMESTRE}|${SEMESTRE})$`,
   'i',
 );
 
