@@ -53,6 +53,25 @@ if (!url) {
 }
 
 const aplicar = process.argv.includes('--aplicar');
+/**
+ * Incluye los artículos que NO tienen un solo movimiento.
+ *
+ * Es opt-in y no el default por una razón concreta: sin movimientos no hay forma de saber si lo
+ * creó una carga o una persona. Un artículo importado con existencia CERO no genera movimiento
+ * —`recordMovement` rechaza cantidad 0, con razón— así que en los datos anteriores a la
+ * migración 0038 los dos casos son **indistinguibles**.
+ *
+ * Desde 0038 el artículo guarda su `document_id`, así que para los datos NUEVOS esta bandera no
+ * hace falta: el revert los alcanza solo. Existe para lo que quedó ANTES de esa migración, donde
+ * ni siquiera hay `document_id` que consultar y la única evidencia es de contexto —240 vehículos
+ * con nombre de auto y costo de seis cifras creados el mismo día no los dio de alta nadie a
+ * mano—. Ese juicio le toca a una persona mirando la lista, no a una consulta.
+ *
+ * ⚠️ Con esta bandera **también entra** un artículo que alguien dio de alta a mano en cero y
+ * nunca movió. Por eso es opt-in, por eso el ensayo lista todo antes, y por eso conviene
+ * combinarla con el criterio de siempre: mirar la lista primero.
+ */
+const incluirSinMovimientos = process.argv.includes('--incluir-sin-movimientos');
 const sql = postgres(url, { max: 1, ssl: 'prefer', onnotice: () => {} });
 
 /**
@@ -101,11 +120,16 @@ const huerfanos = await sql<
             )
           )
      )
-     -- Un artículo SIN un solo movimiento no se toca: no lo creó ninguna carga, así que lo
-     -- creó una persona a mano y su existencia en cero es un dato, no basura.
-     and exists (
-       select 1 from inventory_movements m
-        where m.company_id = i.company_id and m.item_id = i.id
+     -- Un artículo SIN un solo movimiento no se toca por defecto: en los datos anteriores a la
+     -- migración 0038 no hay forma de saber si lo creó una carga (importado con existencia 0,
+     -- que no genera movimiento) o una persona. Con --incluir-sin-movimientos se incluyen; ver
+     -- la nota de esa bandera.
+     and (
+       ${incluirSinMovimientos ? sql`true` : sql`false`}
+       or exists (
+         select 1 from inventory_movements m
+          where m.company_id = i.company_id and m.item_id = i.id
+       )
      )
    order by c.name, i.sku
 `;
