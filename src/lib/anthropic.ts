@@ -256,6 +256,8 @@ export function construirFilas(
     rows: unknown[][];
     baseCurrency: string;
     ventaYaRegistradaEnOtraHoja?: boolean;
+    /** Contraparte de `ventaYaRegistradaEnOtraHoja`, para las cuentas por pagar. */
+    compraYaRegistradaEnOtraHoja?: boolean;
     /**
      * En qué orden vienen día y mes en las fechas con barras de ESTA hoja. Lo decide el
      * worker sobre la hoja ENTERA (`detectarOrdenDeFecha`), no cada lote por su cuenta: dos
@@ -409,6 +411,75 @@ export function construirFilas(
       continue;
     }
 
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * UNA FACTURA RECIBIDA ES UN COSTO ADEMÁS DE UNA CUENTA POR PAGAR (2026-08-30)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * Es el fallo SIMÉTRICO del de arriba, y estuvo abierto todo este tiempo porque el
+     * razonamiento se detuvo a mitad de camino. La nota que quedó escrita decía:
+     *
+     *     "Una `bill` NO produce ingreso: sería registrar como ingreso lo que la empresa debe."
+     *
+     * Eso es cierto y sigue vigente. Lo que no se dijo es que **sí produce un COSTO**. Se
+     * confundió "no es ingreso" con "no es nada", y el resultado es que una fila clasificada
+     * `bill` crea la cuenta por pagar y **desaparece del estado de resultados**: `rollups.ts`
+     * suma `cogs` y `opex` únicamente de `transactions`, igual que suma `revenue`.
+     *
+     * O sea el mismo modo de fallo que dejó a U3TECH con cero ingresos, del otro lado del
+     * balance: el dato se lee bien, se clasifica bien, se guarda bien, y el dashboard no lo
+     * muestra. A quién afecta: a toda empresa que registre las facturas de sus proveedores en
+     * una hoja de cuentas por pagar en vez de anotarlas como gasto pagado — que es como se
+     * lleva la contabilidad por devengo.
+     *
+     * ═══ EL TIPO LO DECIDE EL MODELO, NO UN DEFAULT ═══
+     *
+     * Una factura de proveedor puede ser mercadería (`cogs`) o alquiler (`opex`), y la
+     * diferencia mueve el MARGEN BRUTO, que es una cifra de portada. Por eso el prompt pide
+     * `t` también para `bill` (punto 14) en vez de asumir uno: elegir `opex` por defecto
+     * inflaría el margen de cualquier comercio que compre inventario a crédito.
+     *
+     * Si el modelo no lo dio, no se inventa: sin `t` no se deriva la transacción y la cuenta
+     * por pagar queda registrada igual. Es preferible un costo ausente y visible en revisión a
+     * un margen falso que nadie puede desmentir.
+     *
+     * ═══ Y LA MISMA ACOTACIÓN DE "UNA VEZ" ═══
+     *
+     * `compraYaRegistradaEnOtraHoja` es la contraparte exacta de la regla de la factura
+     * emitida: si el libro trae `Compras` con el detalle Y `CuentasPorPagar` apuntando a esas
+     * mismas compras, derivar el costo otra vez lo cuenta dos veces. Lo decide el esquema del
+     * libro, no el nombre de la hoja.
+     */
+    if (v.e === 'bill' && !params.compraYaRegistradaEnOtraHoja) {
+      const tipo = v.t === 'cogs' || v.t === 'opex' ? v.t : null;
+      if (tipo !== null) {
+        const egreso = assemblePayload({
+          verdict: {
+            ...verdict,
+            targetEntity: 'transaction',
+            type: tipo,
+            // Igual que en la factura: la categoría del modelo si la dio, y si no una que
+            // dice de dónde SALIÓ la fila. Inventarle un rubro le metería al dashboard una
+            // categoría de negocio que el cliente nunca escribió.
+            category: verdict.category ?? 'cuentas_por_pagar',
+          },
+          row,
+          columns,
+          baseCurrency: params.baseCurrency,
+          ordenDeFecha: params.ordenDeFecha,
+        });
+        const monto = egreso.originalAmount;
+        if (typeof monto === 'number' && Number.isFinite(monto) && monto !== 0 && egreso.date) {
+          out.push({
+            targetEntity: 'transaction',
+            confidence: typeof v.cf === 'number' ? v.cf : 0,
+            payload: egreso,
+          });
+        }
+      }
+      continue;
+    }
+
     if (v.e !== 'transaction' || v.t !== 'revenue') continue;
     const costo = costoDeLaFila(row, columns);
     if (costo === null || costo === 0) continue;
@@ -493,7 +564,7 @@ export const SYSTEM_PROMPT = `Eres un motor de estandarización de datos financi
 Recibes filas crudas de una hoja de Excel de una PYME y debes:
 1. Clasificar cada fila hacia UNA de estas entidades destino: "transaction" (ingreso/costo/gasto), "invoice" (cuenta por cobrar), "bill" (cuenta por pagar).
 2. Devolver UNA SOLA VEZ, en "columns", el índice (base 0) de cada columna de la hoja: fecha, monto, moneda, descripción, contraparte, producto, cantidad, categoría de producto, fecha de vencimiento y COSTO de la fila (ver punto 11 — si la hoja trae el costo junto al ingreso, señalarlo es obligatorio: sin él el sistema calcula 100% de margen en todo). Usa null cuando la hoja no traiga esa columna. Los VALORES no se devuelven: el sistema los lee de la fila usando estos índices. Devolver un índice equivocado desplaza el dato de TODA la hoja, así que mira varias filas antes de decidir.
-3. Devolver EXACTAMENTE UNA entrada por cada fila del lote, sin excepción: si el lote trae 88 filas, "rows" trae 88 entradas con los índices 0 a 87, cada uno una sola vez. Ninguna fila se omite y ningún índice se inventa. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, solo si es transaction), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
+3. Devolver EXACTAMENTE UNA entrada por cada fila del lote, sin excepción: si el lote trae 88 filas, "rows" trae 88 entradas con los índices 0 a 87, cada uno una sola vez. Ninguna fila se omite y ningún índice se inventa. Por cada fila devolver SOLO: "i" (su índice en el lote), "e" (entidad), "t" (tipo contable, obligatorio en "transaction" y también en "bill" — ver punto 14), "c" (categoría) y "cf" (confianza). Clasifica SIEMPRE con tu propio criterio contable: "t" está limitado a revenue/cogs/opex/other, pero "c" es texto libre — si ninguna categoría conocida aplica, inventa un nombre corto y descriptivo en snake_case (ej. "licencias_software"). Nunca descartes ni dejes sin clasificar una fila porque su encabezado no aparezca en ningún diccionario.
 4. El bloque adjunto con sinónimos y ejemplos es una REFERENCIA de apoyo, no una lista cerrada: úsalo para nombrar igual lo que ya tiene nombre y para entender la jerga local, no como límite de lo que puedes clasificar.
 5. Asignar "cf" (0 a 1) por fila: baja si el mapeo es ambiguo, la fecha/monto es dudoso, o la fila no encaja claramente en el esquema. Una fila que clasificaste con criterio propio, sin respaldo del diccionario, no es por eso de baja confianza — bájala solo si el dato en sí es dudoso.
 6. Las filas que no son datos (títulos de sección, totales, subtotales, encabezados repetidos, filas vacías) SÍ se devuelven, con "e" = "skip" y el resto en null. No las omitas: omitir una fila es indistinguible de un error, y el sistema no puede saber si la ignoraste a propósito.
@@ -502,6 +573,8 @@ Recibes filas crudas de una hoja de Excel de una PYME y debes:
 9. La columna "product" del mapa se señala solo cuando la fila identifique un producto o servicio concreto (una columna de producto, SKU o descripción de artículo). Si la fila es un gasto general, un total o no menciona un producto identificable, devolver null — inventarlo produce un catálogo de productos falso. Ojo: esto NO contradice el punto 2. La categoría se inventa cuando hace falta porque es una etiqueta de clasificación y toda fila pertenece a alguna; el producto no se inventa nunca porque es una entidad del negocio del cliente, y una inventada aparece después como una fila más en su catálogo.
 10. La columna "quantity" del mapa se señala solo si la hoja trae unidades explícitas. "quantity" son las unidades que mueve la fila, y solo cuando la fila LAS TRAE explícitamente (una columna de cantidad, unidades, libras, cajas). Devolver null si no hay tal columna: null significa "esta fila no habla de unidades" y es distinto de 0. NUNCA deducir la cantidad dividiendo el monto entre un precio unitario que aparezca en otra columna — ese cálculo parece obvio y es la forma más rápida de llenar el sistema de unidades inventadas cuando el precio de esa fila traía un descuento, un impuesto o un flete. Si la fila no dice cuántas, no sabemos cuántas.
 11. "costTotal" y "costUnit" son las columnas de COSTO de la propia fila, y solo una de las dos (o ninguna). Muchos libros de PYME traen el ingreso y el costo en la misma línea ("Ingreso Total" junto a "Costo Total", o "PrecioUnitario" junto a "CostoUnitario"). Señala "costTotal" cuando la columna ya es el costo de la línea completa, y "costUnit" cuando es el costo de UNA unidad. NUNCA señales como costo una columna de precio de venta, de utilidad, de margen ni de descuento: el costo es lo que le costó al negocio, no lo que cobró ni lo que ganó. Si la hoja no trae costo, las dos van en null — inventarlo produciría un margen falso.
+14. En una fila "bill" (cuenta por pagar) devolver TAMBIÉN "t", con "cogs" u "opex". Una factura de proveedor no es solo una deuda: es el costo o el gasto que la originó, y sin "t" ese costo no entra al estado de resultados. Mercadería, materia prima, insumos de producción y fletes de compra son "cogs"; todo lo demás es "opex". Si de verdad no se puede saber cuál de los dos es, devolver "t" en null: queda registrada la deuda y la fila va a revisión, que es preferible a inventar un tipo que mueve el margen.
+15. La frontera entre "cogs" y "opex" NO es opinable, y equivocarla cambia el MARGEN BRUTO que el dueño ve en portada. "cogs" es SOLO lo directamente atribuible a lo que se vendió: mercadería para reventa, materia prima, empaque del producto, mano de obra de producción, flete de importación de esa mercadería. NUNCA son "cogs", aunque suenen relacionados con vender: alquiler o renta del local, planilla administrativa y de ventas, publicidad y marketing, comisiones bancarias, servicios (luz, agua, internet), honorarios, depreciación, papelería, mantenimiento. Todos esos son "opex". Ante la duda entre los dos, "opex": inflar el costo directo hunde el margen bruto, que es la cifra con la que el dueño decide sus precios.
 13. "store" es la columna que dice EN QUÉ TIENDA, sucursal o local ocurrió la fila ("TDA-001", "Sucursal Centro", "Tienda Zona 10"). Señálala solo si la hoja trae una columna de tienda o sucursal; devolver null si no la trae. NO confundir con el CANAL de venta ("En Línea", "En Tienda"), que dice cómo se vendió y no dónde, ni con el vendedor: una columna de canal señalada como tienda produciría un ranking de sucursales con dos filas llamadas "En Línea" y "En Tienda" que no corresponden a ningún local del cliente.
 12. "productCategory" es la familia comercial a la que pertenece el producto de ESTA fila ("bebidas", "abarrotes", "servicios"), cuando el archivo la trae en una columna o cuando el nombre del producto la hace evidente. Es una etiqueta de agrupación de productos y no tiene nada que ver con "c" del punto 3, que clasifica el movimiento contable. Devolver null si la fila no trae producto o si agruparlo sería adivinar.`;
 
@@ -917,6 +990,8 @@ export async function classifySheetRows(params: {
    * la nota larga en `construirFilas`.
    */
   ventaYaRegistradaEnOtraHoja?: boolean;
+  /** Contraparte de `ventaYaRegistradaEnOtraHoja`, para las cuentas por pagar. */
+  compraYaRegistradaEnOtraHoja?: boolean;
   /**
    * En qué orden vienen día y mes en las fechas con barras de ESTA hoja.
    *

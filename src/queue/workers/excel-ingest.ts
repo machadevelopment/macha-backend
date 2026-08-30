@@ -645,6 +645,26 @@ export function startExcelIngestWorker(): Promise<string> {
         const entidades = new Set(
           [...esquema.entidades].filter((nombre) => !esLibroDeMovimientos.get(nombre)),
         );
+        /*
+         * ═══ ¿EL MOVIMIENTO DE ESTA HOJA YA ESTÁ REGISTRADO EN OTRA? ═══
+         *
+         * Una hoja que apunta a otra hoja de MOVIMIENTOS del mismo libro trae el ESTADO de un
+         * hecho que allá ya se registró: una cuenta por cobrar sobre una venta, una cuenta por
+         * pagar sobre una compra. Devengar ese hecho otra vez lo cuenta dos veces.
+         *
+         * `!entidades.has(...)` importa: apuntar a un CATÁLOGO (un vehículo, un producto) no
+         * significa que el movimiento esté contado — solo apuntar a algo que produce
+         * transacciones lo significa.
+         *
+         * Vive en una función y no repetido en cada llamada porque tiene TRES consumidores —el
+         * camino del modelo y los dos cortocircuitos—, y los dos cortocircuitos **no lo pasaban
+         * en absoluto**: un lote resuelto en código derivaba el ingreso de sus facturas aunque
+         * la venta ya estuviera registrada. Es el mismo error de "parchar solo un consumidor"
+         * que ya costó una vez con `esquema.entidades`.
+         */
+        const yaRegistradaEnOtraHoja = (hoja: string): boolean =>
+          esquema.referencias.some((r) => r.desde === hoja && !entidades.has(r.hacia));
+
         if (esquema.referencias.length > 0) {
           console.log(
             `[excel-ingest] company=${companyId} esquema del libro: ` +
@@ -1269,9 +1289,17 @@ export function startExcelIngestWorker(): Promise<string> {
              * un catálogo (un vehículo, un producto) no significa que el ingreso esté contado
              * — solo apuntar a algo que produce transacciones lo significa.
              */
-            ventaYaRegistradaEnOtraHoja: esquema.referencias.some(
-              (r) => r.desde === sheetName && !entidades.has(r.hacia),
-            ),
+            ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+            /*
+             * La misma condición para el otro lado del balance. Una hoja de cuentas por pagar
+             * que apunta a la de compras trae deudas cuyo COSTO ya está registrado allá, y
+             * derivarlo otra vez lo cuenta dos veces — exactamente el caso que la regla de la
+             * factura emitida ya cubre para los ingresos.
+             *
+             * Es el MISMO predicado a propósito: la señal es "esta hoja apunta a otra que
+             * produce movimientos", y esa señal no cambia según el signo del dinero.
+             */
+            compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
             headerRow,
             baseCurrency,
             /*
@@ -1487,7 +1515,13 @@ export function startExcelIngestWorker(): Promise<string> {
 
           const rows = construirFilas(
             porIndice,
-            { rows: batch, baseCurrency, ordenDeFecha: ordenDeFechaPorHoja.get(sheetName) },
+            {
+              rows: batch,
+              baseCurrency,
+              ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
+              ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+              compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+            },
             columnas,
           );
           await confirmarLote({
@@ -1536,7 +1570,13 @@ export function startExcelIngestWorker(): Promise<string> {
 
           const rows = construirFilas(
             porIndice,
-            { rows: batch, baseCurrency, ordenDeFecha: ordenDeFechaPorHoja.get(sheetName) },
+            {
+              rows: batch,
+              baseCurrency,
+              ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
+              ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+              compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+            },
             columnas,
           );
           await confirmarLote({
