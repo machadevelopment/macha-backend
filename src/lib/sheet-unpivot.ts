@@ -50,16 +50,7 @@
  * "Total" (falla el vocabulario si se mira sin excluirla).
  */
 import { asDate, asNumber } from './row-assembly';
-import { pareceNombreDePeriodo } from './sheet-shape';
-
-const MESES_ES: Record<string, number> = {
-  enero: 1, ene: 1, febrero: 2, feb: 2, marzo: 3, mar: 3, abril: 4, abr: 4,
-  mayo: 5, may: 5, junio: 6, jun: 6, julio: 7, jul: 7, agosto: 8, ago: 8,
-  septiembre: 9, setiembre: 9, sep: 9, sept: 9, set: 9,
-  octubre: 10, oct: 10, noviembre: 11, nov: 11, diciembre: 12, dic: 12,
-  january: 1, jan: 1, february: 2, march: 3, april: 4, apr: 4, june: 6, july: 7,
-  august: 8, aug: 8, september: 9, october: 10, november: 11, december: 12, dec: 12,
-}; // prettier-ignore
+import { mesPorNombre, mesesDeEncabezado, pareceNombreDePeriodo } from './sheet-shape';
 
 const sinAcentos = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
@@ -124,10 +115,16 @@ export function mesDeEncabezado(nombre: unknown): { mes: number; anio: number | 
   }
 
   // `enero` · `ene-26` · `enero 2026` · `ene.2026`
-  m = /^([a-z]{3,10})\.?[\s./-]*(\d{2,4})?$/.exec(t);
+  m = /^([a-z]{3,12})\.?[\s./-]*(\d{2,4})?$/.exec(t);
   if (!m) return null;
-  const mes = MESES_ES[m[1]!];
-  if (!mes) return null;
+  /*
+   * La tabla de meses vive en `sheet-shape` y es la MISMA que usa `pareceNombreDePeriodo`.
+   * Tenerla dos veces era el modo de fallo que este archivo ya advertía: una decía "sí es
+   * período" y la otra no sabía cuál, así que la hoja se marcaba reporte y no se podía
+   * despivotar — se descartaba igual, el peor de los dos mundos.
+   */
+  const mes = mesPorNombre(m[1]!);
+  if (mes === null) return null;
   if (m[2] === undefined) return { mes, anio: null };
   let anio = Number(m[2]);
   if (anio < 100) anio += 2000;
@@ -219,9 +216,18 @@ export function despivotarReporte(
 
   /* ── 1. Las columnas que son meses ── */
   const columnasDeMes: { i: number; mes: number; anio: number }[] = [];
+  /*
+   * Los meses escritos A MANO —`Enrero`, `Abrl`, `Agosot`— se resuelven mirando el encabezado
+   * COMPLETO y no etiqueta por etiqueta (ver `mesesDeEncabezado`). Tiene que ser el mismo
+   * criterio que usa `analizarFormaDeHoja`, o pasa lo peor de los dos mundos: la hoja se marca
+   * como reporte y después no se puede despivotar, así que se descarta igual.
+   */
+  const conTypo = mesesDeEncabezado(encabezado);
   for (let i = 0; i < encabezado.length; i++) {
     const m = mesDeEncabezado(encabezado[i]);
-    if (m) columnasDeMes.push({ i, mes: m.mes, anio: m.anio ?? opciones.anioPorDefecto });
+    const mes = m?.mes ?? conTypo[i];
+    if (mes === null || mes === undefined) continue;
+    columnasDeMes.push({ i, mes, anio: m?.anio ?? opciones.anioPorDefecto });
   }
   /*
    * ═══ DOS PERÍODOS BASTAN SI LAS ETIQUETAS TRAEN EL AÑO ═══
