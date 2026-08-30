@@ -44,6 +44,15 @@ export const inventoryItems = pgTable(
      * que falta.
      */
     productId: uuid('product_id'),
+    /**
+     * Carga de Excel que dio de alta este artículo. NULL = lo creó una persona a mano.
+     *
+     * Vive acá y no solo en `inventory_movements` porque un artículo importado con existencia
+     * CERO no tiene ni un movimiento (`recordMovement` rechaza cantidad 0, con razón), así que
+     * sin esta columna no había forma de saber de qué carga salió — y el revert no lo
+     * alcanzaba. Ver la migración 0038 para los 240 vehículos que lo destaparon.
+     */
+    documentId: uuid('document_id'),
     sku: text('sku').notNull(),
     name: text('name').notNull(),
     location: text('location'),

@@ -140,6 +140,13 @@ export async function createItem(
       fxRateDate: costo.rateDate,
       supplier: input.supplier?.trim() || null,
       lastRestockDate: inicial > 0 ? fecha : null,
+      /*
+       * Qué carga lo dio de alta. Se guarda ACÁ y no solo en el movimiento de apertura porque
+       * un artículo que nace en CERO no tiene movimiento —`recordMovement` rechaza cantidad 0,
+       * con razón— y sin esto no quedaba rastro de su origen: el revert no podía alcanzarlo y
+       * la limpieza lo protegía creyendo que lo había creado una persona. Ver migración 0038.
+       */
+      documentId: input.documentId ?? null,
     })
     .returning({ id: inventoryItems.id });
 

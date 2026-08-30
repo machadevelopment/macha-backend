@@ -485,7 +485,29 @@ async function compensarInventario(
    * Es un soft-delete, igual que el resto del revert: si la carga se vuelve a subir, el
    * artículo se crea de nuevo con su historia limpia.
    */
-  const tocados = netos.map((f) => f.itemId);
+  /*
+   * Los artículos a evaluar son los que ESTA carga tocó… y también los que ESTA carga CREÓ sin
+   * moverlos.
+   *
+   * Un artículo importado con existencia CERO no tiene ni un movimiento —`recordMovement`
+   * rechaza cantidad 0, con razón— así que no aparece en `netos` y la primera versión de este
+   * bloque no lo veía. Medido en producción: 240 vehículos que ningún revert alcanzaba y que
+   * el script de limpieza además PROTEGÍA, porque «sin movimientos» es justo su señal de que lo
+   * dio de alta una persona. `inventory_items.document_id` (migración 0038) es lo que cierra
+   * ese hueco.
+   */
+  const creadosPorLaCarga = await db
+    .select({ id: inventoryItems.id })
+    .from(inventoryItems)
+    .where(
+      and(
+        eq(inventoryItems.companyId, companyId),
+        eq(inventoryItems.documentId, documentId),
+        isNull(inventoryItems.deletedAt),
+      ),
+    );
+
+  const tocados = [...new Set([...netos.map((f) => f.itemId), ...creadosPorLaCarga.map((c) => c.id)])]; // prettier-ignore
   if (tocados.length === 0) return;
 
   const huerfanos = await db
