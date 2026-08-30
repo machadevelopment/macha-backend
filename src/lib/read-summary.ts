@@ -83,6 +83,14 @@ export type HojaLeida =
        * columna produce una segunda transacción.
        */
       costos?: { moneda: string; total: number; filas: number }[];
+      /**
+       * La hoja no venía como listado: era un REPORTE por mes que se convirtió en movimientos.
+       *
+       * Se dice explícitamente porque el cliente cuenta filas. Su matriz de gastos tiene 16
+       * renglones y el resumen le va a decir 128 movimientos; sin esta nota parece que el
+       * sistema inventó filas, cuando lo que hizo fue abrir cada concepto en sus doce meses.
+       */
+      nota?: string;
     }
   | {
       estado: 'inventario';

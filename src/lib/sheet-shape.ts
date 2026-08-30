@@ -1,3 +1,5 @@
+import { asDate } from './row-assembly';
+
 /**
  * Distingue una TABLA de movimientos de un REPORTE, sin llamar al modelo.
  *
@@ -30,13 +32,6 @@
  * cuesta lo que ya cuesta hoy. Es la misma asimetría que gobierna `sheet-classifier.ts`.
  */
 
-/**
- * ¿Este nombre de columna es un PERÍODO? ("ene-25", "feb-26", "2026-06", "Enero", "Jan 2025")
- *
- * Es la firma de una hoja donde los datos están A LO ANCHO: cada columna es un mes y cada
- * fila una entidad —un cliente, un producto— con doce o veinticuatro valores al lado. Una
- * fila ahí no es un movimiento: son muchos.
- */
 const MESES =
   'ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|jan|apr|aug|dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
 const PERIODO = new RegExp(
@@ -44,6 +39,47 @@ const PERIODO = new RegExp(
   'i',
 );
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UN MARCADOR DE PERÍODO TAMBIÉN PUEDE SER UNA FECHA, NO SOLO UN NOMBRE (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `pareceNombreDePeriodo` reconoce "Enero", "ene-26", "2026-01". No reconoce lo que un Excel
+ * de verdad pone en esa columna cuando la escribe una fórmula: **una fecha**, casi siempre el
+ * día 1 del mes. Verificado en los dos archivos que motivaron esto — el `Resumen_Mensual` de
+ * KapePrueba trae los seriales 46023, 46054, 46082… que son 2026-01-01, 02-01, 03-01.
+ *
+ * El agujero es exactamente el de la señal 6, con el período escrito de otra forma: una hoja
+ * de una fila por mes se lee como tabla de movimientos y **sus cifras se suman ENCIMA de la
+ * hoja de detalle que las originó**. Medido contra el archivo hostil: Q 364.788 de ingresos
+ * contados dos veces, el 100 % de la facturación duplicada.
+ *
+ * ═══ POR QUÉ EL DÍA DEL MES ES LA GUARDA, Y NO UN DETALLE ═══
+ *
+ * "Una fila por mes" a secas es demasiado laxo: una PYME chica puede tener ocho movimientos
+ * reales, uno en cada mes, y descartarlos sería perder su contabilidad — el error que esta
+ * casa se niega a cometer en silencio.
+ *
+ * Lo que separa un MARCADOR de período de una fecha de movimiento es que el marcador no elige
+ * el día: lo pone la fórmula, y sale siempre el mismo (el 1, o el último del mes). Un
+ * movimiento ocurre el día que ocurre, así que sus días varían. Por eso se exige coherencia
+ * de día además de unicidad de mes: con las dos, un listado real no puede caer acá.
+ */
+function periodoDeFecha(v: unknown): { mes: string; dia: number; finDeMes: boolean } | null {
+  const f = asDate(v);
+  if (f === null) return null;
+  const [a, m, d] = f.split('-').map(Number) as [number, number, number];
+  const ultimo = new Date(Date.UTC(a, m, 0)).getUTCDate();
+  return { mes: `${a}-${String(m).padStart(2, '0')}`, dia: d, finDeMes: d === ultimo };
+}
+
+/**
+ * ¿Este nombre de columna es un PERÍODO? ("ene-25", "feb-26", "2026-06", "Enero", "Jan 2025")
+ *
+ * Es la firma de una hoja donde los datos están A LO ANCHO: cada columna es un mes y cada
+ * fila una entidad —un cliente, un producto— con doce o veinticuatro valores al lado. Una
+ * fila ahí no es un movimiento: son muchos.
+ */
 export function pareceNombreDePeriodo(nombre: unknown): boolean {
   if (typeof nombre !== 'string') return false;
   return PERIODO.test(nombre.trim().replace(/\s+/g, ' '));
@@ -145,6 +181,28 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
         esReporte: true,
         motivo:
           `es un resumen por período: sus ${unicos} filas son ${unicos} meses distintos, uno por ` +
+          'fila, no movimientos. Sus cifras ya están en la hoja de detalle que las origina',
+      };
+    }
+  }
+
+  /*
+   * 6-bis. EL MISMO RESUMEN, CON EL PERÍODO ESCRITO COMO FECHA. Ver `periodoDeFecha`.
+   *
+   * Misma masa mínima y misma exigencia de unicidad que la señal de arriba, más la coherencia
+   * de día que impide confundirlo con ocho movimientos reales repartidos en ocho meses.
+   */
+  const fechasDePeriodo = primeraColumna.map(periodoDeFecha);
+  const marcadores = fechasDePeriodo.filter((p): p is NonNullable<typeof p> => p !== null);
+  if (marcadores.length >= 6 && marcadores.length / datos.length > 0.8) {
+    const meses = new Set(marcadores.map((p) => p.mes)).size;
+    const dias = new Set(marcadores.map((p) => p.dia));
+    const diaCoherente = dias.size === 1 || marcadores.every((p) => p.finDeMes);
+    if (meses / marcadores.length > 0.9 && diaCoherente) {
+      return {
+        esReporte: true,
+        motivo:
+          `es un resumen por período: sus ${meses} filas son ${meses} meses distintos, uno por ` +
           'fila, no movimientos. Sus cifras ya están en la hoja de detalle que las origina',
       };
     }

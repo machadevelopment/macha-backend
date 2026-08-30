@@ -221,6 +221,90 @@ export function asNumber(value: unknown): number | null {
  * La época de Excel es el 1899-12-30 (no el 31, por el bug del año bisiesto de Lotus 1-2-3
  * que Excel conserva a propósito).
  */
+/**
+ * Nombre de mes → número, en español e inglés, con y sin acento, completo y abreviado.
+ *
+ * Se escribe la tabla en vez de confiar en `Intl` o en `new Date`: el parseo de nombres de mes
+ * no está en la especificación de JavaScript, así que depende del motor y de la configuración
+ * regional del contenedor — dos cosas que no se controlan desde acá y que pueden cambiar en un
+ * deploy sin que nada avise.
+ */
+const MESES_POR_NOMBRE: Record<string, number> = (() => {
+  const t: Record<string, number> = {};
+  const es = [
+    ['enero', 'ene'],
+    ['febrero', 'feb'],
+    ['marzo', 'mar'],
+    ['abril', 'abr'],
+    ['mayo', 'may'],
+    ['junio', 'jun'],
+    ['julio', 'jul'],
+    ['agosto', 'ago'],
+    ['septiembre', 'sep', 'sept', 'setiembre', 'set'],
+    ['octubre', 'oct'],
+    ['noviembre', 'nov'],
+    ['diciembre', 'dic'],
+  ];
+  const en = [
+    ['january', 'jan'],
+    ['february', 'feb'],
+    ['march', 'mar'],
+    ['april', 'apr'],
+    ['may'],
+    ['june', 'jun'],
+    ['july', 'jul'],
+    ['august', 'aug'],
+    ['september', 'sep', 'sept'],
+    ['october', 'oct'],
+    ['november', 'nov'],
+    ['december', 'dec'],
+  ];
+  for (const grupo of [es, en]) {
+    grupo.forEach((nombres, i) => {
+      for (const n of nombres) t[n] ??= i + 1;
+    });
+  }
+  return t;
+})();
+
+const sinAcentos = (s: string) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+/**
+ * `15 de enero de 2026`, `5 May 2025`, `05-may-2025`, `May 5, 2025` → `YYYY-MM-DD`.
+ * `null` si no es una de esas formas o si el día no existe en ese mes.
+ */
+function MES_EN_PALABRAS(s: string): string | null {
+  const t = sinAcentos(s.trim()).replace(/\s+/g, ' ');
+
+  // `15 de enero de 2026` · `5 may 2025` · `05-may-2025`
+  const m = /^(\d{1,2})[\s-]*(?:de\s+)?([a-z]{3,10})\.?[\s-]*(?:de\s+)?(\d{2,4})$/.exec(t);
+  // `mayo 5, 2025` · `May 5 2025` — mismo dato, mes y día al revés.
+  let partes: [string, string, string] | null = m ? [m[1]!, m[2]!, m[3]!] : null;
+  if (!partes) {
+    const b = /^([a-z]{3,10})\.?\s+(\d{1,2}),?\s+(\d{4})$/.exec(t);
+    if (b) partes = [b[2]!, b[1]!, b[3]!];
+  }
+  if (!partes) return null;
+
+  const dia = Number(partes[0]);
+  const mes = MESES_POR_NOMBRE[partes[1]];
+  if (!mes) return null;
+
+  // Un año de dos dígitos es de este siglo: un movimiento de PYME no es de 1926.
+  let anio = Number(partes[2]);
+  if (anio < 100) anio += 2000;
+  if (anio < 1990 || anio > 2100) return null;
+
+  const d = new Date(Date.UTC(anio, mes - 1, dia));
+  // Un 31 de febrero desborda al mes siguiente: eso no es una fecha, es un dato malo.
+  if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | null {
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -335,6 +419,32 @@ export function asDate(value: unknown, orden: 'dmy' | 'mdy' = 'dmy'): string | n
     /^[a-zA-Z]{3,10}\.?\s+\d{1,2},?\s+\d{4}$/,
   ];
   if (!FORMATOS_DE_FECHA.some((re) => re.test(s))) return null;
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * EL MES EN PALABRAS SE RESUELVE ACÁ, PORQUE `new Date` SOLO SABE INGLÉS
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * La lista blanca de arriba dice, textualmente, que acepta `1 de mayo de 2025`. **Nunca
+   * funcionó.** El formato pasaba el regex —o sea que la forma se reconocía— y después
+   * `new Date("15 de enero de 2026")` devolvía `Invalid Date`, así que la fila salía con
+   * `date: null` y `staging-rules` la marcaba por `invalid_date`.
+   *
+   * Medido (2026-08-30): una hoja de nómina de 24 filas con fechas escritas
+   * `15 de enero de 2026` perdía el 100 % de sus filas. Y como la hoja entera se queda sin
+   * columna de fecha legible, `noPuedeProducirMovimientos` la descarta ANTES del modelo: no
+   * son 24 filas marcadas que alguien pueda revisar, es una hoja que desaparece sin dejar
+   * rastro en el dashboard.
+   *
+   * Esto no es un caso exótico: es un producto que factura en Guatemala y no sabía leer una
+   * fecha escrita en español. `new Date` solo parsea nombres de mes en inglés, y de eso no
+   * avisa — devuelve `Invalid Date` igual que ante basura.
+   *
+   * Se resuelve con una tabla explícita en vez de delegar, y de paso queda determinista: el
+   * parseo de nombres de mes en `new Date` depende del motor, no de la especificación.
+   */
+  const conMesEnPalabras = MES_EN_PALABRAS(s);
+  if (conMesEnPalabras) return conMesEnPalabras;
 
   const parsed = new Date(s);
   if (Number.isNaN(parsed.getTime())) return null;
