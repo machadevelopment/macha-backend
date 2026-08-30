@@ -1,5 +1,4 @@
 import { asDate } from './row-assembly';
-import { pareceLibroDeMovimientos } from './sheet-classifier';
 
 /**
  * Distingue una TABLA de movimientos de un REPORTE, sin llamar al modelo.
@@ -221,6 +220,34 @@ export function pareceNombreDePeriodo(nombre: unknown): boolean {
 
 const vacia = (c: unknown): boolean => c === null || c === undefined || String(c).trim() === '';
 
+/** Largo mínimo para que un texto CUENTE algo. `GTQ` no; `Servicio de vigilancia` sí. */
+const LARGO_MINIMO_DESCRIPTIVO = 5;
+
+/**
+ * Si alguna columna que NO es la primera trae texto que describe el hecho.
+ *
+ * La primera se excluye porque es justamente la que se está juzgando como marcador de período.
+ * De las demás basta una: un libro de movimientos siempre dice qué pasó; un resumen solo dice
+ * cuánto.
+ */
+function tieneColumnaDescriptiva(datos: unknown[][]): boolean {
+  const muestra = datos.slice(0, 60);
+  const ancho = Math.max(...muestra.map((f) => f.length), 0);
+  for (let c = 1; c < ancho; c++) {
+    const valores = muestra.map((f) => f[c]).filter((v) => !vacia(v));
+    if (valores.length === 0) continue;
+    const descriptivos = valores.filter(
+      (v) =>
+        typeof v === 'string' &&
+        v.trim().length >= LARGO_MINIMO_DESCRIPTIVO &&
+        asDate(v) === null &&
+        !/^[\s$Q€]*-?[\d.,\s]+[\s$Q€]*$/.test(v),
+    ).length;
+    if (descriptivos / valores.length > 0.7) return true;
+  }
+  return false;
+}
+
 export interface FormaDeHoja {
   /** `true` = parece un reporte/tabla dinámica, no un listado de movimientos. */
   esReporte: boolean;
@@ -353,26 +380,29 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
      * el último del mes, que son precisamente los dos que `finDeMes` y `dias.size === 1`
      * declaran marcador.
      *
-     * Medido con una hoja de ocho pagos de mantenimiento, uno por mes, todos el día 20:
-     * `Fecha · Proveedor · Rubro · Importe · Moneda` se descartaba entera. No es un dato que
-     * falta: deja el resultado del período INFLADO, que es el fallo que esta casa ya pagó con
-     * la matriz de gastos de KapePrueba.
+     * Medido: dos hojas de gastos recurrentes se descartaban enteras —ocho pagos de
+     * mantenimiento el día 20 y doce de vigilancia el día 15—. No es un dato que falta: deja
+     * el resultado del período INFLADO, que es el fallo que esta casa ya pagó con la matriz de
+     * gastos de KapePrueba.
      *
-     * La señal que los separa es la de siempre y no una nueva: **un movimiento involucra a
-     * alguien**. Se le paga a un proveedor, se le vende a un cliente. Un resumen por período
-     * no tiene contraparte — no se le vende a "enero" —, y las dos hojas que motivaron esta
-     * señal lo confirman: `Mes · Venta Neta · Unidades` y `Mes · Ingresos · Gastos · Utilidad`
-     * no nombran a nadie.
+     * ═══ LA SEÑAL ES QUE UN RESUMEN NO TIENE NADA QUE CONTAR, SOLO CUÁNTO ═══
      *
-     * Es un VETO, no un requisito, y ese matiz importa: la presencia de contraparte prueba que
-     * hay movimientos, pero su ausencia no prueba lo contrario (la hoja de gastos de una PYME
-     * a menudo no nombra proveedor). Por eso solo desactiva esta señal cuando la contraparte
-     * está, y no se usa para afirmar nada cuando falta.
+     * El primer intento fue vetar por CONTRAPARTE (`pareceLibroDeMovimientos`): no se le paga
+     * a "enero". Correcto y demasiado angosto — ese mismo archivo lo advierte en su comentario:
+     * *"la hoja de gastos de una PYME no nombra proveedor y lo es"*. La hoja
+     * `Fecha · Descripcion · Categoria · Monto` seguía muriendo.
      *
-     * Solo aplica acá y no a la señal 6: allá la primera columna dice "Enero", que no es una
-     * fecha de movimiento en ningún libro.
+     * Lo que sí generaliza: un resumen por período tiene el período y CIFRAS, nada más. Las dos
+     * hojas reales que motivaron esta señal lo confirman — `Mes · Venta Neta · Unidades` y
+     * `Mes · Ingresos Totales · Gastos Totales · Utilidad Estimada`: ni una columna de texto.
+     * Un libro de movimientos siempre trae al menos una que dice QUÉ pasó: el concepto, el
+     * rubro, la contraparte, la descripción.
+     *
+     * El piso de 5 caracteres deja fuera la columna de MONEDA (`GTQ`, `USD`, `Q`), que es texto
+     * y aparece en hojas de las dos clases; sin el piso el veto se cumpliría siempre y la señal
+     * quedaría apagada.
      */
-    if (meses / marcadores.length > 0.9 && diaCoherente && !pareceLibroDeMovimientos(encabezado)) {
+    if (meses / marcadores.length > 0.9 && diaCoherente && !tieneColumnaDescriptiva(datos)) {
       return {
         esReporte: true,
         motivo:

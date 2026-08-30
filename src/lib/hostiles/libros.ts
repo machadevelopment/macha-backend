@@ -580,7 +580,7 @@ function libroMezclador(): LibroHostil {
 
   /* Facturación emitida: devenga su ingreso además de la cuenta por cobrar. */
   const facturacion: unknown[][] = [
-    ['Fecha Emision', 'No. Documento', 'Cliente', 'Monto', 'Moneda', 'Fecha Vencimiento'],
+    ['Fecha Emision', 'No. Documento', 'Cliente', 'VIN', 'Monto', 'Moneda', 'Fecha Vencimiento'],
   ];
   for (let i = 0; i < 20; i++) {
     const usd = i % 3 === 0;
@@ -590,6 +590,7 @@ function libroMezclador(): LibroHostil {
       serial(`2026-0${(i % 8) + 1}-${String(4 + (i % 20)).padStart(2, '0')}`),
       `FAC-${1000 + i}`,
       `Cliente ${(i % 5) + 1}`,
+      `3VW${String(100_000 + i)}`,
       monto,
       usd ? 'USD' : 'GTQ',
       serial(`2026-0${(i % 8) + 1}-28`),
@@ -633,7 +634,7 @@ function libroMezclador(): LibroHostil {
   const inventario: unknown[][] = [
     ['VIN', 'Marca', 'Modelo', 'Anio', 'Costo Adquisicion', 'Fecha Ingreso'],
   ];
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 22; i++) {
     inventario.push([
       `3VW${String(100000 + i)}`,
       'Toyota',
@@ -645,7 +646,7 @@ function libroMezclador(): LibroHostil {
   }
 
   /* Una moneda que NO manejamos: se conserva para que la fila se marque, nunca se renombra. */
-  facturacion.push([serial('2026-08-15'), 'FAC-9999', 'Cliente de Madrid', 900, 'EUR', serial('2026-08-30')]); // prettier-ignore
+  facturacion.push([serial('2026-08-15'), 'FAC-9999', 'Cliente de Madrid', '3VW100020', 900, 'EUR', serial('2026-08-30')]); // prettier-ignore
 
   return {
     archivo: '10-mezclador.xlsx',
@@ -654,7 +655,9 @@ function libroMezclador(): LibroHostil {
       'Facturación en GTQ y USD que devenga su ingreso, cobros que apuntan a esas MISMAS ' +
       'facturas y no deben devengar de nuevo, cuentas por pagar que sí producen su costo, ' +
       'inventario serializado por VIN que no produce ninguno, y una factura en EUR que no ' +
-      'sabemos convertir. Cinco reglas que se contradicen si alguna se aplica de más.',
+      'sabemos convertir. Cinco reglas que se contradicen si alguna se aplica de más. La ' +
+      'facturación nombra el VIN, así que el esquema del libro reconoce el inventario: es el ' +
+      'caso CUBIERTO. El de al lado, sin esa columna, no lo está — ver `libroInventarioAislado`.',
     hojas: [
       ['Facturacion', facturacion],
       ['Cobros', cobros],
@@ -675,6 +678,65 @@ function libroMezclador(): LibroHostil {
       Inventario: 'inventario',
     },
     marcadas: 2,
+  };
+}
+
+/* ═══════════════ EL HUECO CONOCIDO: INVENTARIO QUE NADIE REFERENCIA ═══════════════ */
+
+/**
+ * ⚠️ ESTE LIBRO NO PASA, Y ES A PROPÓSITO. Ver el test que lo usa.
+ *
+ * Mismo inventario serializado del libro 10, pero la hoja de facturación **no nombra el VIN**.
+ * El mecanismo estructural (`analizarEsquema`) necesita que otra hoja referencie al inventario
+ * para reconocerlo como tabla de entidades, así que acá no se entera y los vehículos EN STOCK
+ * se van al modelo como si fueran movimientos.
+ */
+export function libroInventarioAislado(): LibroHostil {
+  const { v, mas } = contador();
+
+  const facturacion: unknown[][] = [['Fecha Emision', 'No. Documento', 'Cliente', 'Monto', 'Moneda']]; // prettier-ignore
+  for (let i = 0; i < 20; i++) {
+    const monto = 14_000 + i * 300;
+    mas('revenue', monto);
+    facturacion.push([
+      serial(`2026-0${(i % 8) + 1}-${String(4 + (i % 20)).padStart(2, '0')}`),
+      `FAC-${1000 + i}`,
+      `Cliente ${(i % 5) + 1}`,
+      monto,
+      'GTQ',
+    ]);
+  }
+
+  const inventario: unknown[][] = [
+    ['VIN', 'Marca', 'Modelo', 'Anio', 'Costo Adquisicion', 'Fecha Ingreso'],
+  ];
+  for (let i = 0; i < 15; i++) {
+    inventario.push([
+      `3VW${String(100_000 + i)}`,
+      'Toyota',
+      'Hilux',
+      2025,
+      118_000 + i * 900,
+      serial('2026-01-15'),
+    ]);
+  }
+
+  return {
+    archivo: '11-inventario-aislado.xlsx',
+    titulo: 'Inventario que ninguna otra hoja referencia (HUECO CONOCIDO)',
+    rompe:
+      'El inventario serializado solo se reconoce si otra hoja lo referencia. Si la ' +
+      'facturación no nombra el VIN, los vehículos en stock llegan al modelo y se registran ' +
+      'como gasto: Q 1.864.500 que nadie desembolsó en el período.',
+    hojas: [
+      ['Facturacion', facturacion],
+      ['Inventario', inventario],
+    ],
+    verdad: v,
+    clasificar: dobleDeModelo({
+      tipos: { Facturacion: 'revenue', Inventario: 'opex' },
+      entidades: { Facturacion: 'invoice' },
+    }),
   };
 }
 

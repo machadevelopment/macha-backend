@@ -27,7 +27,8 @@
     "verify:isolation": "bun run scripts/verify-isolation.ts",
     "bench:ingest": "bun run scripts/benchmark-ingest.ts",
     "prepare": "husky",
-    "inventario:limpiar": "bun run scripts/limpiar-inventario-huerfano.ts"
+    "inventario:limpiar": "bun run scripts/limpiar-inventario-huerfano.ts",
+    "hostiles:generar": "bun run scripts/generar-hostiles.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { LIBROS } from './hostiles/libros';
+import { LIBROS, libroInventarioAislado } from './hostiles/libros';
 import { correrPipeline } from './hostiles/pipeline-doble';
 
 /**
@@ -54,3 +54,50 @@ for (const fabricar of LIBROS) {
     }
   });
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL HUECO QUE NO SE CERRÓ, FIJADO CON SU CIFRA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Un test que afirma un comportamiento INCORRECTO es raro y acá está justificado: el hueco es
+ * real, está medido, y el arreglo que lo cierra no es seguro. Dejarlo sin test lo volvería
+ * invisible; dejarlo en rojo haría que la suite dejara de significar algo.
+ *
+ * ═══ QUÉ FALLA ═══
+ *
+ * Un inventario serializado (VIN, matrícula, número de serie) solo se reconoce como tabla de
+ * entidades si OTRA hoja del libro lo referencia. Cuando la facturación no nombra el VIN —que
+ * es lo normal si el vendedor factura por cliente y no por unidad— nada lo apunta, la hoja se
+ * va al modelo, y el modelo hace lo único que puede con `Costo Adquisicion`: registrarlo como
+ * gasto. Medido acá: **Q 1.864.500** de egreso que nadie desembolsó en el período.
+ *
+ * ═══ POR QUÉ NO SE ARREGLÓ ═══
+ *
+ * El arreglo natural es dejar de exigir la referencia: una hoja con clave única por fila, que
+ * no apunta a nadie y a la que nadie apunta, es un catálogo. Se implementó y **se revirtió**,
+ * porque un test que ya existía en `sheet-relations.test.ts` es el contraejemplo exacto —
+ * `Ventas` (`ID Venta · Monto`) y `Gastos` (`ID Gasto · Monto`) cumplen las tres condiciones y
+ * pasarían a INVENTARIO. El veto por contraparte no salva a una hoja de mostrador que no
+ * nombra al cliente, y perder la contabilidad de un cliente en silencio es peor que mostrarle
+ * un gasto de más, que al menos se ve.
+ *
+ * Cuando aparezca un archivo real así, el camino es una firma de EXISTENCIAS SERIALIZADAS
+ * (clave única + atributos del artículo + costo + sin columna de cantidad), no aflojar el
+ * esquema del libro.
+ */
+describe('HUECO CONOCIDO: inventario que nadie referencia', () => {
+  const libro = libroInventarioAislado();
+  const c = correrPipeline(libro);
+
+  test('los ingresos SÍ son los correctos: el hueco no los toca', () => {
+    expect(c.totales.revenue).toBeCloseTo(libro.verdad.revenue, 2);
+  });
+
+  test('los 15 vehículos en stock entran como gasto — cifra fijada, no aprobada', () => {
+    let stock = 0;
+    for (let i = 0; i < 15; i++) stock += 118_000 + i * 900;
+    expect(c.totales.opex).toBeCloseTo(stock, 2);
+    // Si algún día esto falla porque `opex` da 0, el hueco se cerró: borrar este bloque.
+    expect(c.destino.get('Inventario')).toBe('movimientos:15');
+  });
+});

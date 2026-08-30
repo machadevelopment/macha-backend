@@ -233,7 +233,25 @@ const CATALOG_SIGNATURES: {
      * "PRECIO INDIVIDUAL MENSUAL - ENERO", que el corpus de hojas reales espera como `unknown`
      * — y ese test es justamente lo que lo atrapó antes de llegar a producción.
      */
-    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa', 'preciounitario'],
+    /*
+     * ⚠️ `preciounitario` SALIÓ de esta lista (2026-08-30), y el motivo es el mismo que la puso
+     * acá: es demasiado genérico. Es la columna de una LÍNEA DE DOCUMENTO —una línea de orden
+     * de compra, una línea de factura—, no de una lista de existencias.
+     *
+     * Medido: `LineasOC` (`No. Orden · Producto · Cantidad · Precio Unitario · Total`) cumplía
+     * la firma entera y se iba a INVENTARIO. No duplicaba dinero (la cabecera `OrdenesCompra`
+     * lo aporta bien), pero metía 36 artículos inventados en el inventario del cliente Y, peor,
+     * la sacaba de `vivas` — o sea que el dedup cabecera/detalle, que existe exactamente para
+     * este par, nunca llegaba a verla. Un filtro que se equivoca temprano apaga a los de abajo.
+     *
+     * La premisa que falla es la que justifica esta firma: "un movimiento siempre tiene fecha
+     * por fila". Una LÍNEA de documento no la tiene — la hereda de su cabecera.
+     *
+     * Los dos casos reales que la motivaron no la necesitan: la ferretería trae `Costo
+     * Unitario` + `Precio Lista` y la boutique `Costo Unitario` + `Precio Venta`. El corpus de
+     * hojas reales lo confirma.
+     */
+    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa'],
     /* Y algo que identifique al ARTÍCULO: sin eso no hay a qué atribuir la existencia. */
     yTambien: ['sku', 'codigo', 'producto', 'articulo', 'insumo', 'idproducto', 'idinsumo'],
     prohibidas: DATE_HINTS,
