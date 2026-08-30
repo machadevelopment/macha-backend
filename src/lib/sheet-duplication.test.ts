@@ -14,11 +14,25 @@ import { detectarDetalleDuplicado } from './sheet-duplication';
  * para que dejaran de marcarse, y habría duplicado Q 2,7 millones.
  */
 
+/*
+ * Los fixtures tienen NUEVE órdenes y no tres, y no es cosmético: el detector exige un piso de
+ * filas antes de afirmar que dos hojas son el mismo dinero (`MIN_FILAS_PARA_AFIRMAR`). Con tres
+ * filas, dos totales iguales se explican por azar tan bien como por duplicación — y ese falso
+ * positivo ya descartó los gastos de un libro real. El caso que este módulo existe para atrapar
+ * es grande por naturaleza (60 órdenes y 220 líneas en el archivo que lo motivó), así que el
+ * piso no le quita nada.
+ */
 const CABECERA = [
   ['IDOC', 'IDProveedor', 'FechaOrden', 'Estado', 'MontoTotal'],
   ['OC-0001', 'PRV-01', 45300, 'Recibida', 48610],
   ['OC-0002', 'PRV-02', 45310, 'Recibida', 21000],
   ['OC-0003', 'PRV-01', 45320, 'Pendiente', 30390],
+  ['OC-0004', 'PRV-03', 45330, 'Recibida', 17250],
+  ['OC-0005', 'PRV-02', 45340, 'Recibida', 26400],
+  ['OC-0006', 'PRV-01', 45350, 'Pendiente', 12800],
+  ['OC-0007', 'PRV-04', 45360, 'Recibida', 33150],
+  ['OC-0008', 'PRV-03', 45370, 'Recibida', 19600],
+  ['OC-0009', 'PRV-02', 45380, 'Pendiente', 24900],
 ]; // prettier-ignore
 
 const DETALLE = [
@@ -28,6 +42,12 @@ const DETALLE = [
   ['L-3', 'OC-0001', 'SKU-C', 3, 4536.67, 13610],
   ['L-4', 'OC-0002', 'SKU-A', 7, 3000, 21000],
   ['L-5', 'OC-0003', 'SKU-D', 6, 5065, 30390],
+  ['L-6', 'OC-0004', 'SKU-B', 5, 3450, 17250],
+  ['L-7', 'OC-0005', 'SKU-A', 8, 3300, 26400],
+  ['L-8', 'OC-0006', 'SKU-C', 4, 3200, 12800],
+  ['L-9', 'OC-0007', 'SKU-D', 6, 5525, 33150],
+  ['L-10', 'OC-0008', 'SKU-B', 7, 2800, 19600],
+  ['L-11', 'OC-0009', 'SKU-A', 9, 2766.67, 24900],
 ]; // prettier-ignore
 
 describe('cabecera y detalle: el mismo dinero dos veces', () => {
@@ -144,7 +164,11 @@ describe('lo que NO debe descartarse', () => {
      * regla: dos conjuntos distintos no suman exactamente lo mismo hasta el último decimal.
      */
     const a = [...CABECERA];
-    const copia = [['MontoTotal', 'IDOC', 'IDProveedor', 'FechaOrden'], [48610, 'OC-0001', 'PRV-01', 45300], [21000, 'OC-0002', 'PRV-02', 45310], [30390, 'OC-0003', 'PRV-01', 45320]]; // prettier-ignore
+    // Las mismas filas con las columnas reordenadas: es como sale una hoja "copiar y pegar".
+    const copia: unknown[][] = [
+      ['MontoTotal', 'IDOC', 'IDProveedor', 'FechaOrden', 'Estado'],
+      ...CABECERA.slice(1).map((f) => [f[4], f[0], f[1], f[2], f[3]]),
+    ];
     const r = detectarDetalleDuplicado([
       { nombre: 'OrdenesCompra', rows: a },
       { nombre: 'OrdenesCompra (respaldo)', rows: copia },
@@ -169,15 +193,29 @@ describe('lo que NO debe descartarse', () => {
   const VENTAS = [
     ['Fecha', 'Mes', 'Documento', 'Cliente', 'Venta neta'],
     [46024, 46023, 'VD-001', 'Mostrador', 100],
-    [46055, 46054, 'VD-002', 'Café Central', 200],
-    [46083, 46054, 'VD-003', 'Mostrador', 300],
-    [46114, 46054, 'VD-004', 'La Bodeguita', 400],
+    [46026, 46023, 'VD-002', 'Café Central', 150],
+    [46030, 46023, 'VD-003', 'La Bodeguita', 250],
+    [46055, 46054, 'VD-004', 'Mostrador', 200],
+    [46058, 46054, 'VD-005', 'Café Central', 180],
+    [46083, 46054, 'VD-006', 'Mostrador', 300],
+    [46090, 46054, 'VD-007', 'La Bodeguita', 220],
+    [46114, 46085, 'VD-008', 'La Bodeguita', 400],
+    [46118, 46085, 'VD-009', 'Café Central', 260],
+    [46120, 46085, 'VD-010', 'Mostrador', 190],
   ]; // prettier-ignore
 
   const RESUMEN = [
-    ['Mes', 'Venta neta total'],
-    [46023, 300],
-    [46054, 700],
+    ['Mes', 'Documento', 'Venta neta total'],
+    [46023, 'RES-01', 500],
+    [46054, 'RES-02', 900],
+    [46085, 'RES-03', 850],
+    [46116, 'RES-04', 0],
+    [46147, 'RES-05', 0],
+    [46177, 'RES-06', 0],
+    [46208, 'RES-07', 0],
+    [46238, 'RES-08', 0],
+    [46269, 'RES-09', 0],
+    [46300, 'RES-10', 0],
   ]; // prettier-ignore
 
   test('se conserva el DETALLE con contraparte, no el resumen mensual', () => {
@@ -245,18 +283,31 @@ describe('lo que NO debe descartarse', () => {
 describe('la autosuficiencia se mide con el mismo lector de fechas del pipeline', () => {
   const VENTAS_ISO = [
     ['Fecha', 'Cliente', 'Producto', 'Monto'],
-    ['2026-01-12', 'Cafetería El Roble', 'Café en grano 1 kg', 500],
-    ['2026-02-08', 'Súper Zona 10', 'Café molido 250 g', 300],
-    ['2026-03-19', 'Bistró La Cuadra', 'Cápsulas x10', 400],
-    ['2026-04-02', 'Cafetería El Roble', 'Café en grano 1 kg', 600],
+    ['2026-01-12', 'Cafetería El Roble', 'Café en grano', 500],
+    ['2026-01-20', 'Súper Zona 10', 'Café en grano', 400],
+    ['2026-02-08', 'Súper Zona 10', 'Café molido', 300],
+    ['2026-02-14', 'Bistró La Cuadra', 'Café molido', 200],
+    ['2026-03-19', 'Bistró La Cuadra', 'Cápsulas', 400],
+    ['2026-03-25', 'Cafetería El Roble', 'Cápsulas', 350],
+    ['2026-04-02', 'Cafetería El Roble', 'Café en grano', 600],
+    ['2026-04-18', 'Súper Zona 10', 'Café molido', 250],
+    ['2026-05-07', 'Bistró La Cuadra', 'Cápsulas', 300],
+    ['2026-05-21', 'Cafetería El Roble', 'Café en grano', 450],
   ]; // prettier-ignore
 
   /** Lo que sale de despivotar una matriz: fecha, concepto y monto. Sin contraparte. */
   const AGREGADO = [
-    ['Fecha', 'Concepto', 'Monto'],
-    ['2026-01-01', 'Café en grano', 900],
-    ['2026-02-01', 'Café molido', 500],
-    ['2026-03-01', 'Cápsulas', 400],
+    ['Fecha', 'Concepto', 'Producto', 'Monto'],
+    ['2026-01-01', 'Café en grano', 'Café en grano', 900],
+    ['2026-02-01', 'Café molido', 'Café molido', 500],
+    ['2026-03-01', 'Cápsulas', 'Cápsulas', 750],
+    ['2026-04-01', 'Café en grano', 'Café en grano', 600],
+    ['2026-04-02', 'Café molido', 'Café molido', 250],
+    ['2026-05-01', 'Cápsulas', 'Cápsulas', 300],
+    ['2026-05-02', 'Café en grano', 'Café en grano', 450],
+    ['2026-06-01', 'Café molido', 'Café molido', 0],
+    ['2026-06-02', 'Cápsulas', 'Cápsulas', 0],
+    ['2026-07-01', 'Café en grano', 'Café en grano', 0],
   ]; // prettier-ignore
 
   test('gana la hoja con contraparte, aunque tenga MÁS filas', () => {
@@ -275,5 +326,94 @@ describe('la autosuficiencia se mide con el mismo lector de fechas del pipeline'
     ]);
     expect(r.has('Ventas')).toBe(false);
     expect(r.has('Ventas por categoria')).toBe(true);
+  });
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * DOS HOJAS CHICAS QUE SUMAN IGUAL SON CASUALIDAD, NO DUPLICACIÓN (2026-08-30)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Este detector afirma algo fuerte —"estas dos hojas son el mismo dinero"— y equivocarse
+ * cuesta la contabilidad de una hoja entera. Esa afirmación necesita masa y necesita una llave.
+ *
+ * Medido: un libro con `Ventas` (una venta de Q 1.500), `Compras` (Q 700) y `Gastos` (un
+ * alquiler de Q 1.500) descartaba los GASTOS como duplicado de las VENTAS. Una venta y un
+ * alquiler no son la misma plata: comparten la forma (`Fecha · Monto · Moneda`, que tiene
+ * cualquier hoja de movimientos) y el total, por azar.
+ */
+describe('hace falta masa y una llave específica para afirmar duplicación', () => {
+  const UNA_VENTA = [
+    ['Fecha', 'Cliente', 'Monto', 'Moneda'],
+    ['2026-08-15', 'Cafetería El Roble', 1500, 'GTQ'],
+  ]; // prettier-ignore
+  const UN_ALQUILER = [
+    ['Fecha', 'Concepto', 'Monto', 'Moneda'],
+    ['2026-08-05', 'Alquiler', 1500, 'GTQ'],
+  ]; // prettier-ignore
+
+  test('con una fila cada una NO se descarta nada, aunque sumen lo mismo', () => {
+    expect(
+      detectarDetalleDuplicado([
+        { nombre: 'Ventas', rows: UNA_VENTA },
+        { nombre: 'Gastos', rows: UN_ALQUILER },
+      ]).size,
+    ).toBe(0);
+  });
+
+  test('el piso de filas protege AUNQUE compartan una llave específica', () => {
+    /*
+     * Las dos defensas son independientes y hace falta comprobarlas por separado, o una tapa
+     * el agujero de la otra en el test y nadie se entera de que una se rompió.
+     *
+     * Acá comparten `Documento` —una llave específica, no genérica— así que el filtro de
+     * encabezados NO las salva. Lo único que queda entre estas cuatro filas y un descarte
+     * equivocado es el piso: tres movimientos que suman lo mismo que otros tres siguen siendo
+     * una coincidencia, no una cabecera con su detalle.
+     */
+    const ventas = [
+      ['Fecha', 'Documento', 'Cliente', 'Monto'],
+      ['2026-08-01', 'DOC-1', 'Cafetería El Roble', 1000],
+      ['2026-08-02', 'DOC-2', 'Súper Zona 10', 2000],
+      ['2026-08-03', 'DOC-3', 'Bistró La Cuadra', 3000],
+    ]; // prettier-ignore
+    const gastos = [
+      ['Fecha', 'Documento', 'Concepto', 'Monto'],
+      ['2026-08-05', 'DOC-9', 'Alquiler', 1500],
+      ['2026-08-06', 'DOC-8', 'Sueldos', 2500],
+      ['2026-08-07', 'DOC-7', 'Publicidad', 2000],
+    ]; // prettier-ignore
+    expect(detectarDetalleDuplicado([
+      { nombre: 'Ventas', rows: ventas },
+      { nombre: 'Gastos', rows: gastos },
+    ]).size).toBe(0); // prettier-ignore
+  });
+
+  test('compartir SOLO encabezados genéricos no es evidencia de relación', () => {
+    /*
+     * `fecha`, `monto` y `moneda` los tiene cualquier hoja de movimientos, así que
+     * compartirlos no dice nada: la condición se cumpliría entre dos hojas cualesquiera del
+     * libro y lo único que quedaría decidiendo es la suma.
+     */
+    const ventas: unknown[][] = [['Fecha', 'Cliente', 'Monto', 'Moneda']];
+    const gastos: unknown[][] = [['Fecha', 'Concepto', 'Monto', 'Moneda']];
+    for (let i = 1; i <= 10; i++) {
+      ventas.push([`2026-0${((i - 1) % 8) + 1}-15`, 'Cafetería El Roble', 100 * i, 'GTQ']);
+      gastos.push([`2026-0${((i - 1) % 8) + 1}-05`, 'Alquiler', 100 * i, 'GTQ']);
+    }
+    // Suman exactamente lo mismo y tienen masa de sobra: lo único que falta es la llave.
+    expect(detectarDetalleDuplicado([
+      { nombre: 'Ventas', rows: ventas },
+      { nombre: 'Gastos', rows: gastos },
+    ]).size).toBe(0); // prettier-ignore
+  });
+
+  test('con una llave ESPECÍFICA compartida sí se detecta', () => {
+    // El contraste: lo único que cambia es que ahora comparten `IDOC`, que es la llave por la
+    // que una cabecera y su detalle de verdad se relacionan.
+    expect(detectarDetalleDuplicado([
+      { nombre: 'OrdenesCompra', rows: CABECERA },
+      { nombre: 'LineasOC', rows: DETALLE },
+    ]).size).toBe(1); // prettier-ignore
   });
 });
