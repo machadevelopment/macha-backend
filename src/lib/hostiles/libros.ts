@@ -389,7 +389,7 @@ function libroFechasImposibles(): LibroHostil {
     }
   }
   /* Cuatro fechas que NO existen o no son plausibles: a revisión, nunca inventadas. */
-  for (const mala of ['31/02/2026', '2026-13-01', '15/07/1823', 'Sin fecha']) {
+  for (const mala of ['31/02/2026', '2026-02-31', '2026-13-01', '15/07/1823', 'Sin fecha']) {
     filas.push([mala, 'Librería El Saber', 'Venta', 500, 'GTQ']);
   }
 
@@ -398,13 +398,14 @@ function libroFechasImposibles(): LibroHostil {
     titulo: 'Ocho formas de fecha y cuatro imposibles',
     rompe:
       'Serial, ISO, DD/MM, español completo, abreviado, con puntos, objeto Date y YYYY/MM/DD ' +
-      'en la MISMA columna, más un 31 de febrero, un mes 13, un año 1823 y un "Sin fecha". ' +
-      'Leer mal una fecha no borra plata: la MUEVE DE MES, que es peor porque no se ve.',
+      'en la MISMA columna, más un 31 de febrero escrito de las DOS formas (con barras y en ' +
+      'ISO), un mes 13, un año 1823 y un "Sin fecha". Leer mal una fecha no borra plata: la ' +
+      'MUEVE DE MES, que es peor porque no se ve.',
     hojas: [['Ventas', filas]],
     verdad: v,
     clasificar: dobleDeModelo({ tipos: { Ventas: 'revenue' } }),
     destinos: { Ventas: 'movimientos:32' },
-    marcadas: 4,
+    marcadas: 5,
   };
 }
 

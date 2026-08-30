@@ -297,12 +297,8 @@ function MES_EN_PALABRAS(s: string): string | null {
   // Un año de dos dígitos es de este siglo: un movimiento de PYME no es de 1926.
   let anio = Number(partes[2]);
   if (anio < 100) anio += 2000;
-  if (anio < 1990 || anio > 2100) return null;
-
-  const d = new Date(Date.UTC(anio, mes - 1, dia));
-  // Un 31 de febrero desborda al mes siguiente: eso no es una fecha, es un dato malo.
-  if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
-  return d.toISOString().slice(0, 10);
+  // Rango y desbordamiento los valida `fechaValida`, que es la ÚNICA copia de esas dos reglas.
+  return fechaValida(anio, mes, dia);
 }
 
 /**
