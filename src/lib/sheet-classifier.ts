@@ -234,6 +234,32 @@ const CATALOG_SIGNATURES: {
      * — y ese test es justamente lo que lo atrapó antes de llegar a producción.
      */
     /*
+     * ⚠️ `costounitario` SALIÓ TAMBIÉN (2026-08-31), por el MISMO motivo y con el mismo caso.
+     *
+     * Quitar `preciounitario` cerró la puerta por la que entraba una línea de FACTURA; la de
+     * una línea de ORDEN DE COMPRA quedó abierta, y es la más común de las dos: una OC no
+     * lleva precio de venta, lleva COSTO. `LineasOC` (`IDLineaOC · IDOC · SKU · Cantidad ·
+     * Costo Unitario · Total Línea`) cumplía la firma entera y se iba a INVENTARIO — 48
+     * artículos inventados en el inventario del cliente, y la hoja fuera de `vivas`, así que
+     * el dedup cabecera/detalle que existe exactamente para ese par nunca llegaba a verla.
+     *
+     * La premisa que falla es la misma: "un movimiento siempre tiene fecha por fila". Una
+     * LÍNEA de documento no la tiene — la hereda de su cabecera.
+     *
+     * ═══ POR QUÉ SACARLO NO ROMPE LOS DOS CASOS QUE MOTIVARON LA FIRMA ═══
+     *
+     * `ademas` es "al menos UNA de éstas", y los dos inventarios de mostrador que la firma
+     * existe para capturar traen además la columna de PRECIO DE VENTA, que una línea de compra
+     * no puede tener: la ferretería `Costo Unitario` + **`Precio Lista`**, la boutique
+     * `Costo Unitario` + **`Precio Venta`**. O sea que lo que de verdad separa una lista de
+     * existencias de una línea de compra no es el costo —lo tienen las dos— sino que la
+     * existencia se VENDE y por eso lleva su precio.
+     *
+     * Medido antes de tocarlo, con el mismo criterio que exige CLAUDE.md: los 10 archivos
+     * reales de clientes dan **veredicto idéntico hoja por hoja**, y las tres hojas de
+     * existencias reales (ferretería, boutique, restaurante) siguen yendo a inventario.
+     */
+    /*
      * ⚠️ `preciounitario` SALIÓ de esta lista (2026-08-30), y el motivo es el mismo que la puso
      * acá: es demasiado genérico. Es la columna de una LÍNEA DE DOCUMENTO —una línea de orden
      * de compra, una línea de factura—, no de una lista de existencias.
@@ -251,7 +277,7 @@ const CATALOG_SIGNATURES: {
      * Unitario` + `Precio Lista` y la boutique `Costo Unitario` + `Precio Venta`. El corpus de
      * hojas reales lo confirma.
      */
-    ademas: ['costounitario', 'costopromedio', 'preciolista', 'precioventa'],
+    ademas: ['costopromedio', 'preciolista', 'precioventa'],
     /* Y algo que identifique al ARTÍCULO: sin eso no hay a qué atribuir la existencia. */
     yTambien: ['sku', 'codigo', 'producto', 'articulo', 'insumo', 'idproducto', 'idinsumo'],
     prohibidas: DATE_HINTS,

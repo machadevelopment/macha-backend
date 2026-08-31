@@ -65,8 +65,41 @@ export interface HojaParaComparar {
  * tres valores (`Disponible`/`Vendido`/`Reservado`) se "referenciarían" mutuamente al 100 %.
  * El corte se combina con la exigencia de que la columna destino sea ÚNICA por fila, que es
  * lo que de verdad separa una clave de una etiqueta.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * BAJÓ DE 8 A 4 (2026-08-31), Y EL MOTIVO ES QUE APAGABA LA GUARDA JUSTO EN EL NEGOCIO CHICO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Este número no solo decide relaciones: de él dependen DOS reglas sobre el dinero del
+ * cliente —"una factura cuya venta ya está registrada no vuelve a devengar" y "un cobro no es
+ * una venta nueva"— porque las dos preguntan al esquema del libro si la hoja apunta a otra.
+ * Sin referencia detectada, las dos guardas no llegan a evaluarse.
+ *
+ * Con 8, una hoja de **6 cobros** contra facturas que ya se devengaron volvía a registrar su
+ * ingreso: medido en `libro-la-ceiba.ts`, **+44,9 % de ingreso inventado**. Y esa es
+ * exactamente la contabilidad de una PYME chica —seis recibos en el período es lo normal—,
+ * así que la protección contra contar dos veces estaba apagada para quien menos puede
+ * desmentirlo, y fallaba hacia ARRIBA, que es la dirección que parece una buena noticia.
+ *
+ * ═══ POR QUÉ 4 Y NO MENOS ═══
+ *
+ * El piso está MEDIDO, no elegido. Con 3 se pone en rojo el test que este mismo archivo ya
+ * tenía —"con pocos valores no se afirma nada (el azar alcanza para cubrir)"—, que es la
+ * defensa contra el falso positivo que el párrafo de arriba describe. 4 es el último valor
+ * donde esa defensa sigue en pie.
+ *
+ * ═══ QUÉ SE MIDIÓ ANTES DE TOCARLO ═══
+ *
+ *   · Los 1.151 tests unitarios, incluido el corpus de 19 hojas de archivos reales: sin cambio.
+ *   · Los DIEZ archivos reales de clientes (`~/Downloads/0*_*.xlsx`, los que CLAUDE.md exige
+ *     correr antes de mergear cualquier cambio de ingesta): **veredicto idéntico hoja por
+ *     hoja** entre 8 y 4, comparado con un diff.
+ *
+ * Lo que no cubre este número sigue cubierto por lo de siempre: el destino tiene que ser
+ * ÚNICO por fila y la columna que apunta tiene que tener `CARDINALIDAD_MINIMA` de valores
+ * distintos. El `Estado` de tres valores del ejemplo falla las dos, no ésta.
  */
-const MIN_VALORES_PARA_RELACION = 8;
+const MIN_VALORES_PARA_RELACION = 4;
 
 /**
  * Qué proporción de los valores de la columna que apunta tiene que existir del otro lado.
