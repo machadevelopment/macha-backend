@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lte, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { alertEvents, alertRules, reports, reportVersions, transactions } from '@/db/schema';
 import { getOrComputeMonthlyAmounts, ROLLUP_TYPES, type RollupType } from '@/lib/rollups';
@@ -132,7 +132,7 @@ export const CHAT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'query_transactions',
     description:
-      'Consulta acotada de transacciones a nivel hoja (último recurso, cuando los rollups no alcanzan). Máximo 50 filas por llamada.',
+      'Consulta acotada de transacciones a nivel hoja (último recurso, cuando los rollups no alcanzan). Devuelve como mucho 50 filas, LAS MÁS RECIENTES, junto con `filasQueCoinciden` y `sumaDeTodasLasCoincidencias`, que sí describen el conjunto completo. Para un total del período usa esa suma o `get_monthly_rollups`, NUNCA la suma de las filas devueltas: si `filasQueCoinciden` es mayor que `filasDevueltas` estás viendo una parte.',
     input_schema: {
       type: 'object',
       properties: {
@@ -359,6 +359,42 @@ async function toolMonthlyRollup(
   return JSON.stringify(series);
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LO QUE ESTA HERRAMIENTA DEVUELVE NO ES "LAS TRANSACCIONES DEL PERÍODO"
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Reporte de Keneth (2026-08-31, joyería): el KPI de agosto decía USD 18.460 y el asesor,
+ * preguntado por el desglose del mes, contestó **USD 1.924 en 14 transacciones** y remató
+ * inventando la explicación: *"much lower than the $18,460 I quoted earlier, since that figure
+ * likely included data past the 24th that isn't in the transaction log yet, or a rollup
+ * discrepancy"*. No hubo discrepancia de rollup: el asesor sumó **la cola** de la tabla y
+ * presentó el resultado como el total del mes.
+ *
+ * Las dos causas eran de esta función y ninguna se ve leyendo la respuesta del modelo:
+ *
+ *   1. **EL RECORTE ERA INVISIBLE.** Devolvía un array pelado de como mucho 50 filas
+ *      ordenadas por fecha descendente. Un array pelado no tiene forma de decir "hay 300 más":
+ *      el modelo suma lo que recibe, y lo que recibe es sintácticamente indistinguible de la
+ *      respuesta completa. La herramienta de al lado ya había aprendido esto —
+ *      `get_product_performance` devuelve `productosDevueltos` justamente para que el asesor
+ *      sepa que está viendo una parte— y esta se quedó sin el aviso.
+ *
+ *      Por eso ahora viaja el TOTAL y su SUMA, calculados en la base sobre el conjunto entero.
+ *      Que la suma la haga Postgres y no el modelo es lo que hace que el aviso sirva: decirle
+ *      "hay 312 filas" y darle 50 lo deja igual de incapaz de responder; darle el total ya
+ *      sumado responde la pregunta que estaba intentando contestar.
+ *
+ *   2. **NO FILTRABA `deleted_at`.** Era el ÚNICO consumidor de `transactions` del backend que
+ *      no lo hacía —`rollups.ts`, `report-sections.ts`, `alerts.ts`, `metrics/*` y
+ *      `transactions/index.ts` lo filtran todos—, así que el asesor seguía contando las filas
+ *      de una carga REVERTIDA o CANCELADA mientras el dashboard, correctamente, ya no las
+ *      contaba. Es la peor forma de este bug: las dos cifras salen de la misma tabla y no
+ *      coinciden, así que ninguna de las dos se puede usar para desmentir a la otra.
+ *
+ * El recorte sigue existiendo —meterle 18.000 filas al contexto del modelo no es una opción—
+ * pero pasa de ser una mentira silenciosa a un dato declarado.
+ */
 async function toolQueryTransactions(
   ctx: ChatToolContext,
   input: {
@@ -370,7 +406,11 @@ async function toolQueryTransactions(
   },
 ): Promise<string> {
   const limit = Math.min(input.limit ?? 20, 50);
-  const conditions = [eq(transactions.companyId, ctx.companyId)];
+  const conditions = [
+    eq(transactions.companyId, ctx.companyId),
+    // Ver el punto 2 de la nota: sin esto el asesor cuenta lo que el cliente ya deshizo.
+    isNull(transactions.deletedAt),
+  ];
   if (input.type) conditions.push(eq(transactions.type, input.type));
   if (input.category) conditions.push(eq(transactions.category, input.category));
   if (input.dateFrom) conditions.push(gte(transactions.date, input.dateFrom));
@@ -389,7 +429,42 @@ async function toolQueryTransactions(
     .orderBy(desc(transactions.date))
     .limit(limit);
 
-  return JSON.stringify(rows);
+  /*
+   * El total y la suma salen del MISMO `where`, en una consulta aparte y sobre el conjunto
+   * completo. Reusar `conditions` no es un ahorro de tipeo: es lo que garantiza que el total
+   * describa exactamente la lista recortada de arriba y no un conjunto parecido.
+   *
+   * `amount_base` y no `original_amount`: es la columna que suma el rollup, así que ésta es la
+   * cifra que el asesor puede comparar contra el KPI sin mezclar monedas.
+   */
+  const [agregado] = await ctx.db
+    .select({
+      total: rawSql<string>`count(*)`,
+      suma: rawSql<string>`coalesce(sum(${transactions.amountBase}), 0)`,
+    })
+    .from(transactions)
+    .where(and(...conditions));
+
+  const total = Number(agregado?.total ?? rows.length);
+  const suma = Number(agregado?.suma ?? 0);
+
+  return JSON.stringify({
+    filasDevueltas: rows.length,
+    filasQueCoinciden: total,
+    /*
+     * El aviso va en el PAYLOAD y no solo en la descripción de la herramienta, por el mismo
+     * motivo que en `get_product_performance`: una regla que el modelo leyó hace veinte turnos
+     * pesa menos que un campo en el dato de ahora. Y va redactado como instrucción de qué
+     * decir, porque el fallo observado no fue sumar mal — fue presentar la suma parcial como
+     * si fuera el total y explicar la diferencia con una causa inventada.
+     */
+    aviso:
+      total > rows.length
+        ? `Se devuelven solo las ${rows.length} más recientes de ${total} que coinciden. La suma de estas ${rows.length} NO es el total del período: el total es ${suma}. No presentes el subtotal como si fuera el total ni expliques la diferencia con una falla del sistema — es este recorte.`
+        : undefined,
+    sumaDeTodasLasCoincidencias: suma,
+    transacciones: rows,
+  });
 }
 
 /** Dispatches a single tool_use block. Never trusts a company_id from `input` — there isn't one to trust, by schema design above. */
