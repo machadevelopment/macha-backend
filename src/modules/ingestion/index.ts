@@ -300,8 +300,24 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      * Solo tiene sentido sobre una carga EN CURSO. Cancelar una ya terminada escondería un
      * malentendido detrás de un 200 — y sobre todo, cancelar una `promoted` no desharía sus
      * filas: para eso está `revert`, y el mensaje lo dice para que nadie use una por la otra.
+     *
+     * ⚠️ `awaiting_confirmation` ENTRA, y sin eso el portón (0042) dejaba cargas trabadas SIN
+     * SALIDA (verificado en producción 2026-09-01: tres cargas de la empresa `test` que el
+     * cliente no podía sacarse de encima, con `cancel` devolviendo 409). No tocan el
+     * dashboard —el portón las retiene— pero se quedan en su lista para siempre pidiéndole una
+     * decisión sobre un archivo que ya no quiere, y la única alternativa que le queda es
+     * PUBLICAR datos que sabe que están mal para después revertirlos.
+     *
+     * Es seguro por construcción y no por suerte: el portón se afirma en los DOS llamadores de
+     * la promoción, así que una carga en ese estado no tiene una sola fila promovida. Y
+     * `cancelDocumentRows` deshace igual lo que encuentre, así que la garantía no depende de
+     * que esa premisa siga siendo cierta.
+     *
+     * Es la forma exacta que el portón vino a crear: reintroduce el "trámite bloqueante" que la
+     * migración 0020 eliminó, pero sobre la carga entera. Cancelar es la puerta de salida.
      */
-    if (doc.status !== 'queued' && doc.status !== 'processing') {
+    const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation'];
+    if (!CANCELABLES.includes(doc.status)) {
       set.status = 409;
       return {
         error:
@@ -1110,6 +1126,32 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       // vuelto por el enlace del correo. Es idempotente y se le dice que ya estaba.
       if (doc.confirmedAt !== null) {
         return { confirmado: true, yaEstaba: true, hojasExcluidas: 0, hojasReclasificadas: 0 };
+      }
+
+      /*
+       * ⚠️ UNA CARGA DADA DE BAJA NO SE PUBLICA (2026-09-01).
+       *
+       * Este handler solo miraba `confirmed_at`, así que un documento `cancelled`, `reverted` o
+       * `failed` se podía "publicar": se le escribía `confirmed_at`, se encolaba la promoción y
+       * **volvían al dashboard filas que el cliente había dado de baja**. Sus `staging_rows`
+       * siguen ahí —`cancelDocumentRows` marca el documento y da de baja el ledger, no toca
+       * staging— así que había con qué reinsertar.
+       *
+       * Es EXACTAMENTE la lección que `encolarPromocionDeLoResuelto` ya tiene escrita —*"sin el
+       * filtro, resolver una fila vieja de un documento `reverted` o `failed` lo resucitaría a
+       * `promoted`, reinsertando en producción datos que alguien había dado de baja"*— aprendida
+       * en un llamador y sin aplicar en el otro. El mismo patrón que este repo ya pagó con el
+       * banner y el correo.
+       *
+       * Se volvió ALCANZABLE al permitir cancelar una carga en el portón: antes esa secuencia
+       * —descartar y después publicar— no existía, así que el hueco estaba tapado por casualidad.
+       */
+      const PUBLICABLES = ['awaiting_confirmation', 'review', 'promoted'];
+      if (!PUBLICABLES.includes(doc.status)) {
+        set.status = 409;
+        return {
+          error: `Esta carga ya no se puede publicar (estado actual: ${doc.status}).`,
+        };
       }
 
       /*

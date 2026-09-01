@@ -235,3 +235,64 @@ describe('POST /documents/:id/corregir-hoja', () => {
     expect(res.status).toBe(404);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA CARGA TRABADA EN EL PORTÓN TIENE QUE PODER DESCARTARSE (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Verificado en producción: tres cargas de la empresa `test` en `awaiting_confirmation` que el
+ * cliente no podía sacarse de encima — `cancel` devolvía 409 porque solo aceptaba `queued` y
+ * `processing`, y el portón (0042) creó un estado terminal nuevo que nadie le agregó.
+ *
+ * No tocan el dashboard, y por eso pasó desapercibido. Pero se quedan en su lista para siempre
+ * pidiéndole una decisión sobre un archivo que ya no quiere, y la única alternativa que le
+ * queda es PUBLICAR datos que sabe que están mal para después revertirlos. Es la forma exacta
+ * de trámite bloqueante que la migración 0020 eliminó, reintroducida sobre la carga entera.
+ */
+describe('POST /documents/:id/cancel sobre una carga esperando confirmación', () => {
+  test('se puede descartar, y sus filas quedan canceladas', async () => {
+    const doc = await crearCarga('descartable.xlsx');
+
+    const res = await pedir(`/${doc}/cancel`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'cancelled' });
+
+    const [d] = await owner`select status from documents where id = ${doc}`;
+    expect(d!.status).toBe('cancelled');
+
+    /*
+     * ⚠️ Y DESCARTAR TIENE QUE SER DESCARTAR: después de cancelar, publicar no publica nada.
+     *
+     * Esta es la aserción que vale, y la primera versión de este test no la hacía — pedía que
+     * `staging_rows` quedara sin filas vivas, algo que `cancelDocumentRows` nunca prometió
+     * (marca el documento y da de baja el ledger, no toca staging). Habría pasado a rojo por
+     * una promesa inventada mientras dejaba sin cubrir la única que importa: que una carga
+     * descartada no pueda colarse al dashboard por la puerta de al lado.
+     */
+    const publicar = await pedir(`/${doc}/confirmar`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    // Sea 409 o 200-sin-efecto, lo que no puede pasar es que quede confirmada y promovible.
+    const [despues] = await owner`
+      select status, confirmed_at as c from documents where id = ${doc}`;
+    expect(despues!.status).toBe('cancelled');
+    expect(despues!.c).toBeNull();
+    expect(publicar.status).not.toBe(500);
+  });
+
+  test('una carga YA publicada sigue diciendo que use «revertir»', async () => {
+    /*
+     * La otra mitad, y es la que hace segura a la primera: cancelar una `promoted` no desharía
+     * sus filas del ledger, así que un 200 ahí escondería un malentendido — el cliente creería
+     * que limpió su dashboard y no. El mensaje nombra la acción correcta.
+     */
+    const doc = await crearCarga('ya-publicada.xlsx');
+    await owner`update documents set status = 'promoted', confirmed_at = now() where id = ${doc}`;
+
+    const res = await pedir(`/${doc}/cancel`, { method: 'POST' });
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(await res.json())).toContain('revertir');
+  });
+});
