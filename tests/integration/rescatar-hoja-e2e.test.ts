@@ -138,12 +138,36 @@ mock.module('@/queue', () => ({
   },
 }));
 
+/** Lo que el worker escribió en el log del cuadre, para poder afirmar sobre su veredicto. */
+const lineasDeCuadre: string[] = [];
+const infoReal = console.info;
+const errReal = console.error;
+/*
+ * ⚠️ `warn` TAMBIÉN, y sin él este test no medía nada: el veredicto `en_revision` —que es
+ * justamente el falso positivo que la guarda evita— sale por `console.warn`, así que la
+ * mutación no ponía el test en rojo. Medía código distinto del que creía estar tocando.
+ */
+const warnReal = console.warn;
+for (const [nombre, real] of [
+  ['info', infoReal],
+  ['error', errReal],
+  ['warn', warnReal],
+] as const) {
+  (console as unknown as Record<string, unknown>)[nombre] = (...a: unknown[]) => {
+    const t = a.map(String).join(' ');
+    if (t.includes('[cuadre]')) lineasDeCuadre.push(t);
+    (real as (...x: unknown[]) => void)(...a);
+  };
+}
+
 const { startExcelIngestWorker } = await import('@/queue/workers/excel-ingest');
 
 const SUFIJO = randomUUID().slice(0, 8);
 const owner = ownerConnection();
 let companyId: string;
 let documentId: string;
+/** Dónde termina el log de cuadre de la PRIMERA corrida, para no mezclar veredictos. */
+let indiceTrasLaPrimeraCorrida = 0;
 
 const filasDe = async (hoja: string) =>
   Number(
@@ -174,6 +198,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  console.info = infoReal;
+  console.error = errReal;
+  console.warn = warnReal;
   await owner?.end();
 });
 
@@ -211,6 +238,7 @@ describe('una hoja descartada se puede rescatar', () => {
     await owner`delete from document_ingest_batches
                  where document_id = ${documentId} and sheet_name = 'CarteraClientes'`;
 
+    indiceTrasLaPrimeraCorrida = lineasDeCuadre.length;
     await handler!({ documentId, companyId });
 
     expect(await filasDe('CarteraClientes')).toBe(CARTERA.length);
@@ -243,5 +271,30 @@ describe('una hoja descartada se puede rescatar', () => {
     expect(porNombre.get('CarteraClientes')).toBe('movimientos');
     // Y la que la reanudación saltó: sobrevive con lo que ya se sabía de ella.
     expect(porNombre.get('Ventas')).toBe('movimientos');
+  });
+
+  test('⚠️ el cuadre del DOCUMENTO no grita sobre una corrida parcial', () => {
+    /*
+     * `leidoDelArchivo` acumula solo las hojas que esta corrida midió; el ledger tiene TODO el
+     * documento. Comparar una contra el otro da un falso positivo GARANTIZADO en cada
+     * reproceso — medido en producción: GTQ 13.916 leídos contra 263.319,50 aterrizados,
+     * 18,92×, sobre una carga cuyas tres cifras salieron exactas.
+     *
+     * Y eso es lo único que este mecanismo no puede permitirse: es lo único que ve un fallo en
+     * un archivo que nadie miró nunca, así que un detector que se equivoca en lo correcto
+     * enseña a ignorarlo.
+     */
+    const deLaSegunda = lineasDeCuadre.slice(indiceTrasLaPrimeraCorrida);
+    /*
+     * ⚠️ Se afirma que NO hay NINGÚN veredicto de documento, no que no haya uno `sobra`.
+     * La primera versión de este test miraba solo `sobra` y **la mutación no lo ponía en
+     * rojo**: con este libro chico la corrida parcial da `cuadra`, así que medía código
+     * distinto del que creía estar tocando. Lo que la guarda promete es que en una corrida
+     * parcial el documento no se evalúa — ningún veredicto, ni bueno ni malo.
+     */
+    const veredictos = deLaSegunda.filter((l) => !l.includes('parcial:'));
+    expect(veredictos).toEqual([]);
+    // Y se DICE por qué se omitió: un cuadre que calla sin explicar parece uno que no corrió.
+    expect(deLaSegunda.some((l) => l.includes('parcial:'))).toBe(true);
   });
 });

@@ -2693,20 +2693,54 @@ export function startExcelIngestWorker(): Promise<string> {
             ? [...aPublicarPorMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto }))
             : [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto }));
 
-          const cuadres = evaluarCuadre(
-            [...leidoDelArchivo.values()].map((l) => ({
-              ...l,
-              // Ver `declaradoNoDato`: un renglón de TOTAL se leyó pero nunca iba al ledger.
-              monto: Math.max(0, l.monto - (declaradoNoDato.get(l.moneda) ?? 0)),
-            })),
-            porMonedaComparable,
-            esperandoConfirmacion
-              ? filasMedidas > 0
-                ? filasAPublicar / filasMedidas
-                : 1
-              : expansion,
-            pendientes.map((p) => ({ moneda: p.moneda, monto: Number(p.monto) })),
+          /*
+           * ⚠️ UNA CORRIDA PARCIAL NO PUEDE EVALUAR EL CUADRE DEL DOCUMENTO (2026-09-01).
+           *
+           * `leidoDelArchivo` acumula solo las hojas que ESTA corrida midió; el ledger, en
+           * cambio, tiene TODO el documento. En un reproceso —que es lo que hace el rescate de
+           * hoja— eso compara una hoja contra el libro entero y grita "sobra: la misma plata
+           * contada dos veces" sobre una carga perfecta.
+           *
+           * Medido en producción con `EL-INFIERNO-v44-2028.xlsx`, en la corrida que rescató
+           * `Resumen_Ventas`: **GTQ 13.916,00 leídos contra 263.319,50 aterrizados, 18,92×**.
+           * Las tres cifras de ese archivo salieron EXACTAS contra su verdad de campo.
+           *
+           * Y eso es lo único que este mecanismo no puede permitirse: es lo único que ve un
+           * fallo en un archivo que nadie miró nunca, así que **un detector que se equivoca en
+           * lo correcto enseña a ignorarlo** — y acá el falso positivo estaría GARANTIZADO en
+           * todo reproceso, además de llenar la cola de `/admin/reconciliation`.
+           *
+           * El cuadre POR HOJA de abajo sigue corriendo y sigue siendo válido: compara cada
+           * hoja re-leída contra SUS propias filas de staging, que es una comparación completa.
+           * Es además el veredicto que ya manda cuando lo hay; el total es su respaldo.
+           */
+          const corridaParcial = (resumenPrevio?.hojas ?? []).some(
+            (h) => !hojasLeidas.some((n) => n.nombre === h.nombre),
           );
+          if (corridaParcial) {
+            console.info(
+              `[cuadre] company=${companyId} document=${documentId} parcial: esta corrida midió ` +
+                `${hojasLeidas.length} hoja(s) de un documento que ya tenía ` +
+                `${resumenPrevio?.hojas.length ?? 0}; el cuadre del documento se omite y manda el de por hoja`,
+            );
+          }
+
+          const cuadres = corridaParcial
+            ? []
+            : evaluarCuadre(
+                [...leidoDelArchivo.values()].map((l) => ({
+                  ...l,
+                  // Ver `declaradoNoDato`: un renglón de TOTAL se leyó pero nunca iba al ledger.
+                  monto: Math.max(0, l.monto - (declaradoNoDato.get(l.moneda) ?? 0)),
+                })),
+                porMonedaComparable,
+                esperandoConfirmacion
+                  ? filasMedidas > 0
+                    ? filasAPublicar / filasMedidas
+                    : 1
+                  : expansion,
+                pendientes.map((p) => ({ moneda: p.moneda, monto: Number(p.monto) })),
+              );
 
           for (const c of cuadres) {
             const linea = `[cuadre] company=${companyId} document=${documentId} ${c.veredicto}: ${c.detalle}`;
