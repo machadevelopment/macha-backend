@@ -81,6 +81,46 @@ export const TEMPLATES = {
       }),
     }),
     /**
+     * ═══ "TU ARCHIVO NECESITA TU ATENCIÓN" (CU-868kyur58) ═══
+     *
+     * El copy sale del HTML que aprobó Jose, palabra por palabra. Cuatro decisiones que están
+     * en ese texto y conviene no perder al editarlo:
+     *
+     *  · **"Ya casi terminamos de leer"** y no "no pudimos leer": la carga entró, lo limpio ya
+     *    está en su dashboard. Un correo que suene a fallo hace que el cliente abra la app
+     *    esperando encontrarla rota.
+     *  · **La cifra son CONCEPTOS, no filas marcadas.** El mockup dice "6 filas" porque en ese
+     *    ejemplo coinciden; acá se manda lo que el cliente va a VER al entrar, que son las
+     *    preguntas. Prometer 60 y mostrar 6 destruye el aviso para siempre.
+     *  · **"te tomará menos de un minuto"** es la promesa que justifica la interrupción, y por
+     *    eso el disparador exige que haya conceptos contestables: sin eso sería mentira.
+     *  · **El pie dice que el resto de sus datos YA está en el dashboard.** Es la mitad que
+     *    corrige el malentendido de la promoción parcial, y tiene que seguir coincidiendo con
+     *    el banner del Dashboard: los dos hablan de la misma carga con minutos de diferencia.
+     */
+    reviewNeeded: (datos: { archivos: string[]; conceptos: number; ctaUrl: string }) => {
+      const uno = datos.archivos.length === 1;
+      const lista = datos.archivos.map((a) => destacado(a)).join(', ');
+      return {
+        subject: uno
+          ? `Tu archivo necesita tu atención: ${datos.archivos[0]}`
+          : `Tus ${datos.archivos.length} cargas necesitan tu atención`,
+        html: renderBrandedEmail({
+          locale: 'es',
+          title: uno ? 'Tu archivo necesita tu atención' : 'Tus cargas necesitan tu atención',
+          bodyHtml:
+            `Ya casi terminamos de leer ${lista}. ` +
+            (datos.conceptos === 1
+              ? 'Nos quedó <strong>1 concepto</strong> que solo tú puedes clasificar bien'
+              : `Nos quedaron <strong>${datos.conceptos} conceptos</strong> que solo tú puedes clasificar bien`) +
+            ' — te tomará menos de un minuto.',
+          ctaLabel: 'Revisar y confirmar',
+          ctaUrl: datos.ctaUrl,
+          footnote: 'Esto no afecta el resto de tus datos, que ya están en tu dashboard.',
+        }),
+      };
+    },
+    /**
      * Aviso interno al equipo cuando alguien pide demo desde la landing. No es un correo al
      * lead: es el aviso ENCIMA de la fila en `demo_requests`. El cuerpo lleva los datos que
      * escribió; el botón abre el panel donde está la lista completa.
@@ -147,6 +187,30 @@ export const TEMPLATES = {
         showPlainLink: true,
       }),
     }),
+    /** Ver la nota de la versión en español: el copy es una traducción, no una variante. */
+    reviewNeeded: (datos: { archivos: string[]; conceptos: number; ctaUrl: string }) => {
+      const uno = datos.archivos.length === 1;
+      const lista = datos.archivos.map((a) => destacado(a)).join(', ');
+      return {
+        subject: uno
+          ? `Your file needs your input: ${datos.archivos[0]}`
+          : `Your ${datos.archivos.length} uploads need your input`,
+        html: renderBrandedEmail({
+          locale: 'en',
+          title: uno ? 'Your file needs your input' : 'Your uploads need your input',
+          bodyHtml:
+            `We're almost done reading ${lista}. ` +
+            (datos.conceptos === 1
+              ? 'There is <strong>1 item</strong> only you can classify correctly'
+              : `There are <strong>${datos.conceptos} items</strong> only you can classify correctly`) +
+            ' — it will take you less than a minute.',
+          ctaLabel: 'Review and confirm',
+          ctaUrl: datos.ctaUrl,
+          footnote:
+            "This doesn't affect the rest of your data, which is already in your dashboard.",
+        }),
+      };
+    },
     demoRequest: (datos: {
       nombre: string;
       empresa: string;
@@ -179,7 +243,7 @@ export interface EmailSendPayload {
    * `notifications` exige `company_id`. El worker salta el scope y no escribe esa tabla.
    */
   companyId: string | null;
-  kind: 'report' | 'alert' | 'invitation' | 'demo_request';
+  kind: 'report' | 'alert' | 'invitation' | 'demo_request' | 'review_needed';
   refId: string;
   recipientEmail: string;
   subject: string;
@@ -221,6 +285,47 @@ export async function sendAlertTriggeredEmail(params: {
     companyId: params.companyId,
     kind: 'alert',
     refId: params.alertEventId,
+    recipientEmail: params.recipientEmail,
+    subject: t.subject,
+    html: t.html,
+  });
+}
+
+/**
+ * El correo de "necesitamos que confirmes unos conceptos" (CU-868kyur58).
+ *
+ * ⚠️ **CONSOLIDADO POR EMPRESA, NO POR DOCUMENTO.** Recibe la lista de archivos y el total de
+ * conceptos, y manda UN correo. En el onboarding un cliente sube tres o cuatro archivos casi a
+ * la vez: tres correos en cinco minutos se leen como un producto que no sabe lo que está
+ * haciendo, y el segundo ya no se abre.
+ *
+ * ⚠️ **`refId` es el DOCUMENTO y no la empresa**, aunque el correo sea consolidado, y ahí está
+ * la idempotencia: el worker escribe una fila de `notifications` por cada documento cubierto,
+ * así que el que ya recibió aviso no vuelve a disparar uno. Es la única forma de que las dos
+ * reglas del ticket —"consolidar" y "nunca duplicado por documento"— convivan sin una columna
+ * nueva. Ver `avisarConceptosPendientes` en el worker.
+ */
+export async function sendReviewNeededEmail(params: {
+  companyId: string;
+  locale: 'es' | 'en';
+  /** El documento al que se le atribuye ESTE envío (para `notifications` y la idempotencia). */
+  documentId: string;
+  /** Todos los archivos que el correo menciona, en el orden en que se cargaron. */
+  archivos: string[];
+  /** Conceptos contestables sumados de todos ellos. Es lo que el cliente va a ver. */
+  conceptos: number;
+  recipientEmail: string;
+  ctaUrl: string;
+}): Promise<void> {
+  const t = TEMPLATES[params.locale].reviewNeeded({
+    archivos: params.archivos,
+    conceptos: params.conceptos,
+    ctaUrl: params.ctaUrl,
+  });
+  await enqueueEmail({
+    companyId: params.companyId,
+    kind: 'review_needed',
+    refId: params.documentId,
     recipientEmail: params.recipientEmail,
     subject: t.subject,
     html: t.html,

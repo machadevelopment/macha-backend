@@ -11,7 +11,12 @@ export const notifications = pgTable(
       .references(() => companies.id),
     // CU-868kh8pwv: 'invitation' se suma al CHECK en la migración 0017 — un tipo de
     // TypeScript más ancho que la restricción de la base solo mueve el fallo a runtime.
-    kind: text('kind').$type<'report' | 'alert' | 'invitation'>().notNull(),
+    /**
+     * `review_needed` (migración `0041`): la carga dejó conceptos que solo el cliente puede
+     * clasificar. Su `ref_id` es el `documents.id`, y **esa fila es el registro de
+     * idempotencia**: mientras exista, no se vuelve a mandar el correo por esa carga.
+     */
+    kind: text('kind').$type<'report' | 'alert' | 'invitation' | 'review_needed'>().notNull(),
     recipientEmail: text('recipient_email').notNull(),
     refId: uuid('ref_id'), // report_version_id or alert_event_id
     resendMessageId: text('resend_message_id'),

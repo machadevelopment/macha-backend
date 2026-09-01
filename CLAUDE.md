@@ -872,6 +872,41 @@ Conventions & gotchas:
   el dedup cabecera/detalle —que existe exactamente para ese par— nunca llegaba a verla. Los dos
   inventarios de mostrador que motivaron la firma siguen entrando por `Precio Lista` /
   `Precio Venta`, que es lo que de verdad los separa de una compra.
+- **EL AVISO PROACTIVO: "tu archivo necesita tu atención"** (CU-868kyur58, 2026-09-01,
+  migración `0041`). Una carga que quedaba con conceptos sin clasificar solo se descubría si el
+  cliente volvía a entrar por su cuenta; sus filas esperaban una respuesta que nadie le pidió.
+  - ⚠️ **NO se dispara donde el ticket decía, y ahí está el punto.** El ticket pedía hacerlo "en
+    el mismo punto donde se escribe `status: 'review'`" — escrito ahí, **el aviso se pierde el
+    caso más común**: con promoción parcial (migración `0020`) una carga con filas retenidas
+    termina en `promoted` con `flagged_count > 0`, y solo llega a `review` la que no promovió
+    NADA. Un cliente con 6 conceptos pendientes sobre 1.200 filas limpias nunca habría recibido
+    correo. Va después de la promoción, donde los dos desenlaces pasan.
+  - ⚠️ **Cuenta CONCEPTOS contestables, no filas marcadas.** Una carga marcada solo por
+    `invalid_date` produce CERO preguntas: el correo diría "6 filas que solo tú puedes
+    clasificar" y aterrizaría en una pantalla vacía — el mismo fallo que `conceptos-pendientes`
+    ya documenta del otro lado, y peor por correo, porque enseña a ignorar el próximo aviso.
+    `esArreglablePorCategoria` salió de `modules/ingestion` a `lib/conceptos-pendientes.ts` y
+    ahora tiene TRES consumidores (el GET, el POST y el worker): si el conteo del correo y la
+    lista de la pantalla se separan, el producto promete un número y muestra otro.
+  - **CONSOLIDAR e IDEMPOTENCIA se contradicen, y se resuelven en ejes distintos.** "Un solo
+    correo si hay varias cargas" y "nunca dos correos del mismo documento" chocan cuando A
+    termina y B treinta segundos después. La salida: la unidad de MENSAJE es la empresa y la de
+    IDEMPOTENCIA el DOCUMENTO — cada envío escribe una fila de `notifications` por CADA
+    documento que menciona. **No hace falta columna nueva**: `kind='review_needed'` +
+    `ref_id=<documento>` ES ese registro, y encima es la tabla que el equipo puede mirar.
+  - **El documento que dispara tiene que estar entre los NUEVOS, o no se manda nada.** Sin esa
+    condición, terminar una carga limpia reabriría el aviso de otra ya avisada y el cliente
+    recibiría un recordatorio cada vez que sube un archivo.
+  - ⚠️ **La migración `0041` NO estaba en el ticket y es bloqueante.** `EmailSendPayload.kind`
+    es un tipo de TypeScript; el que manda es el CHECK de `notifications.kind`, que seguía en
+    `('report','alert','invitation')`. Sin ampliarlo el job **falla al insertar DESPUÉS de
+    haber mandado el correo**: el cliente lo recibe y nosotros lo registramos como fallido. Es
+    la lección que la 0017 ya dejó escrita al agregar `invitation`. `demo_request` no la
+    necesitó porque va con `company_id` nulo y se salta la tabla — es la excepción, no el
+    patrón.
+  - **Destinatarios: los mismos que las alertas** (miembros activos con `receives_reports`). No
+    se inventa un criterio: quien eligió no recibir el reporte tampoco quiere que le escribamos
+    por una carga.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
@@ -927,6 +962,41 @@ Conventions & gotchas:
   proveedores"* —algo sobre el CONTENIDO que no sabemos—; cuando la explicación no le calza a lo
   que el dueño tiene delante, deja de creerle al resumen entero, que es la única herramienta con
   la que puede desmentirnos. Motivo nuevo: `sin_fecha_ni_monto`.
+- **El panel de conceptos pregunta UNA A LA VEZ** (`conceptos-pendientes`, CU-868kyur58,
+  2026-09-01), replicando el HTML que aprobó Jose. Antes listaba todos los conceptos apilados
+  con un `<Select>` chico y un `<Input>`: se sentía como un formulario de trabajo cuando lo que
+  el cliente tiene que hacer son dos o tres decisiones sobre su propio negocio.
+  **Es un cambio de PRESENTACIÓN**: mismo contrato, mismo endpoint, **una sola llamada** al
+  guardar con todas las respuestas juntas — un POST por concepto daría cuatro promociones
+  encoladas y un dashboard moviéndose a pedazos. Hay test que monta el componente y comprueba
+  que las respuestas de los conceptos anteriores SOBREVIVEN al avanzar: perderlas al llegar a
+  la cuarta pregunta es trabajo que el dueño ya hizo.
+  - Las cuatro opciones de "qué es" son `role="radio"` de verdad, no `div`s con `onClick`:
+    cuatro tarjetas que se ven elegibles y que el teclado no alcanza son media implementación.
+  - El punto CONTESTADO del progreso usa el verde FUNCIONAL y el actual la tinta de marca —
+    "esto ya está" es estado del dato; el salvia queda para "esto es Macha" (el orbe y el
+    resalte del concepto). Invertirlos haría que el color de marca significara progreso.
+  - **Omitir el ÚLTIMO concepto guarda lo ya contestado** en vez de tirarlo. Y sin rubro escrito
+    el botón principal está deshabilitado, así que "omitir" es el único camino para pasar de
+    largo una pregunta — eso es deliberado, no un bug.
+  - Los radios salen de la ESCALA (`rounded-lg`), no en píxeles: hay un test que lo vigila.
+- **El deep link `/upload?doc=<id>`** (mismo ticket). El correo y el banner del Dashboard llevan
+  al documento exacto: la fila queda resaltada, la pantalla hace scroll hasta ella y su panel de
+  preguntas se abre solo. Son CUATRO piezas encadenadas (página → pantalla → lista → panel) y
+  **cortar cualquiera deja el flujo donde estaba, sin que nada falle** — por eso hay un test por
+  eslabón (`deep-link.test.ts`).
+  - El `?doc=` se lee en el SERVIDOR: leído en el cliente, quien viene del correo vería la lista
+    normal y después un salto.
+  - El scroll usa `MutationObserver` porque la lista se carga por `fetch` DESPUÉS del primer
+    render — al montar la pantalla la fila todavía no existe, y un `setTimeout` adivinaría
+    cuánto tarda la petición.
+  - El resalte es `outline` y no `border`: un borde correría la tabla entera justo cuando el
+    cliente aterriza, y el scroll apuntaría a donde la fila ya no está.
+  - Un `doc` que ya no corresponde a nada degrada a la vista normal, **sin error**: un enlace de
+    un correo de hace tres días no puede terminar en una pantalla rota.
+  - El banner enlaza al documento solo cuando hay UNO en revisión; con varios va a la lista.
+    Resaltar uno de tres sugiere que los otros dos no necesitan nada — la misma decisión que
+    toma el correo consolidado.
 - **La cifra de KPI se ENCOGE antes que cortarse** (CU-868ku6r48, 2026-08-19). `truncate` sobre una cifra financiera no recorta: **miente**. Si lo que se pierde es la `K`, `GTQ 389.9K` se lee como trescientos ochenta y nueve quetzales donde hay trescientos ochenta y nueve mil — un factor de mil, en la cifra principal del dashboard, sin que nada falle. Ahora `escalaDeCifra()` baja a `kpi-sm` (20px) o `kpi-xs` (17px) según el largo de la cadena, y `truncate` queda como última red. **El tamaño se decide por longitud de cadena y NO midiendo el DOM**: la tarjeta se pinta en el servidor, así que un `ResizeObserver` haría que la primera pintura saliera con el tamaño equivocado y saltara al hidratar, en cada carga.
 - **El Consejo Financiero Diario lleva severidad y acción** (CU-868ku6r48). El esquema de la herramienta `emit_insights` (backend, `lib/anthropic.ts`) pide `severity` (`critical`/`warning`/`info`, obligatoria) y `action` (opcional). **Va en el esquema y no en el prompt** porque el prompt de insights es editable por un super_admin desde `platform_settings`: una regla escrita en el template no llega a producción. La severidad se pinta con `Badge` —chip con fondo y borde— y no como texto de color: acá no hay flecha que sirva de canal redundante, a diferencia del delta de un KPI. `info` va en `neutral` a propósito, para no gastar la señal que `critical` necesita. Los consejos se ordenan por urgencia antes de pintarse: el backend no garantiza orden y el panel vive en el rail derecho, donde lo que queda abajo no se lee. Un consejo sin `severity` (los guardados antes de este ticket en el ledger `insight_requests`) se trata como `info` — no se puede afirmar que algo urge cuando nadie lo evaluó.
 - **Regla de los DOS VERDES** (CU-868knx0vh, aprobada por Jose 2026-08-11). El color sigue sin decorar, pero ahora hay dos verdes con roles que no se pisan. **Verde de marca** (salvia `#A0AF9A` + gradiente, token `brand`): dice "esto es Macha" — Insight Point, acentos, pantallas de vitrina, cabecera de reportes. **Verde funcional** (`#16A34A`, token `success`): dice "este dato va bien" — deltas, chips, series. Rojo funcional para lo negativo. **Prueba de fuego: si el color dice "va bien o mal" es funcional; si dice "esto es Macha" es salvia.** Nunca el mismo tono para ambos, y el salvia **nunca sobre un dato**. El color de estado nunca aparece SOLO. **Matizado en CU-868ktknbq (2026-08-19): texto+fondo+borde era UNA forma de cumplirlo, no la única.** Lo que la regla protege es que el estado no dependa únicamente del color —quien no distingue verde de rojo tiene que poder leerlo igual—, así que basta cualquier canal redundante. El delta de una tarjeta de KPI lo cumple con la FLECHA (↗ ↘) y por eso ya va sin caja (`DeltaBadge presentation="inline"`): el chip se llevaba una fila entera de cada tarjeta. **El chip sigue siendo el default y sigue siendo obligatorio donde no hay flecha** — un rótulo de estado a secas (`key-alerts-card`) no tiene otro canal que el fondo y el borde. Hay test que lo fija (`styles/densidad-prototipo.test.ts`): si alguien quita la flecha del delta en línea, falla.

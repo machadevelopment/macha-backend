@@ -41,6 +41,7 @@ import {
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { medirFilas } from '@/lib/reconciliation';
 import { mapaDeDineroProbable } from '@/lib/sheet-money';
+import { avisarConceptosPendientes } from '@/lib/aviso-de-revision';
 import {
   evaluarCuadre,
   evaluarCuadrePorHoja,
@@ -2627,6 +2628,47 @@ export function startExcelIngestWorker(): Promise<string> {
           // de este worker.
           await enqueue(QUEUES.alertEvaluate, { companyId, documentId });
         }
+
+        /*
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         * EL AVISO AL CLIENTE: "TU ARCHIVO NECESITA TU ATENCIÓN" (CU-868kyur58)
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         *
+         * ⚠️ VA ACÁ Y NO "EN EL PUNTO DONDE SE ESCRIBE `status: 'review'`", QUE ES LO QUE PEDÍA
+         * EL TICKET — y la diferencia no es de estilo: escrito ahí, el aviso **se pierde el caso
+         * más común**.
+         *
+         * La promoción es PARCIAL desde la migración 0020 (decisión de Keneth, 2026-08-07). Una
+         * carga con filas retenidas termina en `promoted` con `flagged_count > 0`, que es el
+         * estado NORMAL; solo llega a `review` la que no pudo promover NADA. O sea que el punto
+         * que nombra el ticket es la excepción, no la regla, y un cliente con 6 conceptos
+         * pendientes sobre 1.200 filas limpias nunca habría recibido correo.
+         *
+         * Puesto después de la promoción, cubre los dos desenlaces con una sola llamada. Y no
+         * hace falta condicionarlo acá: `avisarConceptosPendientes` ya decide sola —mira el
+         * estado, las filas marcadas, los conceptos contestables y lo ya avisado— y esa decisión
+         * tiene que vivir en UN lugar, porque la comparte con el conteo que el cliente ve en
+         * pantalla.
+         *
+         * Envuelto, como el resto de lo que corre después de promover: la contabilidad ya está
+         * bien y un fallo del correo no puede tumbar la carga.
+         */
+        await withCompanyScope(companyId, async (db) => {
+          const r = await avisarConceptosPendientes(db, companyId, documentId);
+          if (r.enviado) {
+            console.info(
+              `[aviso-revision] company=${companyId} document=${documentId} correo enviado a ` +
+                `${r.destinatarios} destinatario(s): ${r.conceptos} concepto(s) sobre ` +
+                `${r.documentos.length} carga(s).`,
+            );
+          }
+        }).catch((err) => {
+          console.error(
+            `[aviso-revision] company=${companyId} document=${documentId} no se pudo avisar al ` +
+              `cliente (la carga sigue, su contabilidad no se toca):`,
+            err,
+          );
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await withCompanyScope(companyId, (db) =>

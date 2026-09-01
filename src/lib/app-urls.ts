@@ -56,3 +56,18 @@ export function onboardingUrl(params: { fromCheckout?: boolean } = {}): string {
     ? `${env.appBaseUrl}/onboarding?registered=1`
     : `${env.appBaseUrl}/onboarding`;
 }
+
+/**
+ * La pantalla de cargas, apuntando a UN documento concreto.
+ *
+ * El parámetro es lo que convierte el aviso en una acción: sin él, el cliente aterriza en una
+ * lista y tiene que adivinar cuál de sus archivos era. `/upload` lo lee, resalta esa fila y
+ * abre su panel de preguntas (ver `UploadScreen`).
+ *
+ * `encodeURIComponent` sobre un UUID es redundante hoy y se pone igual: es la misma disciplina
+ * que `invitationAcceptUrl`, y el día que el identificador deje de ser un UUID el enlace no se
+ * rompe en silencio dentro de un correo ya enviado.
+ */
+export function uploadDocumentUrl(documentId: string): string {
+  return `${env.appBaseUrl}/upload?doc=${encodeURIComponent(documentId)}`;
+}
