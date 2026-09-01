@@ -295,3 +295,88 @@ describe('la fila que no se arregla contestando no se ofrece ni se desmarca', ()
     expect(eur.flag_reason).not.toBeNull();
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA RESPUESTA DEL CLIENTE NO PISA UNA FILA DERIVADA (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * MEDIDO EN PRODUCCIÓN, con el portón puesto: el concepto "Aceite 1 L" agrupaba DOS filas —la
+ * venta de GTQ 1.890 y su costo derivado de GTQ 1.160, que comparten `product`—. El dueño
+ * contestó "es un ingreso", que es CIERTO de su venta, y con eso convirtió el costo en ingreso:
+ * **+1.160 de ingreso y −1.160 de costo**.
+ *
+ * El total del archivo cuadraba al centavo, así que era invisible; lo que se movía era el
+ * MARGEN BRUTO, que es cifra de portada.
+ */
+describe('contestar por producto no convierte el costo en ingreso', () => {
+  const SUF2 = randomUUID().slice(0, 8);
+  let doc3: string;
+
+  test('preparar: una venta y su costo derivado, mismo producto, las dos marcadas', async () => {
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status, row_count, flagged_count)
+      values (${companyId}, ${userId}, ${`${companyId}/d-${SUF2}.xlsx`}, ${`d-${SUF2}.xlsx`},
+              100, 'text/csv', 'promoted', 2, 2) returning id`;
+    doc3 = d!.id;
+
+    const comun = {
+      date: '2026-04-18',
+      product: 'Aceite 1 L',
+      description: null,
+      originalCurrency: 'GTQ',
+    };
+    const filas = [
+      { ...comun, type: 'revenue', category: 'ventas', originalAmount: 1890 },
+      // La derivada: su tipo lo puso una REGLA CONTABLE, no el texto de la fila.
+      {
+        ...comun,
+        type: 'cogs',
+        category: 'costo_de_ventas',
+        originalAmount: 1160,
+        derivadaDelPipeline: true,
+      },
+    ];
+    for (const p of filas) {
+      await owner`
+        insert into staging_rows (company_id, document_id, target_entity, payload, confidence,
+                                  flag_reason, review_status, sheet_name)
+        values (${companyId}, ${doc3}, 'transaction', ${JSON.stringify(p)}::jsonb,
+                0.40, 'low_confidence:0.40', 'pending', 'Ventas')`;
+    }
+    await owner`update documents set confirmed_at = now() where id = ${doc3}`;
+  });
+
+  test('el dueño dice "es un ingreso" y SOLO la venta cambia', async () => {
+    const r = await pedir(`/${doc3}/conceptos`, {
+      method: 'POST',
+      body: JSON.stringify({
+        respuestas: [
+          {
+            concepto: claveDeConcepto('Aceite 1 L')!,
+            type: 'revenue',
+            category: 'ventas de producto',
+          },
+        ],
+      }),
+    });
+    expect(r.status).toBe(200);
+
+    const filas = await owner`
+      select payload->>'type' as tipo, payload->>'category' as categoria,
+             (payload->>'originalAmount')::numeric as monto
+      from staging_rows where document_id = ${doc3} order by monto desc`;
+
+    // La venta toma la respuesta del dueño.
+    expect(filas[0]!.tipo).toBe('revenue');
+    expect(filas[0]!.categoria).toBe('ventas de producto');
+
+    /*
+     * Y el costo derivado NO. Si esto dijera `revenue`, el margen bruto del cliente se mueve
+     * 1.160 sin que nada falle y con el total del archivo cuadrando al centavo.
+     */
+    expect(filas[1]!.tipo).toBe('cogs');
+    expect(filas[1]!.categoria).toBe('costo_de_ventas');
+  });
+});
