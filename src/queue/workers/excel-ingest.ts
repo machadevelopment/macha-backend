@@ -1456,8 +1456,15 @@ export function startExcelIngestWorker(): Promise<string> {
              * el que manda (y el que dispara la advertencia al final). El perfil nunca aborta
              * una carga.
              */
-            columnsCanonicas:
-              mapasPorHoja.get(sheetName) ?? perfilesPorHoja.get(sheetName)?.columnMap,
+            columnsCanonicas: mapasPorHoja.get(sheetName),
+            /*
+             * ⚠️ El perfil va por `columnsSemilla` y NO por `columnsCanonicas`. Este mismo
+             * bloque prometía "el perfil nunca aborta una carga" y por ese parámetro sí lo
+             * hacía: `fusionarMapaDeColumnas` lanza ante conflicto, así que un perfil que no
+             * coincide con lo que el modelo lee hoy tumbaba el documento COMPLETO. Medido en
+             * producción — "amount: 3 vs 4", 0 filas, sin más rastro que el `errorReason`.
+             */
+            columnsSemilla: perfilesPorHoja.get(sheetName)?.columnMap,
             // Ver el bloque de `ordenDeFechaPorHoja`: se decide por HOJA, no por lote.
             ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
             /*

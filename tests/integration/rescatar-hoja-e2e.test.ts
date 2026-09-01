@@ -298,3 +298,16 @@ describe('una hoja descartada se puede rescatar', () => {
     expect(deLaSegunda.some((l) => l.includes('parcial:'))).toBe(true);
   });
 });
+
+/*
+ * ⚠️ ACÁ VIVÍA UN TEST DE "UN PERFIL DESACTUALIZADO NO TUMBA LA CARGA", Y SE QUITÓ.
+ *
+ * No probaba lo que decía: el doble de modelo reemplaza `classifySheetRows` ENTERA, así que la
+ * decisión que se quería cubrir —por qué parámetro entra el perfil— nunca se ejecutaba, y
+ * revertir el arreglo dejaba el test en verde.
+ *
+ * La conducta la cubre `mapaDelLote` en `src/lib/row-coverage.test.ts`, y esa decisión se
+ * EXTRAJO de `classifySheetRows` justamente por esto: lo que vive dentro de una función que los
+ * e2e doblan no lo comprueba nadie. Dejar acá un test que pasa sin medir nada habría sido peor
+ * que no tenerlo.
+ */

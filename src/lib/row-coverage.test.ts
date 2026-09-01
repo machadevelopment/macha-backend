@@ -6,6 +6,8 @@ const {
   indexarVeredictos,
   hayDesplazamiento,
   fusionarMapaDeColumnas,
+  completarConSemilla,
+  mapaDelLote,
   construirFilas,
   SheetColumnMapMismatchError,
 } = await import('./anthropic');
@@ -456,5 +458,113 @@ describe('una factura no vuelve a reconocer un ingreso ya contado', () => {
     // La cuenta por cobrar se conserva entera: el derecho de cobro es real y el cliente
     // quiere verlo. Lo único que no se repite es el ingreso.
     expect(filas.map((f) => f.targetEntity)).toEqual(['invoice']);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA SEMILLA DEL PERFIL NO ABORTA UNA CARGA (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El worker documenta desde CU-868krmrcj que el perfil de columnas de la empresa es *"una
+ * pista, no una orden: el modelo puede devolver un mapa distinto y ese es el que manda. El
+ * perfil nunca aborta una carga."*
+ *
+ * **Era falso.** El perfil entraba por `columnsCanonicas`, o sea por el camino que ABORTA ante
+ * conflicto, así que un perfil que no coincide con lo que el modelo lee hoy tumbaba el
+ * documento COMPLETO. Le pasa a cualquier cliente que cambie el formato de su Excel, y basta
+ * una hoja para perder el archivo entero.
+ *
+ * Medido en producción: tras corregir a mano la columna de una hoja, el perfil aprendió esa
+ * corrección y la siguiente carga del mismo formato falló entera — "amount: 3 vs 4", 0 filas,
+ * sin más rastro que el `errorReason`.
+ */
+describe('completarConSemilla', () => {
+  const SEMILLA = {
+    date: 0, amount: 3, currency: null, description: 1, counterparty: null, product: null,
+    quantity: null, productCategory: null, store: null, dueDate: null, costTotal: null,
+    costUnit: null,
+  }; // prettier-ignore
+
+  test('ante conflicto GANA EL LOTE: está mirando el archivo de hoy', () => {
+    const delLote = { ...SEMILLA, amount: 4 };
+    expect(completarConSemilla(SEMILLA, delLote).amount).toBe(4);
+  });
+
+  test('y NUNCA lanza, que es la diferencia con el canónico', () => {
+    /*
+     * La aserción que vale: el mismo par que hace lanzar a `fusionarMapaDeColumnas` —el camino
+     * de dos lotes de la misma corrida, donde abortar es correcto— acá tiene que pasar.
+     */
+    const delLote = { ...SEMILLA, amount: 4 };
+    expect(() => fusionarMapaDeColumnas('GastosBodega', SEMILLA, delLote)).toThrow();
+    expect(() => completarConSemilla(SEMILLA, delLote)).not.toThrow();
+  });
+
+  test('rellena lo que el lote NO pudo ver, que es para lo que nació el perfil', () => {
+    const ciego = { ...SEMILLA, amount: null, description: null };
+    const r = completarConSemilla(SEMILLA, ciego);
+    expect(r.amount).toBe(3);
+    expect(r.description).toBe(1);
+  });
+});
+
+/**
+ * `mapaDelLote` es la decisión que ANTES vivía dentro de `classifySheetRows`, y por eso ningún
+ * test la ejercitaba: los e2e doblan esa función entera, así que la mutación pasaba en verde.
+ * Extraerla es lo que la hace comprobable.
+ */
+describe('mapaDelLote: de dónde sale el mapa con el que se arman las filas', () => {
+  const BASE = {
+    date: 0, amount: 2, currency: null, description: null, counterparty: 1, product: null,
+    quantity: null, productCategory: null, store: null, dueDate: null, costTotal: null,
+    costUnit: null,
+  }; // prettier-ignore
+
+  test('contra el CANÓNICO de esta corrida, un conflicto ABORTA', () => {
+    /*
+     * Y debe: dos lotes de la misma hoja leyendo columnas distintas dejarían media hoja con los
+     * valores de otra columna, sin error visible.
+     */
+    expect(() =>
+      mapaDelLote({
+        sheetName: 'Ventas',
+        canonicas: BASE,
+        delLote: { ...BASE, amount: 4 },
+      }),
+    ).toThrow();
+  });
+
+  test('contra la SEMILLA del perfil, el mismo conflicto NO aborta y gana el lote', () => {
+    /*
+     * El fallo medido en producción: el perfil entraba por `canonicas`, así que un formato que
+     * cambió tumbaba el documento COMPLETO. El perfil describe el archivo de la última vez; el
+     * lote está mirando el de hoy.
+     */
+    const r = mapaDelLote({
+      sheetName: 'GastosBodega',
+      semilla: { ...BASE, amount: 3 },
+      delLote: { ...BASE, amount: 4 },
+    });
+    expect(r.amount).toBe(4);
+  });
+
+  test('con las dos, manda el canónico: la semilla es solo para el PRIMER lote', () => {
+    /*
+     * Si la semilla pudiera pisar al canónico, el perfil viejo se colaría a mitad de hoja y
+     * volvería el fallo que el canónico existe para evitar.
+     */
+    expect(() =>
+      mapaDelLote({
+        sheetName: 'Ventas',
+        canonicas: BASE,
+        semilla: { ...BASE, amount: 9 },
+        delLote: { ...BASE, amount: 4 },
+      }),
+    ).toThrow();
+  });
+
+  test('sin ninguna de las dos, se usa el del lote tal cual', () => {
+    expect(mapaDelLote({ sheetName: 'X', delLote: BASE })).toEqual(BASE);
   });
 });

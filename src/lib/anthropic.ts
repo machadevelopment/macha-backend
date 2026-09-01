@@ -901,6 +901,59 @@ const COLUMNAS_QUE_CORROMPEN_NUMEROS = new Set<keyof ColumnMap>([
   'currency',
 ]);
 
+/**
+ * Rellena con la semilla lo que este lote NO pudo ver, y nada más.
+ *
+ * Es la mitad útil de `fusionarMapaDeColumnas` sin la mitad que aborta: ante dos valores
+ * distintos gana el del LOTE, porque está mirando el archivo de hoy y la semilla describe el de
+ * la última vez. Ver `columnsSemilla` para el fallo que esto cierra.
+ */
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * CON QUÉ MAPA SE ARMAN LAS FILAS DE ESTE LOTE
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Es una función aparte y no tres líneas dentro de `classifySheetRows` por un motivo medido:
+ * los tests e2e doblan `classifySheetRows` ENTERA, así que cualquier decisión que viva ahí
+ * adentro **no la ejecuta ningún test** — la mutación pasa en verde y uno cree estar cubierto.
+ * Acá la elección es comprobable de verdad.
+ *
+ * Las dos fuentes NO son intercambiables, y confundirlas tumbaba cargas enteras:
+ *
+ *  · **`canonicas`** — lo que fijaron los lotes ANTERIORES de esta misma corrida. Un conflicto
+ *    acá ABORTA, y debe: dos lotes leyendo columnas distintas dejarían media hoja con los
+ *    valores de otra columna, sin error visible.
+ *  · **`semilla`** — el perfil de columnas de la empresa, o sea lo que se leyó la ÚLTIMA VEZ.
+ *    Un conflicto acá NO aborta: gana el lote, que está mirando el archivo de hoy.
+ *
+ * El worker documenta desde CU-868krmrcj que el perfil es *"una pista, no una orden… El perfil
+ * nunca aborta una carga"*, y el código lo metía por `canonicas`, o sea por el camino que sí
+ * aborta. Medido en producción (2026-09-01): tras corregir a mano la columna de una hoja, el
+ * perfil aprendió esa corrección y **la siguiente carga del mismo formato falló entera** —
+ * "amount: 3 vs 4", 0 filas, y el único rastro era el `errorReason`. Le pasa a cualquier
+ * cliente que cambie el formato de su Excel, y basta una hoja para perder el archivo entero.
+ */
+export function mapaDelLote(params: {
+  sheetName: string;
+  canonicas?: ColumnMap;
+  semilla?: ColumnMap;
+  delLote: ColumnMap;
+}): ColumnMap {
+  if (params.canonicas) {
+    return fusionarMapaDeColumnas(params.sheetName, params.canonicas, params.delLote);
+  }
+  if (params.semilla) return completarConSemilla(params.semilla, params.delLote);
+  return params.delLote;
+}
+
+export function completarConSemilla(semilla: ColumnMap, delLote: ColumnMap): ColumnMap {
+  const out = {} as ColumnMap;
+  for (const k of Object.keys(semilla) as (keyof ColumnMap)[]) {
+    out[k] = delLote[k] ?? semilla[k];
+  }
+  return out;
+}
+
 export function fusionarMapaDeColumnas(
   sheetName: string,
   canonico: ColumnMap,
@@ -1016,8 +1069,36 @@ export async function classifySheetRows(params: {
    * Mapa que ya fijaron los lotes ANTERIORES de esta hoja. Se fusiona con el que devuelve
    * este lote y el resultado es lo que arma los valores: una columna que este lote no pudo
    * distinguir se lee igual, porque es la misma hoja.
+   *
+   * Un CONFLICTO real acá aborta el lote, y debe: dos lotes de la misma corrida leyendo
+   * columnas distintas dejarían media hoja con los valores de otra columna, sin error visible.
    */
   columnsCanonicas?: ColumnMap;
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * ⚠️ LA SEMILLA NO ES LO MISMO QUE EL CANÓNICO, Y CONFUNDIRLOS TUMBA CARGAS ENTERAS
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * El perfil de columnas de la empresa (CU-868krmrcj) se le pasa al PRIMER lote de cada hoja
+   * para que no trabaje a ciegas. El worker lo documenta así: *"Es una pista, no una orden: el
+   * modelo puede devolver un mapa distinto y ese es el que manda. El perfil nunca aborta una
+   * carga."*
+   *
+   * **Eso era falso.** El perfil entraba por `columnsCanonicas`, o sea por el camino que
+   * ABORTA ante conflicto — así que un perfil que no coincide con lo que el modelo lee hoy
+   * tumbaba el documento COMPLETO con `MapaDeColumnasInconsistente`. Le pasa a cualquier
+   * cliente que cambie el formato de su Excel, y basta una hoja para perder el archivo entero.
+   *
+   * Medido en producción (2026-09-01): tras corregir a mano la columna de una hoja, el perfil
+   * aprendió esa corrección y **la siguiente carga del mismo formato falló entera** — "amount:
+   * 3 vs 4", 0 filas, sin más rastro que el `errorReason`.
+   *
+   * Acá el conflicto NO aborta: **gana el modelo**, que está mirando el archivo de hoy,
+   * mientras el perfil describe el de la última vez. El perfil sigue sirviendo para lo que
+   * nació —rellenar lo que este lote no pudo ver— y sigue disparando la advertencia al cliente
+   * ("la estructura cambió"), que es la reacción correcta a un formato distinto.
+   */
+  columnsSemilla?: ColumnMap;
   /**
    * Marca la segunda pasada sobre las filas que el modelo no cubrió. Corta la recursión en
    * uno: si el reintento tampoco las cubre, el problema no es suerte y seguir intentando solo
@@ -1142,9 +1223,12 @@ export async function classifySheetRows(params: {
    * anterior distinguió la columna de monto y este no, se usa la del anterior. Lanza solo
    * ante un conflicto real (la misma columna en dos posiciones).
    */
-  const columnas = params.columnsCanonicas
-    ? fusionarMapaDeColumnas(params.sheetName, params.columnsCanonicas, parsed.columns)
-    : parsed.columns;
+  const columnas = mapaDelLote({
+    sheetName: params.sheetName,
+    canonicas: params.columnsCanonicas,
+    semilla: params.columnsSemilla,
+    delLote: parsed.columns,
+  });
 
   const { porIndice, fueraDeRango } = indexarVeredictos(parsed.rows, params.rows.length);
 
