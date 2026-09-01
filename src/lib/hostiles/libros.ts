@@ -1,5 +1,6 @@
 import { asNumber as asNumeroDeCelda } from '../row-assembly';
 import { dobleDeModelo, serial, type LibroHostil, type Tipo, type Verdad } from './pipeline-doble';
+import { libroLaCeiba } from './libro-la-ceiba';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -751,4 +752,5 @@ export const LIBROS: (() => LibroHostil)[] = [
   libroDiario,
   libroHojasBasura,
   libroMezclador,
+  libroLaCeiba,
 ];

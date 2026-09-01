@@ -13,3 +13,8 @@ scratch/
 
 # Scratch de depuración (no versionado)
 scratch/
+
+# Libros hostiles GENERADOS (`bun run hostiles:generar`). Se regeneran a partir de
+# `src/lib/hostiles/`, que sí está versionado y es la fuente de verdad — versionar los .xlsx
+# metería binarios que se desincronizan del generador sin que nada lo note.
+exceles-hostiles/

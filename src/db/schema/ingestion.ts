@@ -127,6 +127,23 @@ export const documents = pgTable(
      * un resumen vacío, que sería "se procesó y no se entendió nada". Ver `lib/read-summary.ts`.
      */
     readSummary: jsonb('read_summary').$type<ResumenDeLectura | null>(),
+    /**
+     * Veredicto del CUADRE (migración `0040`): lo que el archivo traía contra lo que aterrizó,
+     * por moneda y **por hoja**.
+     *
+     * Existe porque este veredicto se calculaba y se tiraba: iba a `console.warn` y los logs de
+     * Railway no agregan, no alertan y rotan. Verificado el 2026-08-31 buscando el diagnóstico
+     * de dos cargas que un cliente acababa de reportar: ya no estaba.
+     *
+     * `null` = carga anterior a la migración o que no llegó a evaluarse; distinto de un objeto
+     * vacío, que sería "se evaluó y no había nada que comparar".
+     */
+    reconciliation: jsonb('reconciliation').$type<{
+      verificadoEl: string;
+      cuadra: boolean;
+      documento: unknown[];
+      hojas: unknown[];
+    } | null>(),
     status: text('status')
       // `unsupported` (migración 0018): terminal, el archivo no se pudo leer y
       // reintentarlo da lo mismo — distinto de `failed`, que sí es reintentable.
@@ -179,6 +196,15 @@ export const stagingRows = pgTable(
       .default('pending'),
     reviewedBy: uuid('reviewed_by'),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    /**
+     * Hoja del Excel de la que salió esta fila (migración 0039).
+     *
+     * `null` = carga anterior a la migración. Existe para que el cuadre pueda hacerse POR
+     * HOJA y no solo por documento: sumando el documento entero, una hoja que aterriza el
+     * doble y otra que aterriza cero se cancelan y la carga parece correcta — que es la forma
+     * exacta de los fallos de composición de esta ingesta.
+     */
+    sheetName: text('sheet_name'),
     /**
      * Migración 0020: instante en que esta fila se insertó en
      * `transactions`/`invoices`/`bills`. `null` = todavía no.

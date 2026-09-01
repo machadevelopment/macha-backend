@@ -341,6 +341,27 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      * no: se pone después, sobre la fila que esa función ya dejó en `cancelled`.
      */
     await cancelDocumentRows(db, companyId, params.id);
+    /*
+     * ═══ CANCELAR TAMBIÉN TIENE QUE REFRESCAR EL CACHÉ, POR EL MISMO MOTIVO QUE REVERTIR ═══
+     *
+     * `revert` lo hacía desde el principio y esto no, y la asimetría no era una decisión:
+     * cuando `cancel` solo cambiaba el estado no había filas que deshacer, así que no había
+     * caché que corregir. Desde CU-868kttzb1 cancelar DESHACE lo que alcanzó a promoverse
+     * (promoción parcial, migración 0020) — o sea que sí las hay, y el refresco se quedó del
+     * otro lado del cambio.
+     *
+     * El síntoma es el peor de esta casa porque no falla nada: las cifras del dashboard salen
+     * de `metric_rollups`, que es un CACHÉ, así que seguían contando transacciones ya
+     * soft-borradas hasta que alguna otra carga de esa empresa lo recalculara de rebote. El
+     * cliente ve un ingreso que ya no existe, el asesor —que consulta `transactions`— ve el
+     * verdadero, y las dos cifras se contradicen sin que ninguna se pueda desmentir.
+     *
+     * Va acá y no dentro de `cancelDocumentRows` a propósito: esa función es el DESHACER de
+     * las filas y corre también desde el worker, dentro de la transacción del documento;
+     * `refreshExistingRollups` escribe un caché de toda la empresa y no tiene nada que hacer
+     * dentro de esa transacción. Es la misma división que ya tiene `revert` unas líneas abajo.
+     */
+    await refreshExistingRollups(db, companyId);
     await db
       .update(documents)
       .set({ errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser() })

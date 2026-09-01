@@ -78,6 +78,16 @@ export async function insertStagingRows(
   companyId: string,
   documentId: string,
   rows: MappedRow[],
+  /**
+   * De qué hoja del Excel salieron estas filas (migración 0039).
+   *
+   * OPCIONAL a propósito: los tests que solo ejercitan la promoción no tienen por qué
+   * inventarse un nombre de hoja, y una carga anterior a la migración lo tiene en NULL. Lo que
+   * NO puede pasar es que el worker se lo olvide — sin esto el cuadre por hoja no existe, y el
+   * cuadre por documento deja pasar el caso que más daño hace: una hoja al doble y otra en
+   * cero se cancelan en el total.
+   */
+  sheetName?: string,
 ): Promise<void> {
   if (rows.length === 0) return;
 
@@ -93,6 +103,7 @@ export async function insertStagingRows(
       confidence: row.confidence.toFixed(4),
       flagReason,
       reviewStatus: flagReason ? ('pending' as const) : ('clean' as const),
+      ...(sheetName ? { sheetName } : {}),
     })),
   );
 }

@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { and, eq, isNull, sql as rawSql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, sql as rawSql } from 'drizzle-orm';
 import { registerWorker, enqueue, QUEUES } from '@/queue';
 import { withCompanyScope } from '@/lib/db-scope';
 import {
@@ -40,7 +40,15 @@ import {
 } from '@/lib/sheet-consensus';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
 import { medirFilas } from '@/lib/reconciliation';
-import { evaluarCuadre, hayDescuadre, type LeidoDelArchivo } from '@/lib/cuadre';
+import { mapaDeDineroProbable } from '@/lib/sheet-money';
+import {
+  evaluarCuadre,
+  evaluarCuadrePorHoja,
+  hayDescuadre,
+  hojasDescuadradas,
+  type AterrizadoEnElLedger,
+  type LeidoDelArchivo,
+} from '@/lib/cuadre';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
 import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
@@ -304,6 +312,30 @@ export function startExcelIngestWorker(): Promise<string> {
          * escribe un `console.info` que rota con los logs de Railway. Ese es el punto: la
          * información existía y se estaba tirando.
          */
+        /**
+         * Cuánto dinero se lleva una hoja que NO va a producir movimientos.
+         *
+         * Los cinco descartes de abajo registraban `filas` y nunca el monto, así que el
+         * resumen podía decir "descarté 220 filas" y no "descarté Q 2.707.318". Cada bug de
+         * ingesta de los últimos meses fue una exclusión o una inclusión equivocada, y el
+         * dinero es lo único que las vuelve evidentes de un vistazo — para el dueño, que es
+         * quien puede desmentirlas, y para nosotros, que así podemos ordenar por riesgo.
+         *
+         * ⚠️ Es una ESTIMACIÓN (`lib/sheet-money.ts`): esta hoja nunca tuvo mapa de columnas
+         * porque nunca llegó al modelo. No alimenta el ledger ni el cuadre del dinero
+         * aterrizado; solo explica. Un fallo acá NO puede tumbar la carga, así que va envuelto.
+         */
+        const dineroDescartado = (
+          rows: unknown[][],
+        ): { moneda: string; total: number; filas: number }[] | undefined => {
+          try {
+            const medicion = medirFilas(rows.slice(1), mapaDeDineroProbable(rows), baseCurrency);
+            return medicion.montos.length > 0 ? medicion.montos : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
         const hojasLeidas: HojaLeida[] = [];
 
         /**
@@ -409,6 +441,13 @@ export function startExcelIngestWorker(): Promise<string> {
 
         /** Lo que el archivo traía, por moneda. Alimenta el cuadre de después de promover. */
         const leidoDelArchivo = new Map<string, LeidoDelArchivo>();
+        /**
+         * Lo mismo, pero SIN sumar entre hojas. Es lo que hace posible el cuadre por hoja: el
+         * total del documento se deja engañar por dos errores de signo opuesto —una hoja al
+         * doble y otra en cero se cancelan— y esa es la forma exacta de los fallos de
+         * composición de esta ingesta. Ver `evaluarCuadrePorHoja` en `lib/cuadre.ts`.
+         */
+        const leidoPorHoja = new Map<string, { montos: LeidoDelArchivo[]; filas: number }>();
         /** Filas del archivo que se midieron: el denominador de la expansión. */
         let filasMedidas = 0;
         /**
@@ -778,6 +817,7 @@ export function startExcelIngestWorker(): Promise<string> {
               nombre: sheetName,
               motivo: 'duplica_otra_hoja',
               filas: rows.length,
+              montos: dineroDescartado(rows),
             });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por duplicar ` +
@@ -833,6 +873,7 @@ export function startExcelIngestWorker(): Promise<string> {
               nombre: sheetName,
               motivo: 'reporte',
               filas: rows.length,
+              montos: dineroDescartado(rows),
             });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por forma ` +
@@ -964,6 +1005,7 @@ export function startExcelIngestWorker(): Promise<string> {
               nombre: sheetName,
               motivo: 'catalogo',
               filas: rows.length,
+              montos: dineroDescartado(rows),
             });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada por encabezados (catálogo, no movimientos): ${rows.length} filas no van al modelo`,
@@ -993,8 +1035,13 @@ export function startExcelIngestWorker(): Promise<string> {
             hojasLeidas.push({
               estado: 'descartada',
               nombre: sheetName,
-              motivo: 'catalogo',
+              // Ya no dice `catalogo`: acá lo único que sabemos es que no se le pudo leer una
+              // columna de fecha con dinero al lado. Decirle al cliente que su hoja "describe
+              // clientes, productos o proveedores" cuando no es cierto le enseña a no creerle
+              // al resumen — y este es el filtro que dejó el dashboard de KapePrueba en cero.
+              motivo: 'sin_fecha_ni_monto',
               filas: rows.length - 1,
+              montos: dineroDescartado(rows),
             });
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}" descartada: no tiene ` +
@@ -1043,6 +1090,7 @@ export function startExcelIngestWorker(): Promise<string> {
               nombre: sheetName,
               motivo: 'ya_ingerida',
               filas: rows.length,
+              montos: dineroDescartado(rows),
             });
             continue;
           }
@@ -1219,7 +1267,10 @@ export function startExcelIngestWorker(): Promise<string> {
                 billableUnits: batch.length,
               });
             }
-            await insertStagingRows(db, companyId, documentId, rows);
+            // El nombre de la hoja viaja con las filas (migración 0039): es lo que permite
+            // cuadrar POR HOJA. Sin él, una hoja que aterriza el doble y otra que aterriza
+            // cero se cancelan en el total del documento y la carga parece correcta.
+            await insertStagingRows(db, companyId, documentId, rows, sheetName);
 
             /*
              * Las huellas se registran en la MISMA transacción que el resto del lote. Si
@@ -2026,6 +2077,23 @@ export function startExcelIngestWorker(): Promise<string> {
           }
           filasMedidas += medicion.filasEnviadas;
 
+          // Y aparte, sin mezclar con las otras hojas.
+          const deEstaHoja = new Map<string, LeidoDelArchivo>();
+          for (const m of medicion.montos) {
+            const p = deEstaHoja.get(m.moneda) ?? { moneda: m.moneda, monto: 0, costo: 0 };
+            p.monto += m.total;
+            deEstaHoja.set(m.moneda, p);
+          }
+          for (const c of medicion.costos) {
+            const p = deEstaHoja.get(c.moneda) ?? { moneda: c.moneda, monto: 0, costo: 0 };
+            p.costo += c.total;
+            deEstaHoja.set(c.moneda, p);
+          }
+          leidoPorHoja.set(sheetName, {
+            montos: [...deEstaHoja.values()],
+            filas: medicion.filasEnviadas,
+          });
+
           if (medicion.montos.length > 0) {
             console.info(
               `[excel-ingest] company=${companyId} hoja "${sheetName}": ` +
@@ -2434,13 +2502,117 @@ export function startExcelIngestWorker(): Promise<string> {
             if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos') console.info(linea);
             else console.warn(linea);
           }
-          if (hayDescuadre(cuadres)) {
+          /*
+           * ═══════════════════════════════════════════════════════════════════════════════════
+           * Y AHORA POR HOJA, QUE ES LO QUE EL TOTAL NO PUEDE VER
+           * ═══════════════════════════════════════════════════════════════════════════════════
+           *
+           * El cuadre de arriba suma el documento entero y por eso se deja engañar: un libro
+           * donde una hoja aterriza el DOBLE y otra aterriza CERO cuadra perfecto, porque los
+           * dos errores se cancelan. Esa es la forma exacta de los fallos que llevamos meses
+           * persiguiendo (KapePrueba: dos hojas de detalle perdidas y una cartera de clientes
+           * inventando ingresos; CarsGT: cobros devengando de nuevo mientras el stock entraba
+           * como costo).
+           *
+           * Se compara contra `staging_rows` y no contra el ledger porque el ledger no sabe de
+           * qué hoja vino cada fila —`transactions` guarda `document_id`, no `sheet_name`— y
+           * porque staging conserva el monto en la moneda ORIGINAL, así que la comparación no
+           * arrastra el ruido de la conversión.
+           */
+          const porHojaEnStaging = await db
+            .select({
+              hoja: stagingRows.sheetName,
+              moneda: rawSql<string>`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`,
+              promovido: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric) filter (where ${stagingRows.promotedAt} is not null), 0)`,
+              pendiente: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric) filter (where ${stagingRows.reviewStatus} = 'pending'), 0)`,
+              filas: rawSql<string>`count(*)`,
+            })
+            .from(stagingRows)
+            .where(
+              and(
+                eq(stagingRows.companyId, companyId),
+                eq(stagingRows.documentId, documentId),
+                isNotNull(stagingRows.sheetName),
+              ),
+            )
+            .groupBy(
+              stagingRows.sheetName,
+              rawSql`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`,
+            );
+
+          const agrupado = new Map<
+            string,
+            { aterrizado: AterrizadoEnElLedger[]; revision: AterrizadoEnElLedger[]; filas: number }
+          >();
+          for (const f of porHojaEnStaging) {
+            const clave = f.hoja!;
+            const e = agrupado.get(clave) ?? { aterrizado: [], revision: [], filas: 0 };
+            e.aterrizado.push({ moneda: f.moneda, monto: Number(f.promovido) });
+            e.revision.push({ moneda: f.moneda, monto: Number(f.pendiente) });
+            e.filas += Number(f.filas);
+            agrupado.set(clave, e);
+          }
+
+          const porHojaCuadre = evaluarCuadrePorHoja(
+            [...leidoPorHoja.entries()].map(([hoja, medido]) => {
+              const enStaging = agrupado.get(hoja);
+              return {
+                hoja,
+                leido: medido.montos,
+                aterrizado: enStaging?.aterrizado ?? [],
+                // La expansión de ESTA hoja, no la del documento: una hoja de facturas
+                // expande 2× y la de gastos 1×, y usar el promedio del libro daría una banda
+                // demasiado ancha para una y demasiado angosta para la otra.
+                expansion: medido.filas > 0 && enStaging ? enStaging.filas / medido.filas : 1,
+                enRevision: enStaging?.revision ?? [],
+              };
+            }),
+          );
+
+          const descuadradas = hojasDescuadradas(porHojaCuadre);
+          for (const d of descuadradas) {
+            console.warn(
+              `[cuadre] company=${companyId} document=${documentId} hoja "${d.hoja}" ${d.detalle}`,
+            );
+          }
+
+          const hayAlgo = hayDescuadre(cuadres) || descuadradas.length > 0;
+          if (hayAlgo) {
             console.warn(
               `[cuadre] company=${companyId} document=${documentId} DESCUADRE: lo que aterrizó ` +
                 `no se parece a lo que el archivo traía. Es la señal más temprana de una hoja ` +
                 `perdida o contada dos veces.`,
             );
           }
+
+          /*
+           * ═══ Y SE GUARDA, QUE ES LA MITAD QUE FALTABA ═══
+           *
+           * Este bloque existía y su resultado moría en `console.warn`. El encabezado de
+           * `lib/cuadre.ts` decía que "un descuadre queda ESCRITO en el resumen de la carga" y
+           * no era cierto: `documents` no tenía dónde ponerlo. En Railway los logs no agregan,
+           * no alertan y rotan — comprobado el 2026-08-31 buscando el veredicto de dos cargas
+           * reportadas por el cliente: ya no existía.
+           *
+           * Es exactamente el error que `lib/read-summary.ts` documenta haber corregido para
+           * los datos de lectura ("hoy va a console.info y rota con los logs de Railway"). La
+           * lección se había aprendido en un módulo y no se había aplicado en el que más la
+           * necesitaba.
+           *
+           * Va en su propia escritura y es best-effort: perder el diagnóstico es una molestia,
+           * tumbar una carga ya promovida por no poder guardarlo sería un daño real.
+           */
+          await db
+            .update(documents)
+            .set({
+              reconciliation: {
+                verificadoEl: new Date().toISOString(),
+                cuadra: !hayAlgo,
+                documento: cuadres,
+                hojas: porHojaCuadre,
+              },
+            })
+            .where(eq(documents.id, documentId));
         }).catch((err) => {
           console.error(
             `[cuadre] company=${companyId} document=${documentId} no se pudo evaluar (la carga ` +

@@ -130,9 +130,20 @@ describe('lo que NO debe detectarse', () => {
     expect(e.referencias).toHaveLength(0);
   });
 
-  test('con pocos valores no se afirma nada (el azar alcanza para cubrir)', () => {
-    const a: unknown[][] = [['ID'], ['A-1'], ['A-2'], ['A-3']];
-    const b: unknown[][] = [['ID'], ['A-1'], ['A-2'], ['A-3'], ['A-4']];
+  test('con pocas ETIQUETAS no se afirma nada (el azar alcanza para cubrir)', () => {
+    /*
+     * El riesgo que el mínimo de valores protege es éste y solo éste: una columna de
+     * ETIQUETAS —palabras de un vocabulario chico— que se solapa con otra por casualidad. Tres
+     * valores iguales entre dos hojas no prueban nada cuando los valores son palabras.
+     *
+     * ⚠️ El fixture decía `A-1 / A-2 / A-3`, que NO son etiquetas: son códigos, y una hoja
+     * chica que nombra los códigos de una más grande es un caso de libro de clave foránea, no
+     * de azar. Con ese fixture el test afirmaba algo más fuerte que su propio nombre y
+     * bloqueaba el arreglo del test de abajo. Ahora usa palabras, que es lo que el comentario
+     * siempre describió.
+     */
+    const a: unknown[][] = [['Estado'], ['Alfa'], ['Beta'], ['Gamma']];
+    const b: unknown[][] = [['Estado'], ['Alfa'], ['Beta'], ['Gamma'], ['Delta']];
 
     const e = analizarEsquema([
       { nombre: 'Chica', rows: a },
@@ -140,6 +151,31 @@ describe('lo que NO debe detectarse', () => {
     ]);
 
     expect(e.referencias).toHaveLength(0);
+  });
+
+  test('con pocos CÓDIGOS sí se afirma: tres recibos que nombran su factura', () => {
+    /*
+     * El caso que motivó `MIN_VALORES_SI_SON_CODIGOS`, encontrado por el generador de libros.
+     *
+     * Una hoja de tres cobros que apuntan a facturas ya emitidas tiene que reconocerse como lo
+     * que es —el ESTADO de un hecho ya registrado— o su dinero se devenga por segunda vez. Con
+     * el mínimo de 4 uniforme, la contabilidad de un negocio chico se inflaba: medido, +45 % de
+     * ingreso en un libro con seis recibos, y sigue pasando con dos o tres.
+     *
+     * `FAC-1007` no es una etiqueta y coincidir en dos hojas del mismo libro no le pasa por
+     * azar. Ese es el discriminante, no el conteo.
+     */
+    const facturas: unknown[][] = [['No. Factura', 'Monto']];
+    for (let i = 0; i < 9; i++) facturas.push([`FAC-${1000 + i}`, 500 + i]);
+    const cobros: unknown[][] = [['No. Recibo', 'No. Factura', 'Monto']];
+    for (let i = 0; i < 3; i++) cobros.push([`REC-${i}`, `FAC-${1000 + i}`, 500 + i]);
+
+    const e = analizarEsquema([
+      { nombre: 'Facturacion', rows: facturas },
+      { nombre: 'Cobros', rows: cobros },
+    ]);
+
+    expect(e.referencias.some((r) => r.desde === 'Cobros' && r.hacia === 'Facturacion')).toBe(true);
   });
 
   test('una columna de fechas no se confunde con una clave', () => {
