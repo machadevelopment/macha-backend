@@ -250,3 +250,67 @@ export function hayDescuadre(cuadres: Cuadre[]): boolean {
     (c) => c.veredicto !== 'cuadra' && c.veredicto !== 'sin_datos' && c.veredicto !== 'en_revision',
   );
 }
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL MISMO CUADRE, PERO POR HOJA — PORQUE EL DEL DOCUMENTO SE DEJA ENGAÑAR
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `evaluarCuadre` suma el documento entero, y ahí tiene un agujero que se ve en cuanto se
+ * escribe: **un libro donde una hoja aterriza el DOBLE y otra aterriza CERO cuadra perfecto**,
+ * porque los dos errores se cancelan en el total. Y esa es exactamente la forma de los fallos
+ * que llevamos meses persiguiendo:
+ *
+ *   · KapePrueba — el dedup conservó un resumen de 11 filas y descartó `Ventas` (481) y
+ *     `Compras` (43); la única cifra que llegó fueron Q 13.362 de una cartera de clientes
+ *     leída como ingresos. Dos hojas en cero y una inventando: el total no lo delata.
+ *   · CarsGT — 81 cuentas por cobrar devengaron un ingreso que `Ventas` ya había contado,
+ *     mientras el inventario entraba como costo. De nuevo, dos errores de signo opuesto.
+ *
+ * Por hoja no se cancelan. Cada hoja se compara contra lo que ELLA traía, así que una que
+ * pierde su plata dice `nada_aterrizo` aunque la de al lado esté duplicando.
+ *
+ * ═══ POR QUÉ SE MIDE CONTRA `staging_rows` Y NO CONTRA EL LEDGER ═══
+ *
+ * Porque el ledger no sabe de qué hoja vino cada fila: `transactions` guarda `document_id`, no
+ * `sheet_name`. `staging_rows` sí, desde la migración 0039, y además guarda el monto en la
+ * moneda ORIGINAL — o sea que la comparación no arrastra el ruido de la conversión de moneda.
+ *
+ * Los dos cuadres son complementarios y hay que conservar los dos: éste atrapa los fallos de
+ * COMPOSICIÓN entre hojas; el del documento, que sí lee el ledger, atrapa que la promoción no
+ * haya escrito lo que staging decía.
+ */
+export interface CuadreDeHoja {
+  hoja: string;
+  cuadres: Cuadre[];
+}
+
+/** Lo medido y lo aterrizado de UNA hoja, listo para cuadrar. */
+export interface HojaParaCuadrar {
+  hoja: string;
+  leido: LeidoDelArchivo[];
+  aterrizado: AterrizadoEnElLedger[];
+  /** Filas de staging producidas / filas del archivo medidas. Ver `evaluarCuadre`. */
+  expansion?: number;
+  enRevision?: AterrizadoEnElLedger[];
+}
+
+export function evaluarCuadrePorHoja(hojas: HojaParaCuadrar[]): CuadreDeHoja[] {
+  return hojas.map((h) => ({
+    hoja: h.hoja,
+    cuadres: evaluarCuadre(h.leido, h.aterrizado, h.expansion ?? 1, h.enRevision ?? []),
+  }));
+}
+
+/** Las hojas que ameritan que alguien las mire, con su motivo ya redactado. */
+export function hojasDescuadradas(porHoja: CuadreDeHoja[]): { hoja: string; detalle: string }[] {
+  const out: { hoja: string; detalle: string }[] = [];
+  for (const h of porHoja) {
+    for (const c of h.cuadres) {
+      if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos' || c.veredicto === 'en_revision')
+        continue;
+      out.push({ hoja: h.hoja, detalle: `${c.veredicto}: ${c.detalle}` });
+    }
+  }
+  return out;
+}

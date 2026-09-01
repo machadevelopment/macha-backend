@@ -74,7 +74,15 @@ export function normalizeHeader(value: unknown): string {
  * catálogos: `Productos` tiene precio y costo sin ser un movimiento, y `Clientes` tiene
  * fecha de registro sin serlo tampoco. Un movimiento es dinero CON momento.
  */
-const MONEY_HINTS = [
+/**
+ * Vocabulario de columnas de dinero.
+ *
+ * Se EXPORTA para que `lib/sheet-money.ts` estime cuánto dinero trae una hoja que el modelo
+ * nunca vio. Tiene que ser la misma lista: dos vocabularios de dinero que se separan producen
+ * una hoja que se clasifica como financiera por una y se mide con la otra, o al revés — y esa
+ * incoherencia sería invisible, porque las dos cifras seguirían pareciendo razonables.
+ */
+export const MONEY_HINTS = [
   'total',
   'totallinea',
   'monto',

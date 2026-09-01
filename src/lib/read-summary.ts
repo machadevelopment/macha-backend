@@ -48,7 +48,19 @@ export type MotivoDeDescarte =
   /** Todas sus filas ya se habían ingerido en una carga anterior. */
   | 'ya_ingerida'
   /** Menos de dos filas: no hay tabla que leer. */
-  | 'vacia';
+  | 'vacia'
+  /**
+   * No tiene una columna de fecha legible con dinero en otra columna, así que ninguna de sus
+   * filas puede ser un movimiento (`noPuedeProducirMovimientos`).
+   *
+   * ⚠️ NACIÓ PORQUE ESTE DESCARTE SE REPORTABA COMO `catalogo`, Y ESO ERA MENTIRLE AL CLIENTE.
+   * El texto de `catalogo` dice "describe tus clientes, productos o proveedores", que es una
+   * afirmación sobre el CONTENIDO de su hoja — y acá lo único que sabemos es que no pudimos
+   * leerle una fecha. Cuando esa explicación no le calza a lo que él tiene delante, deja de
+   * creerle al resumen entero, que es la única herramienta que tenemos para que nos desmienta.
+   * Es además el filtro que dejó el dashboard de KapePrueba en cero.
+   */
+  | 'sin_fecha_ni_monto';
 
 export type HojaLeida =
   | {
@@ -107,6 +119,20 @@ export type HojaLeida =
       filas: number;
       /** Solo para `duplica_otra_hoja`: con cuál se solapa. */
       duplicaDe?: string;
+      /**
+       * CUÁNTO DINERO SE LLEVÓ ESTE DESCARTE, estimado (`lib/sheet-money.ts`).
+       *
+       * Es el cambio que convierte una decisión invisible en una que el dueño puede
+       * desmentir. "Descarté 220 filas" no le dice nada a nadie; "descarté Q 2.707.318
+       * porque LineasOC repite el dinero de OrdenesCompra" se contesta de un vistazo, y es
+       * exactamente la frase que habría evitado los seis reportes de ingesta que llegaron.
+       *
+       * ⚠️ Es una ESTIMACIÓN sobre encabezados y magnitudes, no el mapa del modelo: esta hoja
+       * nunca llegó a tenerlo. Sirve para explicar y para ranquear el riesgo de la decisión,
+       * jamás para contabilizar. Opcional porque las cargas anteriores a esto no lo traen, y
+       * ausente NO significa cero.
+       */
+      montos?: { moneda: string; total: number; filas: number }[];
     };
 
 export interface ResumenDeLectura {

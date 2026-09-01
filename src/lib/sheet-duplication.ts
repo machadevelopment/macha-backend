@@ -120,6 +120,38 @@ const ES_SERIAL_DE_FECHA = (n: number): boolean => n >= 32_874 && n <= 73_415;
  * qué ser la columna más grande de su hoja. Comparar todas contra todas encuentra el par sin
  * depender de un diccionario de nombres, que es lo que falla con un archivo que nunca vimos.
  */
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA COLUMNA DE IDENTIFICADORES NO ES UNA COLUMNA DE DINERO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `aNumero` es lenient a propósito: tiene que leer `Q 1,234.50`, `1.234,50` y `-18000`. Lo hace
+ * quitando todo lo que no sea dígito o separador, y por eso también "lee" **`FAC-1000` como
+ * 1000, `Cliente 3` como 3 y `REC-07` como 7**.
+ *
+ * El resultado es que casi cualquier columna de texto con un número adentro pasaba por columna
+ * de dinero, y este módulo declara duplicadas a dos hojas cuando **alguna** de sus columnas
+ * suma parecido a **alguna** de la otra. Con cinco o seis columnas espurias por hoja, la
+ * probabilidad de un empate dentro del 1 % por puro azar deja de ser chica — y el precio de ese
+ * empate es descartar una hoja entera con todo su dinero.
+ *
+ * Medido con el generador de libros: `Facturacion` declarada duplicado de `Ventas` y descartada,
+ * −Q 63.871 de ingreso, sin una fila marcada y sin nada que fallara.
+ *
+ * La regla es de FORMA y no de vocabulario: una celda es una cifra si, una vez quitados los
+ * símbolos de moneda y los espacios, no queda nada más que dígitos y separadores. `Q 1,234.50`
+ * lo cumple; `FAC-1000` no, porque le quedan letras.
+ */
+const SIMBOLOS_DE_MONEDA = /[qQ$€£]|us\$|usd|gtq|\s|\u00a0/gi;
+
+function pareceCifra(v: unknown): boolean {
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (typeof v !== 'string') return false;
+  // Los paréntesis son la convención contable para un negativo: `(1,200)`.
+  const limpio = v.replace(SIMBOLOS_DE_MONEDA, '').replace(/^\((.*)\)$/, '-$1');
+  return limpio !== '' && /^-?[\d.,]+$/.test(limpio);
+}
+
 function sumasDeColumnasDeDinero(rows: unknown[][]): number[] {
   const datos = rows.slice(1);
   if (datos.length === 0) return [];
@@ -132,11 +164,40 @@ function sumasDeColumnasDeDinero(rows: unknown[][]): number[] {
     let cuantos = 0;
     let fechas = 0;
     for (const f of datos) {
-      const n = aNumero(f[c]);
+      const bruto = f[c];
+      // Ver `pareceCifra`: `FAC-1000` no es mil quetzales, es un número de documento.
+      if (!pareceCifra(bruto)) continue;
+      const n = aNumero(bruto);
       if (n === null) continue;
       suma += n;
       cuantos++;
-      if (ES_SERIAL_DE_FECHA(n)) fechas++;
+      /*
+       * ═══════════════════════════════════════════════════════════════════════════════════════
+       * UNA FECHA CUENTA COMO FECHA AUNQUE VENGA COMO TEXTO (2026-08-31)
+       * ═══════════════════════════════════════════════════════════════════════════════════════
+       *
+       * `ES_SERIAL_DE_FECHA` cubría el caso NUMÉRICO y el encabezado de este módulo ya explica
+       * por qué hace falta: un serial vale ~45.000, así que sesenta fechas suman más que la
+       * columna de dinero de su propia hoja. Lo que faltaba es que **medio archivo real no trae
+       * la fecha como serial**: la trae como `15/07/2026`, que es lo que sale de cualquier libro
+       * que pasó por un CSV.
+       *
+       * Y `aNumero` es lenient a propósito —tiene que leer `Q 1,234.50`—, así que le quita los
+       * separadores a `01/04/2026` y devuelve **1042026**. Un número de siete cifras, muy por
+       * encima del rango de un serial, que la guarda anterior no podía ver. Dos hojas del mismo
+       * período suman entonces ~14 millones cada una y quedan **dentro del 1 %**: el dedup
+       * declara duplicada a una de las dos y **se lleva su dinero entero**.
+       *
+       * Medido con el generador de libros: `Facturacion` descartada como duplicado de `Ventas`,
+       * −Q 63.871 de ingreso, sin una sola fila marcada y sin nada que fallara. Es el bug de
+       * U3TECH (cero ingresos con la facturación bien leída) por otra puerta.
+       *
+       * Se juzga sobre el valor CRUDO con `asDate` —el mismo lector del pipeline— y no sobre el
+       * número ya mutilado: la pregunta es si esa celda es una fecha, no si el número que salió
+       * de ella parece una. Es la misma corrección que necesitó `sheet-relations.comoClave` el
+       * mismo día; la ceguera era compartida.
+       */
+      if (ES_SERIAL_DE_FECHA(n) || asDate(bruto) !== null) fechas++;
     }
     // Una columna con dos números sueltos entre texto no es una columna de dinero.
     if (cuantos < datos.length * 0.6) continue;
