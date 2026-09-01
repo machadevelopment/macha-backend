@@ -812,6 +812,21 @@ Conventions & gotchas:
     qué decidió el dueño sobre su propio archivo tiene que poder leerse. **Volver a INCLUIR una
     hoja descartada no se puede** — exige reprocesar con el modelo; lo que sí se hace es
     decirlo con su motivo y su dinero, que es lo que permite desmentirnos.
+- ⚠️ **LA RESPUESTA DEL CLIENTE NO PISA UNA FILA DERIVADA** (`ES_DERIVADA`, 2026-09-01). Medido
+  probando el portón de punta a punta: el concepto "Aceite 1 L" agrupaba DOS filas —la venta de
+  GTQ 1.890 y **su costo derivado de GTQ 1.160**, que comparten `product`—. El dueño contestó
+  "es un ingreso", que es CIERTO de su venta, y con eso convirtió el costo en ingreso:
+  **+1.160 de ingreso y −1.160 de costo**. El total del archivo **cuadraba al centavo**, así que
+  el error era invisible; lo que se movía era el MARGEN BRUTO, que es cifra de portada.
+  El pipeline crea filas que no están en el archivo —el costo de una venta con costo en la
+  línea, el ingreso devengado de una factura, el costo de una cuenta por pagar— y su tipo es una
+  REGLA CONTABLE, no una lectura del texto. Ahora se marcan y la respuesta del cliente les
+  limpia la duda (su dinero tiene que aterrizar) **respetándoles el tipo**.
+  **Agrupar por producto es correcto y no se toca**: es lo que hace contestable la pantalla
+  cuando la hoja no trae descripción (977 de 4.686 filas marcadas solo tienen `product`).
+  ⚠️ **El test que vale es el de INTEGRACIÓN**: el unitario probaba una reimplementación local de
+  "aplicar la respuesta" y la mutación NO lo ponía en rojo — medía código distinto del que yo
+  creía estar tocando.
 - **CONTESTAR UNA CUENTA POR PAGAR PRODUCE SU COSTO** (`lib/derivacion-de-costo.ts`,
   2026-09-01). La regla del 2026-08-30 (*"una factura RECIBIDA produce su COSTO además de la
   cuenta por pagar"*) estaba **a medias**: `construirFilas` la deriva cuando el MODELO da el
