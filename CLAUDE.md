@@ -776,6 +776,42 @@ Conventions & gotchas:
   que se separaría de la primera. Vive una sola vez y tiene **tres consumidores**: el GET no
   pregunta lo que no se arregla, el POST no limpia una marca que sobrevive a la respuesta, y el
   correo no avisa por lo que el cliente no puede resolver.
+- **EL PORTÓN: NADA ENTRA AL DASHBOARD SIN QUE EL CLIENTE LO CONFIRME** (migración `0042`,
+  2026-09-01, decisión de Keneth con la medición delante). La carga ya no se promueve sola: el
+  dueño ve PRIMERO el resumen POR HOJA con el dinero que cada una aporta, y su contabilidad
+  entra cuando dice que está bien.
+  - **Por qué por HOJA y no por fila.** Los siete fallos de ingesta de esta semana **no fueron
+    filas dudosas**: fueron decisiones sobre hojas, con alta confianza y equivocadas — una
+    cartera de clientes leída como ingresos (Q 13.362), un consolidado propio contado dos veces
+    (+945), un presupuesto entrando como dinero real, cobros devengando otra vez (+52 %).
+    Ninguna la habría atrapado una revisión fila por fila; todas se ven de un vistazo en una
+    lista de hojas con su monto al lado.
+  - ⚠️ **REINTRODUCE la forma que dejó 0 filas en producción** antes de la 0020 (medido: 0
+    contra 3.195 en staging), y se asumió a propósito. La diferencia es de quién es el trabajo:
+    allá lo hacía staff de Macha y era fila por fila; acá lo hace el dueño y son tres o cuatro
+    decisiones sobre su archivo. **La mitigación no es aflojar el portón sino hacerlo imposible
+    de no ver**: correo con deep link, banner, y la carga listada como "esperando tu
+    confirmación".
+  - **Vive en los DOS llamadores, no en `promoteDocument`.** Hay exactamente dos caminos a la
+    promoción —el worker al terminar la ingesta y `encolarPromocionDeLoResuelto`, la única que
+    encola `document.promote`— y los dos lo afirman. Dentro de `promoteDocument` no: esa
+    función es el MECANISMO de promover y la usa también el camino que ABRE el portón, así que
+    meterle la condición de producto la volvería imposible de llamar desde ahí.
+  - **Lo que hubo que corregir con él**, y no se veía venir: el CUADRE se quedaba sin ledger y
+    gritaba `nada_aterrizo` en toda carga nueva (ahora compara contra lo que **va a
+    publicarse**, con la expansión de esa misma fuente); el CORREO decía *"el resto de tus datos
+    ya está en tu dashboard"*, que con el portón es falso — la misma mentira que el banner
+    sostuvo tres semanas tras la promoción parcial; el aviso se dispara **aunque no haya un solo
+    concepto**, porque una carga que el modelo entendió perfecto no tiene filas marcadas y se
+    quedaría invisible para siempre; y una carga que **no produjo ninguna fila** no pide
+    confirmación.
+  - **Se puede publicar sin contestar los conceptos**: sus filas quedan retenidas y el resto
+    entra. Obligar a contestarlas convertiría el portón en un trámite bloqueante, que es la
+    forma exacta que la 0020 vino a eliminar.
+  - **Excluir una hoja RECHAZA sus filas** por el mismo camino que usa staff, y no las borra:
+    qué decidió el dueño sobre su propio archivo tiene que poder leerse. **Volver a INCLUIR una
+    hoja descartada no se puede** — exige reprocesar con el modelo; lo que sí se hace es
+    decirlo con su motivo y su dinero, que es lo que permite desmentirnos.
 - **CONTESTAR UNA CUENTA POR PAGAR PRODUCE SU COSTO** (`lib/derivacion-de-costo.ts`,
   2026-09-01). La regla del 2026-08-30 (*"una factura RECIBIDA produce su COSTO además de la
   cuenta por pagar"*) estaba **a medias**: `construirFilas` la deriva cuando el MODELO da el
