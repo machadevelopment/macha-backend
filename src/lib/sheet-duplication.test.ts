@@ -417,3 +417,80 @@ describe('hace falta masa y una llave específica para afirmar duplicación', ()
     ]).size).toBe(1); // prettier-ignore
   });
 });
+
+describe('un consolidado por período chico también se descarta', () => {
+  /*
+   * Medido en producción el 2026-09-01: un libro con `Ventas` (4 movimientos, GTQ 945) y su
+   * propio `Resumen_Mensual` (4 filas, GTQ 945) dejó el dashboard con **+945,00 sobre una
+   * verdad de campo de 34.209,00** — el costo y los gastos exactos. Ni el dedup lo veía
+   * (exigía 8 filas) ni la señal de resumen por período de `sheet-shape` (exige 6 meses).
+   *
+   * Se cierra combinando DOS señales débiles, no aflojando un umbral: empate AL CENTAVO más
+   * forma de consolidado por período. Cada una sola tiene contraejemplo; ver abajo.
+   */
+  const ventas = [
+    ['Fecha', 'Cliente', 'Producto', 'Cantidad', 'Monto'],
+    [46023, 'Cliente 0', 'Producto 0', 1, 180],
+    [46057, 'Cliente 1', 'Producto 1', 2, 217.5],
+    [46088, 'Cliente 2', 'Producto 2', 3, 255],
+    [46122, 'Cliente 3', 'Producto 3', 4, 292.5],
+  ]; // prettier-ignore
+  const resumen = [
+    ['Mes', 'Total Ventas'],
+    [46023, 180], [46054, 217.5], [46082, 255], [46113, 292.5],
+  ]; // prettier-ignore
+
+  const correr = (hojas: { nombre: string; rows: unknown[][] }[]) =>
+    detectarDetalleDuplicado(hojas.map((h) => ({ ...h, puedeProducirMovimientos: true })));
+
+  test('se descarta el RESUMEN y se conserva el detalle', () => {
+    const r = correr([
+      { nombre: 'Ventas', rows: ventas },
+      { nombre: 'Resumen_Mensual', rows: resumen },
+    ]);
+    // Al revés se perdería el detalle por cliente y producto, que es lo que el cliente mira.
+    expect([...r.keys()]).toEqual(['Resumen_Mensual']);
+  });
+
+  test('⚠️ sin compartir NINGÚN encabezado, que es lo que lo hace un resumen', () => {
+    /*
+     * `Mes · Total Ventas` contra `Fecha · Cliente · Producto · Cantidad · Monto`: cero
+     * columnas en común. La llave compartida que el resto del módulo exige apagaría la regla
+     * en el único caso para el que se escribió.
+     */
+    const encabezadoResumen = resumen[0]! as unknown[];
+    const comunes = (ventas[0]! as unknown[]).filter((c) => encabezadoResumen.includes(c));
+    expect(comunes).toHaveLength(0);
+  });
+
+  test('el contraejemplo sigue protegido: empatar al centavo NO alcanza', () => {
+    /*
+     * `Ventas` (1000+2000+3000) y `Gastos` (1500+2500+2000) suman 6000 las dos, con tres filas
+     * y la llave `Documento` compartida. Dos hojas distintas que empatan exacto por azar. Lo
+     * que las salva es que ninguna tiene forma de consolidado: sus días son 1·2·3 y 5·6·7 del
+     * mismo mes, y traen columna de texto.
+     */
+    const v = [
+      ['Fecha', 'Documento', 'Cliente', 'Monto'],
+      ['2026-08-01', 'DOC-1', 'Cafetería El Roble', 1000],
+      ['2026-08-02', 'DOC-2', 'Súper Zona 10', 2000],
+      ['2026-08-03', 'DOC-3', 'Bistró La Cuadra', 3000],
+    ]; // prettier-ignore
+    const g = [
+      ['Fecha', 'Documento', 'Concepto', 'Monto'],
+      ['2026-08-05', 'DOC-9', 'Alquiler', 1500],
+      ['2026-08-06', 'DOC-8', 'Sueldos', 2500],
+      ['2026-08-07', 'DOC-7', 'Publicidad', 2000],
+    ]; // prettier-ignore
+    expect(correr([{ nombre: 'Ventas', rows: v }, { nombre: 'Gastos', rows: g }]).size).toBe(0); // prettier-ignore
+  });
+
+  test('y la forma de consolidado tampoco alcanza sola: sin empate no se toca', () => {
+    // Un resumen que NO suma lo mismo que la otra hoja es contabilidad propia, no un duplicado.
+    const otro = resumen.map((f, i) => (i === 0 ? f : [f[0], (f[1] as number) * 3]));
+    expect(correr([
+      { nombre: 'Ventas', rows: ventas },
+      { nombre: 'Resumen_Mensual', rows: otro },
+    ]).size).toBe(0); // prettier-ignore
+  });
+});
