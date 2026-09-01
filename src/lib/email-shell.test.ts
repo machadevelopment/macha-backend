@@ -214,14 +214,54 @@ describe('lo que NO cambió', () => {
     expect(typeof t.html).toBe('string');
   });
 
-  test('existen los cuatro tipos, en los dos idiomas', () => {
+  test('existen los cinco tipos, en los dos idiomas', () => {
+    /*
+     * La lista se escribe entera a propósito: un `toContain` dejaría pasar que una plantilla
+     * exista solo en español, y el cliente en inglés recibiría un `undefined` renderizado.
+     *
+     * `reviewNeeded` se sumó en CU-868kyur58. Ojo si aparece un tipo nuevo: además de esta
+     * lista hay que ampliar el CHECK de `notifications.kind` (migración 0041) — el tipo de
+     * TypeScript no es el que manda, y saltárselo mueve el fallo a producción, después de que
+     * el correo ya salió.
+     */
     for (const locale of ['es', 'en'] as const) {
       expect(Object.keys(TEMPLATES[locale]).sort()).toEqual([
         'alertTriggered',
         'demoRequest',
         'invitation',
         'reportReady',
+        'reviewNeeded',
       ]);
     }
+  });
+
+  test('el correo de revisión se arma sobre el shell de marca, en los dos idiomas', () => {
+    for (const locale of ['es', 'en'] as const) {
+      const t = TEMPLATES[locale].reviewNeeded({
+        archivos: ['Ventas_Agosto.xlsx'],
+        conceptos: 2,
+        ctaUrl: URL_OK,
+      });
+      expect(Object.keys(t).sort()).toEqual(['html', 'subject']);
+      // El nombre del archivo va en el ASUNTO: sin él, "tu archivo necesita tu atención" no
+      // dice cuál, y un cliente que subió tres no sabe a cuál volver.
+      expect(t.subject).toContain('Ventas_Agosto.xlsx');
+      expect(t.html).toContain(URL_OK);
+      // El pie corrige el malentendido de la promoción parcial y tiene que seguir ahí.
+      expect(t.html.toLowerCase()).toContain('dashboard');
+    }
+  });
+
+  test('con varias cargas el asunto NO nombra una sola', () => {
+    // Nombrar solo la primera de tres es peor que no nombrar ninguna: el cliente cree que el
+    // aviso es de ese archivo y deja los otros dos sin contestar.
+    const t = TEMPLATES.es.reviewNeeded({
+      archivos: ['A.xlsx', 'B.xlsx'],
+      conceptos: 3,
+      ctaUrl: URL_OK,
+    });
+    expect(t.subject).not.toContain('A.xlsx');
+    expect(t.html).toContain('A.xlsx');
+    expect(t.html).toContain('B.xlsx');
   });
 });
