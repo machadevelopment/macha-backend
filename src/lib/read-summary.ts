@@ -74,6 +74,21 @@ export type HojaLeida =
        */
       columnas: Record<string, string | null>;
       /**
+       * TODOS los encabezados de la hoja, en su orden real.
+       *
+       * `columnas` dice de dónde SALIÓ cada dato; esto es lo que permite corregirlo. El fallo
+       * que el portón todavía no podía atajar es el que `sheet-header` describe como el peor
+       * de su clase —"no falla nada visible: los datos salen de las columnas equivocadas"—, y
+       * enseñarle al dueño que el monto salió de «Precio Unitario» sin darle dónde elegir
+       * «Total» lo deja mirando el error sin salida.
+       *
+       * El índice es la posición en este arreglo, y es el mismo que consume
+       * `sheet_overrides.columnas` (migración 0043). Opcional: los resúmenes anteriores al
+       * 2026-09-01 no lo traen, y ausente significa "no se puede corregir desde la pantalla",
+       * nunca "la hoja no tiene columnas".
+       */
+      encabezados?: string[];
+      /**
        * CUÁNTO DINERO TRAÍA LA HOJA, separado por moneda.
        *
        * Es la cifra que el dueño puede desmentir de un vistazo, y por eso es la más útil del

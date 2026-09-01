@@ -183,6 +183,17 @@ export const documents = pgTable(
      *
      * Ver la cabecera de la migración para el riesgo que esto reintroduce a propósito.
      */
+    /**
+     * Correcciones del DUEÑO sobre hojas concretas (migración `0043`).
+     *
+     * `{ forzar: ['Resumen_Ventas'], columnas: { Ventas: { amount: 6 } } }`. Ver la cabecera de
+     * la migración: es el mecanismo único con el que el cliente rescata una hoja que
+     * descartamos mal y corrige de qué columna sale un dato.
+     */
+    sheetOverrides: jsonb('sheet_overrides').$type<{
+      forzar?: string[];
+      columnas?: Record<string, Record<string, number>>;
+    } | null>(),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
     /** Quién confirmó. Sin FK, igual que `staging_rows.reviewed_by`. */
     confirmedBy: uuid('confirmed_by'),

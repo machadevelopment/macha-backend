@@ -214,6 +214,33 @@ export function startExcelIngestWorker(): Promise<string> {
         // CU-868kkgypv: qué lotes ya quedaron confirmados por un intento anterior. Una
         // sola query antes del bucle — en la ejecución normal (sin reintentos) el mapa
         // sale vacío y no cambia nada.
+        /*
+         * ═════════════════════════════════════════════════════════════════════════════════════
+         * LO QUE EL DUEÑO CORRIGIÓ SOBRE UNA HOJA (migración 0043)
+         * ═════════════════════════════════════════════════════════════════════════════════════
+         *
+         * `forzar` salta los filtros de descarte para las hojas que el cliente rescató; hasta
+         * hoy VEÍA en la pantalla de confirmación que le descartamos una hoja y no podía hacer
+         * nada. Perder una hoja en silencio es el fallo más caro que tiene esta ingesta, y era
+         * el único que el portón mostraba sin darle salida.
+         *
+         * `columnas` pisa el mapa del modelo: leer la columna equivocada no falla nada visible
+         * —el total puede verse perfecto y cada fila estar mal— y ahora que el panel expandido
+         * lo MUESTRA, tiene que poder corregirse.
+         *
+         * Se lee una vez, antes del bucle: en la corrida normal viene null y no cambia nada.
+         */
+        const overrides = await withCompanyScope(companyId, async (db) => {
+          const [d] = await db
+            .select({ o: documents.sheetOverrides })
+            .from(documents)
+            .where(and(eq(documents.companyId, companyId), eq(documents.id, documentId)));
+          return d?.o ?? null;
+        });
+        const hojasForzadas = new Set(overrides?.forzar ?? []);
+        /** ¿El dueño dijo que esta hoja SÍ debe contar? Entonces no la descarta ningún filtro. */
+        const forzada = (hoja: string) => hojasForzadas.has(hoja);
+
         const doneBatches = await withCompanyScope(companyId, async (db) => {
           const rows = await db
             .select({
@@ -835,7 +862,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * Se guarda el motivo en lenguaje del cliente: si el archivo termina sin filas, el
            * mensaje puede decir QUÉ hoja no se entendió en vez de un genérico.
            */
-          const yaContada = detalleDuplicado.get(sheetName);
+          const yaContada = forzada(sheetName) ? undefined : detalleDuplicado.get(sheetName);
           if (yaContada) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${yaContada}`);
@@ -892,7 +919,7 @@ export function startExcelIngestWorker(): Promise<string> {
           }
 
           const forma = analizarFormaDeHoja(rows);
-          if (!largo && forma.esReporte) {
+          if (!largo && forma.esReporte && !forzada(sheetName)) {
             totalRowsSkippedPreFiltro += rows.length;
             unusableReasons.add(`la hoja "${sheetName}" ${forma.motivo}`);
             hojasLeidas.push({
@@ -987,7 +1014,13 @@ export function startExcelIngestWorker(): Promise<string> {
           }
 
           // `rows[0]` ya ES el encabezado real: el corte de arriba quitó los títulos.
-          const firma = firmaDeCatalogo(rows[0] ?? []);
+          /*
+           * ⚠️ El rescate del dueño gana también acá, y este es el punto que más lo necesita:
+           * el descarte por catálogo es el que se llevó la cartera de KapePrueba. La firma
+           * `existencias` es la excepción — esa hoja no se descarta, va a inventario, así que
+           * forzarla no tendría a dónde llevarla.
+           */
+          const firma = forzada(sheetName) ? null : firmaDeCatalogo(rows[0] ?? []);
           if (firma) {
             /*
              * ═══ EL CATÁLOGO DE EXISTENCIAS NO SE TIRA: ES EL INVENTARIO (CU-868krkfrh) ═══
@@ -1057,7 +1090,7 @@ export function startExcelIngestWorker(): Promise<string> {
            * de movimientos cuya columna se llame `Emisión` o `Corte` no tiene ninguna palabra
            * que el vocabulario reconozca, pero sus celdas siguen trayendo fechas.
            */
-          if (noPuedeProducirMovimientos(rows, asDate, asNumber)) {
+          if (!forzada(sheetName) && noPuedeProducirMovimientos(rows, asDate, asNumber)) {
             totalRowsSkippedPreFiltro += rows.length;
             hojasLeidas.push({
               estado: 'descartada',
@@ -1458,6 +1491,24 @@ export function startExcelIngestWorker(): Promise<string> {
              */
             nivelarConfianza: (veredictos) => confianzas.registrarLote(sheetName, veredictos),
           });
+
+          /*
+           * ⚠️ LA CORRECCIÓN DEL DUEÑO PISA EL MAPA DEL MODELO (migración 0043).
+           *
+           * Va INMEDIATAMENTE al volver del lote, y ese punto importa: todo lo que sigue se
+           * indexa contra este mapa —el armado de la fila, la medición, el fusionado entre
+           * lotes y, sobre todo, la columna de la que el diccionario APRENDE el concepto—.
+           * Aplicarla más abajo dejaba las reglas guardadas bajo la columna vieja, o sea que la
+           * corrección de esta carga no llegaba a la siguiente.
+           *
+           * Es un objeto plano `{ amount: 6 }`, así que solo se sobreescriben los campos que el
+           * cliente tocó: si corrigió el monto, la fecha y el cliente siguen saliendo de donde
+           * el modelo los vio.
+           */
+          const corregidas = overrides?.columnas?.[sheetName];
+          if (corregidas) {
+            Object.assign(result.columns, corregidas);
+          }
 
           // Se recoge, no se actúa todavía: una hoja ilegible en un libro que por lo
           // demás trae datos buenos no debe tumbar la carga. Lo que decide el estado
@@ -2071,6 +2122,9 @@ export function startExcelIngestWorker(): Promise<string> {
             nombre: sheetName,
             filas: filasPorHoja.get(sheetName) ?? 0,
             columnas: columnasEnPalabras(mapaFinal, headerRow),
+            // La lista completa, para que el cliente pueda señalar OTRA columna. Ver el
+            // comentario de `encabezados` en `read-summary.ts`.
+            encabezados: headerRow.map((h) => String(h ?? '').trim()),
             // Vacío se omite: una hoja sin columna de monto no tiene un total que enseñar, y
             // un `[]` en el resumen se leería como "leí Q 0".
             ...(medicion.montos.length > 0 ? { montos: medicion.montos } : {}),

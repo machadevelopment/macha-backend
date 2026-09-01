@@ -21,7 +21,7 @@ import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
 import { rateLimitConfig } from '@/config/rate-limit';
-import { documents, companies, stagingRows } from '@/db/schema';
+import { documents, companies, stagingRows, documentIngestBatches } from '@/db/schema';
 import { enqueue, QUEUES, RETRY_POLICY } from '@/queue';
 import {
   claveDeConcepto,
@@ -1219,6 +1219,117 @@ export const ingestion = new Elysia({ prefix: '/documents' })
             { maxItems: 50 },
           ),
         ),
+      }),
+    },
+  )
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * "ESTA HOJA SÍ DEBERÍA CONTAR" / "EL MONTO ESTÁ EN ESTA OTRA COLUMNA" (migración 0043)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Los dos casos que el portón mostraba sin darles salida, y son los caros:
+   *
+   *  · Una hoja descartada por error. **Perder una hoja en silencio es el fallo más caro que
+   *    tiene esta ingesta** —el dashboard de KapePrueba en cero con la contabilidad bien
+   *    leída— y hasta hoy el cliente lo VEÍA en la pantalla y no podía hacer nada.
+   *  · Un dato leído de la columna equivocada. No falla nada visible: el total puede verse
+   *    perfecto y cada fila estar mal. Ahora el panel expandido lo muestra, así que tiene que
+   *    poder corregirse.
+   *
+   * Los dos se resuelven igual —reprocesar ESA hoja con la corrección— y por eso son un solo
+   * endpoint. Se re-encola la ingesta completa y no una parcial: el worker ya es reanudable por
+   * lote (`document_ingest_batches` tiene índice único), así que las hojas ya procesadas se
+   * saltan solas y la corrida nueva solo paga el modelo de la hoja corregida.
+   *
+   * ⚠️ NO vuelve a cobrar crédito: el débito de la ingesta es UNA vez por CARGA
+   * (`cargaYaDebitada`), no por corrida. Es la misma garantía que hace seguro el reintento.
+   *
+   * ⚠️ Y NO se puede sobre una carga ya confirmada: sus filas están en el ledger, y reprocesar
+   * encima las duplicaría. Ahí el camino es revertir y volver a subir, que ya existe.
+   */
+  .post(
+    '/:id/corregir-hoja',
+    async ({ companyId, role, params, body, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
+
+      const [doc] = await db
+        .select({
+          id: documents.id,
+          status: documents.status,
+          confirmedAt: documents.confirmedAt,
+          overrides: documents.sheetOverrides,
+        })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
+      if (doc.confirmedAt !== null) {
+        // Ver la nota de arriba: encima de lo ya publicado, reprocesar duplica.
+        set.status = 409;
+        return { error: 'Esta carga ya se publicó. Revierte y vuelve a subirla para corregirla.' };
+      }
+
+      const previo = doc.overrides ?? {};
+      const forzar = new Set(previo.forzar ?? []);
+      if (body.forzar) forzar.add(body.hoja);
+      const columnas = { ...(previo.columnas ?? {}) };
+      if (body.columnas) {
+        columnas[body.hoja] = { ...(columnas[body.hoja] ?? {}), ...body.columnas };
+      }
+
+      await db
+        .update(documents)
+        .set({
+          sheetOverrides: { forzar: [...forzar], columnas },
+          // Vuelve a procesarse: el estado lo fija el worker al terminar.
+          status: 'processing',
+        })
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+      /*
+       * Las filas que esa hoja ya había producido se borran antes de reprocesar. Sin esto, una
+       * corrección de columna DUPLICA la hoja: las filas viejas (leídas mal) siguen ahí y las
+       * nuevas se suman. Solo las de ESA hoja y solo si no se promovieron — que no pueden
+       * haberse promovido, porque la carga no está confirmada.
+       */
+      await db
+        .delete(stagingRows)
+        .where(
+          and(
+            eq(stagingRows.companyId, companyId),
+            eq(stagingRows.documentId, params.id),
+            eq(stagingRows.sheetName, body.hoja),
+            isNull(stagingRows.promotedAt),
+          ),
+        );
+      /*
+       * Y sus LOTES confirmados, o el worker los saltaría por reanudación y la hoja quedaría
+       * sin filas. Es la contraparte exacta del borrado de arriba: los dos existen para que la
+       * hoja se lea de nuevo desde cero.
+       */
+      await db
+        .delete(documentIngestBatches)
+        .where(
+          and(
+            eq(documentIngestBatches.companyId, companyId),
+            eq(documentIngestBatches.documentId, params.id),
+            eq(documentIngestBatches.sheetName, body.hoja),
+          ),
+        );
+
+      await enqueue(QUEUES.excelIngest, { documentId: params.id, companyId });
+      return { reprocesando: true, hoja: body.hoja };
+    },
+    {
+      body: t.Object({
+        hoja: t.String({ minLength: 1, maxLength: 200 }),
+        /** "Esta hoja SÍ debería contar": salta los filtros de descarte para ella. */
+        forzar: t.Optional(t.Boolean()),
+        /** "El monto está en esta otra columna": índice 0-based por campo. */
+        columnas: t.Optional(t.Record(t.String(), t.Number())),
       }),
     },
   );

@@ -1,0 +1,29 @@
+-- ═══════════════════════════════════════════════════════════════════════════════════════════
+-- LO QUE EL DUEÑO CORRIGE SOBRE UNA HOJA, Y QUE EL PIPELINE TIENE QUE OBEDECER (2026-09-01)
+-- ═══════════════════════════════════════════════════════════════════════════════════════════
+--
+-- El portón (0042) le dejó al cliente decir "esta hoja NO debería contar". Faltaban los dos
+-- casos inversos, que son los caros:
+--
+--   · "esta hoja SÍ debería contar" — perder una hoja en silencio es el fallo más caro que
+--     tiene esta ingesta (KapePrueba: dashboard en cero con la contabilidad bien leída), y era
+--     el único sin salida: el cliente lo VEÍA en la pantalla y no podía hacer nada.
+--   · "el monto está en esta otra columna" — leer la columna equivocada no falla nada visible:
+--     el total puede verse perfecto y cada fila estar mal. `sheet-header` lo documenta como el
+--     peor de su clase.
+--
+-- Los dos se resuelven igual: **reprocesar ESA hoja con una corrección**, no el archivo entero.
+-- Por eso una sola columna y un solo mecanismo.
+--
+--   { "forzar": ["Resumen_Ventas"],
+--     "columnas": { "Ventas": { "amount": 6 } } }
+--
+-- `forzar` salta los filtros de descarte SOLO para esas hojas; `columnas` pisa el mapa que dio
+-- el modelo. No se guarda quién ni cuándo acá: eso vive en `admin_audit_log` para staff y en
+-- `documents.confirmed_by` para el cliente.
+--
+-- ⚠️ Reprocesar NO vuelve a cobrar: el crédito de la ingesta se debita UNA vez por CARGA
+-- (`cargaYaDebitada`), no por lote ni por corrida. Y las hojas ya procesadas se saltan solas
+-- por el índice único de `document_ingest_batches`, así que la corrida nueva solo paga el
+-- modelo de la hoja rescatada.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS sheet_overrides jsonb;
