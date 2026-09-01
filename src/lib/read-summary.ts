@@ -237,6 +237,69 @@ export function ordenarHojas(hojas: HojaLeida[]): HojaLeida[] {
 export function construirResumen(
   hojas: HojaLeida[],
   totales: ResumenDeLectura['totales'],
+  previo?: ResumenDeLectura | null,
 ): ResumenDeLectura {
-  return { hojas: ordenarHojas(hojas), totales };
+  return {
+    hojas: ordenarHojas(fusionarHojas(hojas, previo)),
+    totales: sumarTotales(totales, hojas, previo),
+  };
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ⚠️ UNA CORRIDA DE REPROCESO NO PUEDE BORRAR LAS HOJAS QUE NO TOCÓ (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El worker es reanudable por lote a propósito (`document_ingest_batches` tiene índice único),
+ * así que una corrida que vuelve sobre un documento **salta las hojas que ya se procesaron** y
+ * nunca las agrega a `hojasLeidas`. Guardar ese resumen tal cual las BORRA de la pantalla.
+ *
+ * Medido en producción con `EL-INFIERNO-v43-2027.xlsx`, apenas se desplegó el rescate de hoja:
+ * el portón pasó de **18 hojas a 9**, y las que desaparecieron son las principales —`Ventas`,
+ * `Gastos_Operativos`, `OrdenesCompra`, `Facturacion`—. Sus 97 filas de staging seguían ahí, o
+ * sea que **la contabilidad no se pierde**: lo que se rompe es la única pantalla con la que el
+ * dueño decide si publicarla. Le mostrábamos un archivo mutilado y le pedíamos que lo aprobara.
+ *
+ * El defecto es ANTERIOR al rescate —cualquier reintento tras un fallo hacía lo mismo— pero
+ * hasta hoy solo pasaba después de un error. El rescate lo vuelve el camino normal, así que
+ * deja de ser un caso de borde.
+ *
+ * Se fusiona POR NOMBRE DE HOJA y gana la corrida NUEVA: si esta corrida volvió a leer
+ * `Resumen_Ventas`, su veredicto nuevo es el que vale — es justamente lo que el dueño pidió al
+ * rescatarla. Lo que esta corrida no tocó conserva lo que decía antes, que es lo único que se
+ * sabe de esa hoja.
+ */
+function fusionarHojas(nuevas: HojaLeida[], previo?: ResumenDeLectura | null): HojaLeida[] {
+  if (!previo?.hojas?.length) return nuevas;
+  const porNombre = new Map(previo.hojas.map((h) => [h.nombre, h]));
+  for (const h of nuevas) porNombre.set(h.nombre, h);
+  return [...porNombre.values()];
+}
+
+/**
+ * Los totales de una corrida de reproceso cuentan solo sus propias filas.
+ *
+ * Sumar los del resumen previo contaría dos veces las hojas que esta corrida VOLVIÓ a leer, así
+ * que se suma únicamente lo que aporta cada corrida sobre hojas distintas: se descuenta del
+ * previo lo que las hojas re-leídas ya habían aportado. Con `previo` ausente —la corrida
+ * normal— devuelve los totales tal cual y no cambia nada.
+ */
+function sumarTotales(
+  totales: ResumenDeLectura['totales'],
+  nuevas: HojaLeida[],
+  previo?: ResumenDeLectura | null,
+): ResumenDeLectura['totales'] {
+  if (!previo?.hojas?.length) return totales;
+  const releidas = new Set(nuevas.map((h) => h.nombre));
+  const filasDe = (h: HojaLeida) => ('filas' in h ? (h.filas ?? 0) : 0);
+  const previas = previo.hojas.filter((h) => !releidas.has(h.nombre));
+  return {
+    movimientos:
+      totales.movimientos +
+      previas.filter((h) => h.estado === 'movimientos').reduce((s, h) => s + filasDe(h), 0),
+    descartadas:
+      totales.descartadas +
+      previas.filter((h) => h.estado === 'descartada').reduce((s, h) => s + filasDe(h), 0),
+    yaIngeridas: totales.yaIngeridas,
+  };
 }

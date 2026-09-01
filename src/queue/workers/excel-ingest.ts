@@ -230,12 +230,18 @@ export function startExcelIngestWorker(): Promise<string> {
          *
          * Se lee una vez, antes del bucle: en la corrida normal viene null y no cambia nada.
          */
-        const overrides = await withCompanyScope(companyId, async (db) => {
+        const { overrides, resumenPrevio } = await withCompanyScope(companyId, async (db) => {
           const [d] = await db
-            .select({ o: documents.sheetOverrides })
+            .select({ o: documents.sheetOverrides, r: documents.readSummary })
             .from(documents)
             .where(and(eq(documents.companyId, companyId), eq(documents.id, documentId)));
-          return d?.o ?? null;
+          /*
+           * El resumen previo se lee acá, con los overrides, porque los dos existen por el
+           * mismo motivo: esta corrida puede NO ser la primera sobre este documento. Ver
+           * `fusionarHojas` — sin el previo, una corrida de reproceso borra del resumen las
+           * hojas que la reanudación se saltó, que son justamente las que ya estaban bien.
+           */
+          return { overrides: d?.o ?? null, resumenPrevio: d?.r ?? null };
         });
         const hojasForzadas = new Set(overrides?.forzar ?? []);
         /** ¿El dueño dijo que esta hoja SÍ debe contar? Entonces no la descarta ningún filtro. */
@@ -2320,11 +2326,21 @@ export function startExcelIngestWorker(): Promise<string> {
           db
             .update(documents)
             .set({
-              readSummary: construirResumen(hojasLeidas, {
-                movimientos: totalRowsProcessed,
-                descartadas: totalRowsSkippedPreFiltro,
-                yaIngeridas: totalRowsSkippedDedup,
-              }),
+              /*
+               * ⚠️ El resumen PREVIO entra como tercer argumento, y sin eso una corrida de
+               * reproceso BORRA las hojas que no tocó. Ver `fusionarHojas` en
+               * `lib/read-summary.ts`: medido en producción, el portón pasó de 18 hojas a 9 y
+               * las que desaparecieron eran las principales.
+               */
+              readSummary: construirResumen(
+                hojasLeidas,
+                {
+                  movimientos: totalRowsProcessed,
+                  descartadas: totalRowsSkippedPreFiltro,
+                  yaIngeridas: totalRowsSkippedDedup,
+                },
+                resumenPrevio,
+              ),
             })
             .where(eq(documents.id, documentId)),
         ).catch((err) => {

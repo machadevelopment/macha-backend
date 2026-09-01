@@ -224,4 +224,24 @@ describe('una hoja descartada se puede rescatar', () => {
     // Las ventas no se duplicaron: la segunda corrida saltó sus lotes ya confirmados.
     expect(await filasDe('Ventas')).toBe(VENTAS.length);
   });
+
+  test('⚠️ el reproceso NO borra del resumen las hojas que no tocó', async () => {
+    /*
+     * Medido en producción el 2026-09-01, apenas se desplegó el rescate: el portón de
+     * `EL-INFIERNO-v43-2027.xlsx` pasó de 18 hojas a 9 y las que desaparecieron eran las
+     * principales. Sus filas de staging seguían ahí —la contabilidad no se perdía— pero la
+     * ÚNICA pantalla con la que el dueño decide si publicar le mostraba un archivo mutilado.
+     *
+     * La causa es la reanudación por lote, que es correcta: la segunda corrida salta `Ventas`
+     * y por eso nunca llega a `hojasLeidas`. Lo que faltaba era no tirar lo que ya se sabía.
+     */
+    const [doc] = await owner`select read_summary as r from documents where id = ${documentId}`;
+    const hojas = (doc!.r as { hojas: { nombre: string; estado: string }[] }).hojas;
+    const porNombre = new Map(hojas.map((h) => [h.nombre, h.estado]));
+
+    // La hoja que ESTA corrida leyó: con su veredicto NUEVO, o el rescate no se vería.
+    expect(porNombre.get('CarteraClientes')).toBe('movimientos');
+    // Y la que la reanudación saltó: sobrevive con lo que ya se sabía de ella.
+    expect(porNombre.get('Ventas')).toBe('movimientos');
+  });
 });

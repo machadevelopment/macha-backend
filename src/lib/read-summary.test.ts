@@ -144,3 +144,83 @@ describe('construirResumen', () => {
     expect(r.totales.yaIngeridas).toBe(520);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA CORRIDA DE REPROCESO NO BORRA LAS HOJAS QUE NO TOCÓ (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Medido en producción apenas se desplegó el rescate de hoja: el portón de
+ * `EL-INFIERNO-v43-2027.xlsx` pasó de **18 hojas a 9**, y las que desaparecieron eran las
+ * principales — `Ventas`, `Gastos_Operativos`, `OrdenesCompra`, `Facturacion`. Sus 97 filas de
+ * staging seguían ahí, o sea que la contabilidad no se perdía: lo que se rompía era la única
+ * pantalla con la que el dueño decide si publicarla. Le mostrábamos un archivo mutilado y le
+ * pedíamos que lo aprobara.
+ *
+ * La causa es la reanudación por lote, que es correcta y no se toca: una corrida que vuelve
+ * sobre un documento salta las hojas ya procesadas, así que nunca llegan a `hojasLeidas`. Lo
+ * que faltaba era no tirar lo que ya se sabía de ellas.
+ */
+describe('el resumen se fusiona entre corridas', () => {
+  const previo = {
+    hojas: [
+      { estado: 'movimientos' as const, nombre: 'Ventas', filas: 13, columnas: {} },
+      { estado: 'movimientos' as const, nombre: 'Gastos', filas: 25, columnas: {} },
+      {
+        estado: 'descartada' as const,
+        nombre: 'Resumen_Ventas',
+        motivo: 'reporte' as const,
+        filas: 7,
+      },
+    ],
+    totales: { movimientos: 38, descartadas: 7, yaIngeridas: 0 },
+  };
+
+  test('las hojas que esta corrida no tocó SOBREVIVEN', () => {
+    // Lo que produce un reproceso de una sola hoja: `hojasLeidas` trae solo esa.
+    const r = construirResumen(
+      [{ estado: 'movimientos', nombre: 'Resumen_Ventas', filas: 7, columnas: {} }],
+      { movimientos: 6, descartadas: 0, yaIngeridas: 0 },
+      previo,
+    );
+    expect(r.hojas.map((h) => h.nombre).sort()).toEqual(['Gastos', 'Resumen_Ventas', 'Ventas']);
+  });
+
+  test('la hoja RE-LEÍDA se queda con el veredicto nuevo, no con el viejo', () => {
+    /*
+     * Es la mitad que hace útil el rescate: el dueño apretó "esta hoja sí debería contar" y
+     * tiene que VER que ahora cuenta. Conservar el veredicto viejo sería peor que no fusionar
+     * — le diría que su corrección no sirvió.
+     */
+    const r = construirResumen(
+      [{ estado: 'movimientos', nombre: 'Resumen_Ventas', filas: 7, columnas: {} }],
+      { movimientos: 6, descartadas: 0, yaIngeridas: 0 },
+      previo,
+    );
+    expect(r.hojas.find((h) => h.nombre === 'Resumen_Ventas')?.estado).toBe('movimientos');
+  });
+
+  test('los totales no cuentan dos veces la hoja re-leída', () => {
+    const r = construirResumen(
+      [{ estado: 'movimientos', nombre: 'Resumen_Ventas', filas: 7, columnas: {} }],
+      { movimientos: 6, descartadas: 0, yaIngeridas: 0 },
+      previo,
+    );
+    // 6 de esta corrida + las 38 de Ventas y Gastos, que esta corrida no volvió a leer.
+    expect(r.totales.movimientos).toBe(44);
+    // Y `Resumen_Ventas` ya no cuenta como descartada: dejó de serlo.
+    expect(r.totales.descartadas).toBe(0);
+  });
+
+  test('sin resumen previo —la corrida NORMAL— nada cambia', () => {
+    /*
+     * La guarda que importa: este mecanismo solo puede AGREGAR sobre un documento que ya tenía
+     * resumen. En la primera corrida tiene que devolver exactamente lo de antes, o estaría
+     * cambiando el camino que recorre el 99 % de las cargas para arreglar el 1 %.
+     */
+    const hojas = [{ estado: 'movimientos' as const, nombre: 'Ventas', filas: 13, columnas: {} }];
+    const totales = { movimientos: 13, descartadas: 0, yaIngeridas: 0 };
+    expect(construirResumen(hojas, totales)).toEqual(construirResumen(hojas, totales, null));
+    expect(construirResumen(hojas, totales).totales).toEqual(totales);
+  });
+});
