@@ -249,3 +249,69 @@ describe('el cliente puede EXCLUIR una hoja que no debería contarse', () => {
     expect(rechazada!.reviewed_by).toBe(userId);
   });
 });
+
+describe('el cliente corrige la NATURALEZA de una hoja entera', () => {
+  /*
+   * Excluir resuelve "esto no debería contar". Lo que faltaba es "esto SÍ cuenta, pero no es lo
+   * que ustedes creen" — el caso donde el modelo leyó bien la forma de la hoja y mal su
+   * naturaleza. Va por HOJA porque una hoja es homogénea: quien escribe `Servicios_Varios` no
+   * mete ventas ahí, y preguntar concepto por concepto lo que el dueño dice de un golpe
+   * convierte una decisión en un formulario.
+   */
+  let doc4: string;
+
+  test('preparar: una hoja con dos ventas y el costo derivado de una', async () => {
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status, row_count, flagged_count)
+      values (${companyId}, ${userId}, ${`${companyId}/r.xlsx`}, 'r.xlsx', 100, 'text/csv',
+              'awaiting_confirmation', 3, 0) returning id`;
+    doc4 = d!.id;
+
+    const filas = [
+      { type: 'revenue', category: 'ventas', originalAmount: 1000 },
+      { type: 'revenue', category: 'ventas', originalAmount: 2000 },
+      // Derivada: su tipo lo puso una regla contable, no la naturaleza de la hoja.
+      {
+        type: 'cogs',
+        category: 'costo_de_ventas',
+        originalAmount: 600,
+        derivadaDelPipeline: true,
+      },
+    ];
+    for (const f of filas) {
+      await owner`
+        insert into staging_rows (company_id, document_id, target_entity, payload, confidence,
+                                  flag_reason, review_status, sheet_name)
+        values (${companyId}, ${doc4}, 'transaction',
+                ${JSON.stringify({ ...f, date: '2026-05-10', description: 'Fila', originalCurrency: 'GTQ' })}::jsonb,
+                0.95, null, 'clean', 'Servicios')`;
+    }
+  });
+
+  test('"esto no son ingresos, son gastos" cambia la hoja entera de un golpe', async () => {
+    const r = await pedir(`/${doc4}/confirmar`, {
+      method: 'POST',
+      body: JSON.stringify({
+        reclasificar: [{ hoja: 'Servicios', type: 'opex', category: 'servicios' }],
+      }),
+    });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { hojasReclasificadas: number }).hojasReclasificadas).toBe(1);
+
+    const filas = await owner`
+      select payload->>'type' as tipo, (payload->>'originalAmount')::numeric as monto
+      from staging_rows where document_id = ${doc4} order by monto desc`;
+
+    // Las dos ventas pasan a gasto: es lo que el dueño dijo de SU hoja.
+    expect(filas[0]!.tipo).toBe('opex');
+    expect(filas[1]!.tipo).toBe('opex');
+
+    /*
+     * ⚠️ Y el costo derivado NO. Reclasificar la hoja no puede convertir en gasto el costo que
+     * una regla contable derivó de su venta — es el mismo fallo que se midió con el concepto
+     * "Aceite 1 L" (+1.160 de ingreso, −1.160 de costo), a escala de hoja.
+     */
+    expect(filas[2]!.tipo).toBe('cogs');
+  });
+});
