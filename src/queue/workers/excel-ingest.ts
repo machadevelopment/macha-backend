@@ -2594,7 +2594,28 @@ export function startExcelIngestWorker(): Promise<string> {
             );
           }
 
-          const hayAlgo = hayDescuadre(cuadres) || descuadradas.length > 0;
+          /*
+           * ⚠️ EL VEREDICTO QUE MANDA ES EL DE POR HOJA, cuando lo hay.
+           *
+           * El cuadre del DOCUMENTO usa una expansión ESCALAR —filas de ledger sobre filas
+           * medidas, en todo el libro— y esa cifra no le sirve a ninguna hoja en particular:
+           * una de facturación expande 2× (la factura y su ingreso devengado) y una de gastos
+           * 1×, así que el promedio deja la banda demasiado ancha para una y demasiado angosta
+           * para la otra. Medido el 2026-09-01 en un libro con las tres cifras EXACTAS contra
+           * su verdad de campo: el total dijo `sobra` en USD (1,19× contra una expansión
+           * calculada de 0,79×) mientras las cinco hojas cuadraban una por una.
+           *
+           * Es exactamente el motivo por el que existe el cuadre por hoja, aplicado al otro
+           * lado: el total del documento se deja engañar. Así que el total queda como RESPALDO
+           * para lo que la vista por hoja no puede cubrir —filas sin `sheet_name`, o sea cargas
+           * anteriores a la migración 0039— y deja de levantar su propia alarma cuando la vista
+           * fina existe y no encontró nada. Un detector que grita sobre lo correcto enseña a
+           * ignorarlo, que es la misma lección que el veredicto `no_se_registra`.
+           */
+          const hayVistaPorHoja = porHojaCuadre.length > 0;
+          const hayAlgo = hayVistaPorHoja
+            ? descuadradas.length > 0
+            : hayDescuadre(cuadres) || descuadradas.length > 0;
           if (hayAlgo) {
             console.warn(
               `[cuadre] company=${companyId} document=${documentId} DESCUADRE: lo que aterrizó ` +
