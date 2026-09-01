@@ -1084,6 +1084,54 @@ Conventions & gotchas:
   - **Destinatarios: los mismos que las alertas** (miembros activos con `receives_reports`). No
     se inventa un criterio: quien eligió no recibir el reporte tampoco quiere que le escribamos
     por una carga.
+- **EL RESCATE DE HOJA Y LA CORRECCIÓN DE COLUMNA** (migración `0043`, 2026-09-01). El portón
+  (0042) le ENSEÑA al dueño las dos cosas que más caro cuestan de esta ingesta y no le daba
+  salida para ninguna: las veía y no podía hacer nada. Una hoja descartada por error —el
+  dashboard de KapePrueba en cero con la contabilidad bien leída, la cartera de clientes que el
+  filtro de catálogo se llevó puesta— y un dato leído de la columna equivocada, que no falla
+  nada visible: el total puede verse perfecto y cada fila estar mal.
+  Las dos se resuelven igual —reprocesar ESA hoja con la corrección— y por eso son **un solo
+  endpoint** (`POST /documents/:id/corregir-hoja`) y **una sola columna**
+  (`documents.sheet_overrides`).
+  - **La corrección de columna se aplica INMEDIATAMENTE al volver del lote**, no más abajo:
+    entre medio está la columna de la que el diccionario APRENDE el concepto, así que
+    aplicarla después dejaba las reglas guardadas bajo la columna vieja — la corrección de esta
+    carga no llegaba a la siguiente.
+  - **Se borran las filas Y los lotes de esa hoja.** Sin lo primero, corregir la columna la
+    DUPLICA; sin lo segundo, la reanudación la SALTA y la hoja desaparece — el mismo fallo que
+    el rescate viene a arreglar, causado por nosotros. Hay un test por cada mitad.
+  - **Una carga ya publicada no se corrige (409)**: sus filas están en el ledger y reprocesar
+    encima las cuenta dos veces; ahí el camino es revertir y volver a subir. Y **no vuelve a
+    cobrar crédito**: el débito es una vez por CARGA, no por corrida.
+  - El resumen guarda ahora **todos los encabezados** de la hoja (`encabezados`): `columnas`
+    dice de dónde SALIÓ el dato, y eso es lo que permite elegir otro.
+- ⚠️ **UN REPROCESO NO PUEDE BORRAR LO QUE NO TOCÓ, Y ROMPIÓ DOS COSAS** (2026-09-01, las dos
+  medidas en producción el mismo día que se desplegó el rescate). El worker es reanudable por
+  lote a propósito, así que una corrida que vuelve sobre un documento **salta las hojas ya
+  procesadas** — y todo lo que se acumula durante el bucle queda con solo lo de esa corrida.
+  - **El RESUMEN DE LECTURA se guardaba con las hojas de esa corrida y borraba el resto.** El
+    portón de `EL-INFIERNO-v43-2027.xlsx` pasó de **18 hojas a 9**, y las que desaparecieron
+    eran las principales (`Ventas`, `Gastos_Operativos`, `OrdenesCompra`, `Facturacion`). Sus
+    97 filas de staging seguían ahí, o sea que **la contabilidad no se perdía**: lo que se
+    rompía era la única pantalla con la que el dueño decide si publicarla. Se fusiona por
+    NOMBRE DE HOJA (`fusionarHojas`) y **gana la corrida nueva** — conservar el veredicto viejo
+    sería peor que no fusionar: le diría que su corrección no sirvió.
+  - **El CUADRE del documento comparaba una hoja contra el libro entero.** `leidoDelArchivo`
+    acumula solo lo de esa corrida y el ledger tiene todo: medido, **GTQ 13.916,00 leídos
+    contra 263.319,50 aterrizados, 18,92×**, gritando "la misma plata contada dos veces" sobre
+    una carga cuyas tres cifras salieron EXACTAS. El falso positivo está GARANTIZADO en todo
+    reproceso y encima se persiste (0040) en la cola de `/admin/reconciliation`. Es lo único
+    que este mecanismo no puede permitirse — su propio encabezado ya lo dice: un detector que
+    se equivoca en lo correcto enseña a ignorarlo. Ahora el cuadre del DOCUMENTO se omite en
+    una corrida parcial y se dice por qué; el de POR HOJA sigue corriendo y sigue siendo válido
+    (compara cada hoja re-leída contra SUS propias filas de staging) y es además el veredicto
+    que ya manda cuando lo hay.
+  - ⚠️ **El test del cuadre costó DOS correcciones y valen más que el arreglo**: (a) afirmaba
+    que no hubiera un veredicto `sobra` y la mutación NO lo ponía en rojo, porque con el libro
+    chico del test la corrida parcial da `cuadra` — ahora afirma que no haya NINGÚN veredicto
+    de documento, que es lo que la guarda promete; (b) interceptaba `console.info` y
+    `console.error` pero **no `console.warn`**, y `en_revision` —el falso positivo real— sale
+    por ahí, así que seguía midiendo código distinto del que yo creía estar tocando.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
@@ -1255,6 +1303,34 @@ Conventions & gotchas:
 - **La landing no inventa precios ni interacciones que no existen** (mismo día). Los tres planes **no llevan cifra** porque el diseño no la trae — dice "definimos el alcance en la demo" — y un número que nadie aprobó en la pantalla donde el cliente decide si puede pagarlo es lo peor que se puede poner ahí; los tres van al MISMO `mailto`, porque la conversión de esa sección es la conversación. Las pestañas del mockup de producto ("Costos", "Flujo de caja") se pintan `aria-hidden` como etiquetas: solo existe la captura de "Ventas del mes", y una pestaña que no cambia nada al apretarla promete algo que no está. Y el footer nombra "Aviso de privacidad", "Términos" y "Política de datos" **como texto, no como enlaces** (hay test): un `href="#"` en un producto que maneja la contabilidad de terceros le enseña algo al que lo aprieta buscando qué hacemos con sus datos, y no es lo que queremos que aprenda. El único camino de conversión es `contact@machafinance.com` con el asunto **codificado** — sin `encodeURIComponent` el `mailto` se corta en el primer espacio en varios clientes y llega un correo con asunto vacío.
 - **La landing son BANDAS a todo el ancho, y sus tonos son tokens y no los hex del Figma** (segundo reporte de Keneth sobre la landing, 2026-08-21: *"hay partes que tienen color negro y así, falta bastante trabajo"*). La primera versión metía las catorce secciones en UN contenedor de 1170px separadas por `gap`. Medido sobre el frame, los fondos de sección **alternan** entre el lienzo y `#F9F9F9`, y una —el asesor con IA— va sobre `#191919` de borde a borde; sin bandas, el ritmo que separa las secciones no existía y la única sección que cambia de tinta tampoco. No era una sección suelta: era la estructura de la página plana. La tabla completa (y, alto y fondo de las 14) vive en `components/landing/banda.tsx`, que es lo único que conoce colores: **la sección no sabe de qué color es su fondo**, y por eso la banda oscura es exactamente la misma pieza que las claras. `sutil` es `bg-muted` (`--fill` = `#f7f7f7`, dos partes en 255 del medido) y la oscura es la clase `.inverse` que ya existía — **escribir el hex del diseño es el error que parece fidelidad**: no tiene contraparte en tema oscuro, así que quien tenga el sistema en oscuro vería un bloque blanco cegador donde va una banda gris. Y el full-bleed **no usa `100vw`**: incluye la barra de scroll, o sea ~15px de desbordamiento horizontal en Windows y Linux.
 - **Los 16 frames especifican TRES estados, no dos: capacidades, FAQ y las pestañas del asesor** (misma fecha, corrección sobre mi propia corrección). Ya había aprendido que los frames no son copias sino un item distinto abierto en cada uno; lo que no vi es que el tercer conjunto que varía son los chips del asesor con IA. Lo había construido estático —las tres preguntas con su respuesta a la vez, razonando por escrito que "un carrusel esconde dos tercios del argumento"— cuando el diseño es tres chips y UN panel. La lección que generaliza y que ya me costó dos vueltas: **en ese archivo, lo que varía entre frames ES la especificación de una interacción**, así que cada conjunto de textos que cambia hay que buscarlo hasta el final antes de decidir cómo se comporta la sección. Va como `role="tablist"` **con flechas de teclado**: media implementación es peor que ninguna, porque el lector de pantalla anuncia "pestaña 1 de 3" —le indica al usuario que use las flechas— y entonces tienen que responder.
+- **EL RESCATE DE HOJA Y EL PICKER DE COLUMNA EN EL PORTÓN** (2026-09-01). "Sí, esta hoja
+  debería contar" sobre cada descarte y, dentro del panel expandido, de qué columna sale el
+  monto. Hasta hoy la pantalla MOSTRABA las dos cosas más caras de esta ingesta —una hoja
+  perdida y un dato leído de la columna equivocada— y no daba nada que apretar.
+  - El picker manda el **ÍNDICE**, no el nombre: `sheet_overrides.columnas` se indexa por
+    posición, igual que el mapa del modelo. Hay test.
+  - Las dos correcciones **REPROCESAN** el archivo, así que no son un cambio local como
+    excluir: se sondea el mismo endpoint hasta que el worker termina (tope de 2 min, y al
+    agotarse se recarga igual para que el cliente vea el estado REAL en vez de una promesa).
+    Mientras tanto los controles quedan deshabilitados — un segundo clic encolaría otra corrida
+    sobre una carga que ya se está procesando.
+  - Las hojas descartadas **sin un solo monto medido** van juntas y colapsadas. El corte es por
+    DINERO y no por el nombre de la hoja: "Portada" es una convención y el próximo cliente la
+    llamará "Carátula". Listadas sueltas hacen parecer que descartamos medio archivo cuando
+    descartamos la carátula, y el ruido tapa el descarte que el dueño sí puede desmentir.
+- ⚠️ **DOS DEFECTOS MÁS QUE SOLO SE VIERON ABRIENDO EL PORTÓN EN CHROME** (2026-09-01, con la
+  suite en verde y el deploy en producción — es la tercera vez que esta pantalla los produce):
+  1. **Una carátula no produjo "3 movimientos".** `Portada` y `Notas` se listaban como *"3
+     movimientos · —"* entre las hojas que sí cuentan: la pantalla afirmando algo que no pasó,
+     justo donde el dueño decide si publicar. **Y NO se esconden** como las descartadas sin
+     dinero — una hoja que produjo filas va a publicar algo, así que agruparla contradiría el
+     portón. Lo que estaba mal era el texto, no el sitio (`usadaSinMonto`).
+  2. **El aviso de conceptos prometía un número que el panel desmentía.** Decía "Quedaron {n}
+     conceptos" con `n` = FILAS MARCADAS mientras el panel de abajo —que cuenta CONCEPTOS
+     contestables— decía otra cosa sobre la misma carga: medido, **30 arriba contra 4 abajo**.
+     Es el mismo fallo que `conceptos-pendientes` documenta del lado del correo, y encima
+     llamaba "conceptos" a las filas. Ahora el aviso **no lleva número**: el único conteo que
+     vale lo da el panel, que es el que sabe cuántos son.
 - Do **not** use `localStorage`/`sessionStorage` in artifacts/prototypes; use React state.
 
 Rough layout: `app/(app)/` (customer), `app/admin/` (backoffice), `components/ui/` (shadcn), `components/charts/` (Tremor), `lib/format/`, `lib/i18n/`, `styles/globals.css` (tokens).
