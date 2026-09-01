@@ -102,6 +102,28 @@ describe('libros generados: el dashboard muestra lo que trae el archivo', () => 
     ).toBe('sin libros rotos');
   });
 
+  /*
+   * ⚠️ EL HUECO SE MIDIÓ EN PRODUCCIÓN, no solo acá (2026-09-01). El libro de la semilla 131,
+   * subido por la aplicación real, dejó el dashboard con **+945,00 de ingreso sobre una verdad
+   * de campo de 34.209,00** (+2,8 %) — con el costo y los gastos EXACTOS. `Ventas` (5 filas,
+   * GTQ 945) y su propio `Resumen_Mensual` (5 filas, GTQ 945) se procesaron las dos.
+   *
+   * Y los DOS arreglos naturales tienen contraejemplo, comprobado el mismo día:
+   *
+   *  · Bajar `MIN_FILAS_PARA_AFIRMAR` cuando los totales empatan AL CENTAVO pone en rojo un
+   *    test que ya existe en `sheet-duplication.test.ts`: `Ventas` (1000+2000+3000) y `Gastos`
+   *    (1500+2500+2000) suman 6000 las dos, con tres filas cada una y compartiendo la llave
+   *    `Documento`. Son dos hojas distintas que empatan exacto por azar — con cifras redondas
+   *    eso pasa.
+   *  · Exigir además que solo UNA de las dos se baste sola tampoco separa ese par: la hoja de
+   *    gastos de una PYME no nombra proveedor y es una hoja de movimientos igual, que es lo
+   *    que `pareceLibroDeMovimientos` ya advierte por escrito.
+   *
+   * Sigue sin aflojarse, y el criterio no cambia: mostrar de más se VE y el cliente lo
+   * desmiente; perder su contabilidad en silencio, no. El camino cuando aparezca un archivo
+   * real así es COMBINAR dos señales débiles —forma de período Y empate exacto con otra hoja
+   * del mismo libro—, no bajar un umbral.
+   */
   test('el hueco conocido es SOLO el del consolidado de menos de 6 meses', () => {
     // Si esto cae, apareció una segunda causa y hay que investigarla en vez de ensancharlo.
     expect(exactos.length + conHueco.length).toBe(SEMILLAS);

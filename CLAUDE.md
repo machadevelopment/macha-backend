@@ -861,6 +861,28 @@ Conventions & gotchas:
     el mismo error que `read-summary.ts` documenta haber corregido para los datos de lectura
     ("hoy va a console.info y rota con los logs de Railway"): la lección estaba aprendida en un
     módulo y sin aplicar en el que más la necesitaba.
+- **EL CUADRE DEJÓ DE GRITAR SOBRE LO CORRECTO** (2026-09-01). Dos falsos positivos medidos
+  sobre libros cuyas TRES cifras salieron exactas contra su verdad de campo — y un detector que
+  se equivoca en lo correcto enseña a ignorarlo, que es lo único que este mecanismo no puede
+  permitirse: es lo único que ve un fallo en un archivo que nadie miró nunca.
+  - **Veredicto `no_se_registra`.** Una hoja de COBROS no aterriza nada **a propósito** (su
+    ingreso ya lo devengó la factura a la que apunta), y su forma es idéntica a la del fallo más
+    caro: cero aterrizado habiendo dinero en el archivo. Sin distinguirlas es un falso positivo
+    GARANTIZADO en todo libro que lleve cobros, que son la mayoría — medido: `Cobros
+    nada_aterrizo USD 9.300,00` en una carga perfecta. El worker registra qué hojas suprimió en
+    el mismo punto donde ya consulta el esquema (`marcarSiSuprimida`), para que la bandera no
+    pueda separarse del veredicto que la produce. **Se REETIQUETA, no se omite**: el veredicto
+    se persiste y quien abra la cola tiene que poder leer qué pasó con esa hoja. ⚠️ `sobra` NO
+    se reetiqueta — que una hoja suprimida aterrice dinero significa que la supresión falló, o
+    sea el doble conteo que la regla existe para evitar.
+  - **El veredicto que manda es el de POR HOJA, cuando lo hay.** El cuadre del documento usa una
+    expansión ESCALAR (filas de ledger sobre filas medidas, en todo el libro) que no le sirve a
+    ninguna hoja: una de facturación expande 2× y una de gastos 1×, así que el promedio deja la
+    banda demasiado ancha para una y demasiado angosta para la otra. Medido: `sobra` en USD
+    (1,19× contra 0,79× de expansión calculada) mientras las cinco hojas cuadraban una por una.
+    Es el mismo engaño del total que motivó el cuadre por hoja, del otro lado. El total queda
+    como RESPALDO de lo que la vista por hoja no cubre (filas sin `sheet_name`, o sea cargas
+    anteriores a la 0039).
 - **FUZZER DE LIBROS: 300 permutaciones con verdad de campo, en `bun test`**
   (`lib/hostiles/fuzz.ts` + `lib/hostiles-fuzz.test.ts`, 2026-08-31). Los libros escritos a
   mano cubren lo que YA conocemos; los fallos de esta ingesta viven en la **combinación** de
