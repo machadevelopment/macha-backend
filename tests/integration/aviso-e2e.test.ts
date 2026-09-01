@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import * as XLSX from 'xlsx';
 import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
 import { crearDobleDeCola } from './doble-de-cola';
+import { confirmarYPromover } from './confirmar-carga';
 import * as anthropicReal from '@/lib/anthropic';
 
 /**
@@ -205,25 +206,41 @@ afterAll(async () => {
 const correos = () => dobleDeCola.encolados.filter((e) => e.queue === 'email.send');
 
 describe('de un Excel real al correo, sin que nadie llame a nada', () => {
-  test('1) la carga queda PROMOTED con filas retenidas — el caso normal', async () => {
+  test('1) la carga queda ESPERANDO AL DUEÑO — el caso normal desde el portón', async () => {
     const [doc] = await owner`
       select status, row_count, flagged_count from documents where id = ${documentId}`;
     /*
-     * Si esto dijera `review`, el archivo no habría podido promover NADA y el caso del ticket
-     * seguiría sin cubrirse. `promoted` + `flagged_count > 0` es el estado que la promoción
-     * parcial produce y el que el disparador tiene que reconocer.
+     * ⚠️ Antes esto decía `promoted` con filas retenidas, que era el caso normal de la
+     * promoción parcial. Desde el portón (migración 0042) el caso normal es
+     * `awaiting_confirmation`: la carga se procesó entera y espera que el dueño confirme lo
+     * que entendimos de su archivo.
+     *
+     * Sigue sin ser `review`, y esa distinción es la que importa para el correo: `review`
+     * significa "un humano de MACHA tiene que mirar esto" y alimenta la cola de `/admin`.
+     * Esto le toca al cliente, y el disparador tiene que reconocer las dos.
      */
-    expect(doc!.status).toBe('promoted');
+    expect(doc!.status).toBe('awaiting_confirmation');
     expect(Number(doc!.flagged_count)).toBeGreaterThan(0);
   });
 
-  test('2) las ventas limpias YA están en el dashboard', async () => {
-    // Es la mitad que el correo afirma en su pie ("el resto de tus datos ya está en tu
-    // dashboard"). Si esto fuera 0, ese texto sería mentira.
-    const [t] = await owner`
+  test('2) las ventas limpias NO están todavía: entran cuando el dueño confirma', async () => {
+    /*
+     * ⚠️ Antes esto afirmaba que ya estaban, y era la mitad que sostenía el pie del correo
+     * ("el resto de tus datos ya está en tu dashboard"). Con el portón (migración 0042) eso
+     * es falso, así que el texto del correo cambió Y este test cambió con él: los dos hablan
+     * de la misma carga y no pueden decir cosas distintas.
+     */
+    const antes = await owner`
       select count(*)::int as n from transactions
       where company_id = ${companyId} and deleted_at is null and type = 'revenue'`;
-    expect(t!.n).toBe(30);
+    expect(antes[0]!.n).toBe(0);
+
+    // Y con la confirmación entran las 30, que es lo que el correo ahora promete.
+    await confirmarYPromover(owner, companyId, documentId);
+    const despues = await owner`
+      select count(*)::int as n from transactions
+      where company_id = ${companyId} and deleted_at is null and type = 'revenue'`;
+    expect(despues[0]!.n).toBe(30);
   });
 
   test('3) el worker mandó UN correo, solo, con el conteo de CONCEPTOS', () => {

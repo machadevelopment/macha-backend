@@ -718,10 +718,46 @@ export async function encolarPromocionDeLoResuelto(
 ): Promise<void> {
   try {
     const [doc] = await db
-      .select({ status: documents.status })
+      .select({ status: documents.status, confirmedAt: documents.confirmedAt })
       .from(documents)
       .where(eq(documents.id, documentId));
-    if (doc?.status !== 'review' && doc?.status !== 'promoted') return;
+    /*
+     * `awaiting_confirmation` entra acá (migración 0042): es el estado de una carga recién
+     * procesada, y este es justamente el camino que corre cuando el cliente aprieta
+     * "publicar". Sin incluirlo, el portón se cierra y no lo abre nadie — el cliente confirma
+     * y su contabilidad no entra nunca.
+     */
+    const PROMOVIBLES = ['review', 'promoted', 'awaiting_confirmation'];
+    if (!doc || !PROMOVIBLES.includes(doc.status)) return;
+
+    /*
+     * ═════════════════════════════════════════════════════════════════════════════════════════
+     * EL PORTÓN: NADA ENTRA SIN QUE EL CLIENTE LO CONFIRME (migración 0042, 2026-09-01)
+     * ═════════════════════════════════════════════════════════════════════════════════════════
+     *
+     * Hay EXACTAMENTE DOS caminos a la promoción y los dos quedan cerrados: el worker, que
+     * llama a `promoteDocument` al terminar la ingesta, y esta función, que es la ÚNICA que
+     * encola `document.promote` (verificado: ningún otro `enqueue(QUEUES.documentPromote)` en
+     * todo `src/`). Cerrar solo uno dejaría media puerta abierta.
+     *
+     * El portón NO vive dentro de `promoteDocument` a propósito, aunque sería el punto único:
+     * esa función es el mecanismo de promover y su contrato —"inserta lo promovible"— lo usan
+     * el staff y la propia confirmación. Meterle una condición de PRODUCTO la volvería
+     * imposible de llamar desde el camino que existe justamente para abrir el portón.
+     *
+     * Por qué existe: los siete fallos de ingesta de esta semana NO fueron filas dudosas.
+     * Fueron decisiones sobre HOJAS, con alta confianza y equivocadas — una cartera de clientes
+     * leída como ingresos, un consolidado contado dos veces, un presupuesto entrando como
+     * dinero real. Ninguna la atrapaba una revisión por fila; todas se ven de un vistazo en un
+     * resumen por hoja con su monto al lado.
+     *
+     * ⚠️ Reintroduce la forma que dejó 0 filas en producción antes de la 0020, y se asumió a
+     * propósito. La diferencia es de quién es el trabajo: allá lo hacía staff de Macha y era
+     * fila por fila; acá lo hace el dueño y son tres o cuatro decisiones sobre su archivo. La
+     * mitigación no es aflojar el portón sino hacerlo imposible de no ver — correo con deep
+     * link, banner, y la carga listada como "esperando tu confirmación".
+     */
+    if (doc.confirmedAt === null) return;
 
     await enqueue(QUEUES.documentPromote, { documentId, companyId });
   } catch (err) {

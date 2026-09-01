@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { randomUUID } from 'node:crypto';
 import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
 import { crearDobleDeCola } from './doble-de-cola';
+import { confirmarYPromover } from './confirmar-carga';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════
@@ -280,6 +281,8 @@ beforeAll(async () => {
   `;
   documentId = d!.id;
   await handler!({ documentId, companyId });
+  // El portón (migración 0042): el dueño confirma y recién ahí entra al ledger.
+  await confirmarYPromover(owner, companyId, documentId);
 });
 
 afterAll(async () => {

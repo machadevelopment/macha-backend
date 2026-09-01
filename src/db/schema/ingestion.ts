@@ -158,12 +158,34 @@ export const documents = pgTable(
         // El CLIENTE paró la carga (migración 0026). Terminal, y deliberadamente distinto de
         // `failed`: una carga que el usuario decidió parar no salió mal.
         | 'cancelled'
+        /*
+         * Procesada y esperando que el DUEÑO confirme lo que entendimos (migración 0042).
+         *
+         * Estado propio y no `review` a propósito: `review` significa "un humano de MACHA
+         * tiene que mirar esto" y alimenta la cola de `/admin`. Una carga que espera a su
+         * dueño no es trabajo de staff, y mezclarlas llenaría la cola interna de cosas que
+         * no le tocan a nadie de Macha.
+         */
+        | 'awaiting_confirmation'
       >()
       .notNull()
       .default('queued'),
     rowCount: integer('row_count'),
     flaggedCount: integer('flagged_count'),
     errorReason: text('error_reason'),
+    /**
+     * EL PORTÓN (migración `0042`): cuándo el CLIENTE confirmó lo que entendimos de su archivo.
+     *
+     * `null` = todavía no, y mientras siga en null **nada de esa carga entra al dashboard**.
+     * Lo pregunta `promoteDocument`, que es el único punto por donde pasan las DOS vías de
+     * promoción (la del worker al terminar la ingesta y la de `encolarPromocionDeLoResuelto`
+     * cuando alguien resuelve filas). Ponerlo en una sola dejaría media puerta abierta.
+     *
+     * Ver la cabecera de la migración para el riesgo que esto reintroduce a propósito.
+     */
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    /** Quién confirmó. Sin FK, igual que `staging_rows.reviewed_by`. */
+    confirmedBy: uuid('confirmed_by'),
     promotedAt: timestamp('promoted_at', { withTimezone: true }),
     revertedAt: timestamp('reverted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

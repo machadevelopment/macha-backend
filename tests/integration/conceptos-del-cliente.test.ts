@@ -133,7 +133,14 @@ beforeAll(async () => {
             100, 'text/csv', 'promoted', ${FILAS.length}, ${FILAS.length})
     returning id
   `;
+  /*
+   * El portón (migración 0042) no aplica acá: este fixture modela una carga YA publicada cuyas
+   * filas marcadas el cliente está resolviendo, y una carga publicada es por definición una que
+   * su dueño confirmó. Sin esto, `encolarPromocionDeLoResuelto` la frena y la respuesta del
+   * cliente no llega nunca a la contabilidad.
+   */
   documentId = d!.id;
+  await owner`update documents set confirmed_at = now() where id = ${documentId}`;
 
   for (const f of FILAS) {
     await owner`
