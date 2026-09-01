@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { evaluarCuadre, hayDescuadre } from './cuadre';
+import { evaluarCuadre, evaluarCuadrePorHoja, hayDescuadre, hojasDescuadradas } from './cuadre';
 
 /**
  * La garantía: un fallo de ingesta en un archivo QUE NADIE VIO NUNCA queda registrado.
@@ -220,5 +220,52 @@ describe('lo que espera revisión no es lo mismo que lo perdido', () => {
       aterrizado(50_000),
     );
     expect(cuadres[0]!.veredicto).toBe('sobra');
+  });
+});
+
+describe('una hoja suprimida a propósito NO es un descuadre', () => {
+  /*
+   * La hoja de COBROS de un libro real no aterriza nada, y eso es correcto: su ingreso ya lo
+   * devengó la factura a la que apunta (`ventaYaRegistradaEnOtraHoja`). Su forma es idéntica a
+   * la del fallo más caro —cero aterrizado habiendo dinero en el archivo— así que sin
+   * distinguirlas el detector da un falso positivo en TODO libro que lleve cobros.
+   *
+   * Medido en producción el 2026-09-01: `12-la-ceiba.xlsx` salió con ingresos, costo y gastos
+   * EXACTOS contra su verdad de campo, y el cuadre igual reportó DESCUADRE por `Cobros`
+   * (USD 9.300,00). Un detector que se equivoca sobre lo correcto enseña a ignorarlo.
+   */
+  const cobros = {
+    hoja: 'Cobros',
+    leido: [{ moneda: 'USD', monto: 9300, costo: 0 }],
+    aterrizado: [],
+  };
+
+  test('sin la bandera dice `nada_aterrizo` y ensucia la cola', () => {
+    const [c] = evaluarCuadrePorHoja([cobros]);
+    expect(c!.cuadres[0]!.veredicto).toBe('nada_aterrizo');
+    expect(hojasDescuadradas([c!])).toHaveLength(1);
+  });
+
+  test('con la bandera dice `no_se_registra` y NO ensucia la cola', () => {
+    const [c] = evaluarCuadrePorHoja([{ ...cobros, suprimida: true }]);
+    expect(c!.cuadres[0]!.veredicto).toBe('no_se_registra');
+    // Sigue PERSISTIDO y legible: omitir la hoja la volvería invisible, que es el problema
+    // opuesto al que esto arregla.
+    expect(c!.cuadres[0]!.detalle).toContain('ya cuenta ese dinero en otra hoja');
+    expect(hojasDescuadradas([c!])).toHaveLength(0);
+  });
+
+  test('⚠️ `sobra` NO se reetiqueta: una hoja suprimida que aterriza dinero SÍ es un fallo', () => {
+    // Significa que la supresión no funcionó, o sea el doble conteo que la regla evita.
+    const [c] = evaluarCuadrePorHoja([
+      {
+        hoja: 'Cobros',
+        leido: [{ moneda: 'USD', monto: 9300, costo: 0 }],
+        aterrizado: [{ moneda: 'USD', monto: 18600 }],
+        suprimida: true,
+      },
+    ]);
+    expect(c!.cuadres[0]!.veredicto).not.toBe('no_se_registra');
+    expect(hojasDescuadradas([c!])).toHaveLength(1);
   });
 });

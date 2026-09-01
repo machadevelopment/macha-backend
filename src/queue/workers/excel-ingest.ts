@@ -457,6 +457,22 @@ export function startExcelIngestWorker(): Promise<string> {
          * archivo traía— pero nunca iban a llegar al ledger. Ver el bloque donde se acumula.
          */
         const declaradoNoDato = new Map<string, number>();
+        /**
+         * Hojas que el ESQUEMA del libro demostró que repiten dinero ya registrado en otra, y
+         * cuyas filas la ingesta suprimió a propósito. Que no aterricen es lo correcto.
+         *
+         * Sin esto el cuadre por hoja las reporta `nada_aterrizo` —la forma del fallo más caro—
+         * y es un falso positivo GARANTIZADO en todo libro que lleve una hoja de cobros, que
+         * son la mayoría. Medido: `12-la-ceiba.xlsx` salió con las tres cifras exactas contra
+         * su verdad de campo y el cuadre igual gritó DESCUADRE por `Cobros`.
+         */
+        const hojasSuprimidas = new Set<string>();
+        /** Consulta el esquema y deja registrado el veredicto, en un solo lugar. */
+        const marcarSiSuprimida = (hoja: string): boolean => {
+          const suprimida = yaRegistradaEnOtraHoja(hoja);
+          if (suprimida) hojasSuprimidas.add(hoja);
+          return suprimida;
+        };
 
         let totalRowsProcessed = 0;
         // `Set` y no array: un libro de 12 hojas de notas repetiría la misma frase 12
@@ -1362,7 +1378,7 @@ export function startExcelIngestWorker(): Promise<string> {
              * un catálogo (un vehículo, un producto) no significa que el ingreso esté contado
              * — solo apuntar a algo que produce transacciones lo significa.
              */
-            ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+            ventaYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
             /*
              * La misma condición para el otro lado del balance. Una hoja de cuentas por pagar
              * que apunta a la de compras trae deudas cuyo COSTO ya está registrado allá, y
@@ -1372,7 +1388,7 @@ export function startExcelIngestWorker(): Promise<string> {
              * Es el MISMO predicado a propósito: la señal es "esta hoja apunta a otra que
              * produce movimientos", y esa señal no cambia según el signo del dinero.
              */
-            compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+            compraYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
             headerRow,
             baseCurrency,
             /*
@@ -1619,8 +1635,8 @@ export function startExcelIngestWorker(): Promise<string> {
               rows: batch,
               baseCurrency,
               ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
-              ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
-              compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+              ventaYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
+              compraYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
             },
             columnas,
           );
@@ -1674,8 +1690,8 @@ export function startExcelIngestWorker(): Promise<string> {
               rows: batch,
               baseCurrency,
               ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
-              ventaYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
-              compraYaRegistradaEnOtraHoja: yaRegistradaEnOtraHoja(sheetName),
+              ventaYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
+              compraYaRegistradaEnOtraHoja: marcarSiSuprimida(sheetName),
             },
             columnas,
           );
@@ -2566,6 +2582,7 @@ export function startExcelIngestWorker(): Promise<string> {
                 // demasiado ancha para una y demasiado angosta para la otra.
                 expansion: medido.filas > 0 && enStaging ? enStaging.filas / medido.filas : 1,
                 enRevision: enStaging?.revision ?? [],
+                suprimida: hojasSuprimidas.has(hoja),
               };
             }),
           );
