@@ -11,6 +11,7 @@ import { fileMentionsCurrency, isScannable } from '@/lib/currency-scan';
 import { counterCurrency, loadFxCatalog, type Currency } from '@/lib/fx';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { cancelDocumentRows, revertDocument, encolarPromocionDeLoResuelto } from '@/lib/promotion';
+import { costoDeCuentaPorPagar, esTipoDeEgreso, yaTieneSuCosto } from '@/lib/derivacion-de-costo';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
@@ -746,6 +747,10 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           payload: stagingRows.payload,
           targetEntity: stagingRows.targetEntity,
           flagReason: stagingRows.flagReason,
+          // La hoja se HEREDA en la fila derivada: sin esto el cuadre por hoja (migración
+          // 0039) contaría el costo fuera de la hoja que lo produjo y reportaría un
+          // descuadre en las dos.
+          sheetName: stagingRows.sheetName,
         })
         .from(stagingRows)
         .where(
@@ -788,6 +793,28 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         const r = respuestas.get(clave);
         if (!r) continue;
 
+        /*
+         * ⚠️ UNA CUENTA POR PAGAR NECESITA QUE ALGUIEN LE DERIVE SU COSTO, Y ACÁ NADIE LO
+         * HACÍA (2026-09-01). `construirFilas` la deriva solo cuando el MODELO dio el tipo;
+         * cuando no lo dio, la fila llega marcada hasta acá — y este handler actualizaba el
+         * payload, limpiaba el flag y promovía. La fila iba a `bills` y `rollups.ts` suma
+         * `cogs`/`opex` únicamente de `transactions`, así que el estado de resultados no la
+         * veía nunca.
+         *
+         * Medido en producción con `12-la-ceiba.xlsx`: 12 órdenes de compra por GTQ 56.391,00
+         * —el 82 % del costo real del libro—. El cliente contestó, las filas marcadas bajaron
+         * de 15 a 3, y la cifra no se movió. Es el bug de U3TECH del lado del cliente, y peor,
+         * porque le dijimos que ya estaba resuelto.
+         *
+         * `yaTieneSuCosto` mira el payload ANTES de aplicar la respuesta, que es el único
+         * momento en que se puede distinguir "el modelo no supo" de "la ingesta lo suprimió a
+         * propósito" o "ya lo derivó".
+         */
+        const derivarCosto =
+          fila.targetEntity === 'bill' && esTipoDeEgreso(r.type) && !yaTieneSuCosto(p)
+            ? costoDeCuentaPorPagar({ payload: p, type: r.type, category: r.category })
+            : null;
+
         await db
           .update(stagingRows)
           .set({
@@ -811,6 +838,27 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           })
           .where(and(eq(stagingRows.id, fila.id), eq(stagingRows.companyId, companyId)));
         filasResueltas++;
+
+        /*
+         * La transacción de costo entra como fila NUEVA de staging, ya aprobada, para que la
+         * promueva el mismo camino que todo lo demás. Comparte `document_id` y `sheet_name`
+         * con su cuenta por pagar, así que el revert se las lleva juntas y el cuadre por hoja
+         * la cuenta donde corresponde.
+         */
+        if (derivarCosto !== null) {
+          await db.insert(stagingRows).values({
+            companyId,
+            documentId: params.id,
+            sheetName: fila.sheetName,
+            targetEntity: 'transaction',
+            payload: derivarCosto,
+            confidence: '1.0000',
+            flagReason: null,
+            reviewStatus: 'approved',
+            reviewedBy: userId,
+            reviewedAt: new Date(),
+          });
+        }
 
         if (!vistos.has(clave)) {
           vistos.add(clave);
