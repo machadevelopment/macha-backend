@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  ES_DERIVADA,
   SIN_DERIVAR,
   costoDeCuentaPorPagar,
+  esFilaDerivada,
   esTipoDeEgreso,
   yaTieneSuCosto,
 } from './derivacion-de-costo';
@@ -124,5 +126,45 @@ describe('la fila de costo que se arma', () => {
       )
       .reduce((suma, f) => suma + (f.originalAmount as number), 0);
     expect(total).toBeCloseTo(56391.0, 2);
+  });
+});
+
+describe('la respuesta del cliente NO pisa una fila derivada', () => {
+  /*
+   * Medido en producción el 2026-09-01, con el portón puesto: el concepto "Aceite 1 L"
+   * agrupaba DOS filas —la venta de GTQ 1.890 y su costo derivado de GTQ 1.160, que comparten
+   * `product`—. El dueño contestó "es un ingreso", que es CIERTO de su venta, y con eso
+   * convirtió el costo en ingreso: **+1.160 de ingreso y −1.160 de costo**.
+   *
+   * El total del archivo cuadraba al centavo, así que el error era invisible; lo que se movía
+   * era el MARGEN BRUTO, que es cifra de portada.
+   */
+  const venta = { type: 'revenue', category: 'ventas', date: '2026-04-18', product: 'Aceite 1 L', originalAmount: 1890, originalCurrency: 'GTQ' }; // prettier-ignore
+  const costo = { ...venta, type: 'cogs', category: 'costo_de_ventas', originalAmount: 1160, [ES_DERIVADA]: true }; // prettier-ignore
+
+  test('la venta se puede contestar; el costo derivado se reconoce como tal', () => {
+    expect(esFilaDerivada(venta)).toBe(false);
+    expect(esFilaDerivada(costo)).toBe(true);
+  });
+
+  test('⚠️ las dos caen en el MISMO concepto, y eso está bien', () => {
+    /*
+     * Agrupar por producto es lo que hace contestable la pantalla cuando la hoja no trae
+     * descripción (medido: de 4.686 filas marcadas en producción, 977 solo tienen `product`).
+     * No se cambia. Lo que estaba mal era aplicarle al costo una respuesta dada sobre la venta.
+     */
+    expect(venta.product).toBe(costo.product);
+  });
+
+  test('el costo derivado conserva `cogs` aunque el cliente diga "es un ingreso"', () => {
+    const respuesta = { type: 'revenue', category: 'ventas de producto' };
+    const aplicar = (p: Record<string, unknown>) =>
+      esFilaDerivada(p) ? p : { ...p, ...respuesta };
+
+    expect((aplicar(venta) as { type: string }).type).toBe('revenue');
+    // Si esto dijera `revenue`, el margen bruto del cliente vuelve a moverse 1.160 sin que
+    // nada falle y con el total cuadrando.
+    expect((aplicar(costo) as { type: string }).type).toBe('cogs');
+    expect((aplicar(costo) as { category: string }).category).toBe('costo_de_ventas');
   });
 });

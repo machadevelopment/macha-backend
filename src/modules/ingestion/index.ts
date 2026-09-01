@@ -11,7 +11,12 @@ import { fileMentionsCurrency, isScannable } from '@/lib/currency-scan';
 import { counterCurrency, loadFxCatalog, type Currency } from '@/lib/fx';
 import { INTAKE_MESSAGES } from '@/lib/intake-messages';
 import { cancelDocumentRows, revertDocument, encolarPromocionDeLoResuelto } from '@/lib/promotion';
-import { costoDeCuentaPorPagar, esTipoDeEgreso, yaTieneSuCosto } from '@/lib/derivacion-de-costo';
+import {
+  costoDeCuentaPorPagar,
+  esFilaDerivada,
+  esTipoDeEgreso,
+  yaTieneSuCosto,
+} from '@/lib/derivacion-de-costo';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
@@ -832,10 +837,27 @@ export const ingestion = new Elysia({ prefix: '/documents' })
             ? costoDeCuentaPorPagar({ payload: p, type: r.type, category: r.category })
             : null;
 
+        /*
+         * ⚠️ UNA FILA DERIVADA CONSERVA SU TIPO. Ver `ES_DERIVADA`: el costo de una venta, el
+         * ingreso devengado de una factura y el costo de una cuenta por pagar los crea el
+         * pipeline por una REGLA CONTABLE, no leyendo el texto de la fila. Y comparten
+         * `product`/`counterparty` con su fila origen, así que caen en el MISMO concepto.
+         *
+         * Medido en producción: el concepto "Aceite 1 L" agrupaba la venta de GTQ 1.890 y su
+         * costo derivado de GTQ 1.160. El dueño contestó "es un ingreso" —cierto de su venta—
+         * y con eso convirtió el costo en ingreso: +1.160 de ingreso y −1.160 de costo. El
+         * total del archivo cuadraba al centavo, así que era invisible; lo que se movía era el
+         * MARGEN BRUTO.
+         *
+         * Se le limpia la marca igual (su duda era la confianza heredada, y su dinero tiene que
+         * aterrizar), pero el tipo y la categoría se quedan como los puso la regla.
+         */
+        const derivada = esFilaDerivada(p);
+
         await db
           .update(stagingRows)
           .set({
-            payload: { ...p, type: r.type, category: r.category },
+            payload: derivada ? p : { ...p, type: r.type, category: r.category },
             /*
              * `confidence` sube a 1: lo dijo el dueño de la contabilidad. Si se dejara la
              * confianza vieja —la baja que la marcó—, `staging-rules` la volvería a marcar por

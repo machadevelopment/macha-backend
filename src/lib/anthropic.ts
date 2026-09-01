@@ -3,7 +3,7 @@ import { env } from './env';
 import { AiProviderError, runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
 import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
-import { SIN_DERIVAR } from './derivacion-de-costo';
+import { ES_DERIVADA, SIN_DERIVAR } from './derivacion-de-costo';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -450,7 +450,7 @@ export function construirFilas(
         out.push({
           targetEntity: 'transaction',
           confidence: typeof v.cf === 'number' ? v.cf : 0,
-          payload: ingreso,
+          payload: { ...ingreso, [ES_DERIVADA]: true },
         });
       }
       continue;
@@ -518,7 +518,7 @@ export function construirFilas(
           out.push({
             targetEntity: 'transaction',
             confidence: typeof v.cf === 'number' ? v.cf : 0,
-            payload: egreso,
+            payload: { ...egreso, [ES_DERIVADA]: true },
           });
         }
       }
@@ -543,6 +543,9 @@ export function construirFilas(
         ...venta,
         type: 'cogs',
         category: 'costo_de_ventas',
+        // Ver `ES_DERIVADA`: su tipo es una regla contable, no una lectura del texto de la
+        // fila, así que la respuesta del cliente sobre el producto NO lo pisa.
+        [ES_DERIVADA]: true,
         originalAmount: costo,
         // Las unidades ya las contó la fila de ingreso. Repetirlas acá las duplicaría en
         // cualquier conteo de "unidades vendidas".

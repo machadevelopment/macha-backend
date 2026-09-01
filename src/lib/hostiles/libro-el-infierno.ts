@@ -82,7 +82,7 @@ const MESES_ES = [
  * es la conducta correcta y por eso no se puede desactivar. No cambia ninguna decisión del
  * pipeline: las proporciones, las formas y los empates se conservan.
  */
-export function libroElInfierno(serie = ''): LibroHostil {
+export function libroElInfierno(serie = '', anio = 2026): LibroHostil {
   /*
    * `serie` se pega a los CÓDIGOS de documento (`OV-`, `OC-`, `FAC-`, `REC-`, `LOC-`). Existe
    * para poder subir este mismo libro dos veces a una empresa real sin que la huella por fila
@@ -91,6 +91,16 @@ export function libroElInfierno(serie = ''): LibroHostil {
    * siendo consistentes entre `Facturacion` y `Cobros`, y entre `OrdenesCompra` y `LineasOC`.
    */
   const cod = (c: string) => `${c}${serie}`;
+  /*
+   * `anio` desplaza TODAS las fechas del libro. Existe por la misma razón que `serie`, y es más
+   * fuerte: la huella por fila (`ingested_rows`) recuerda una carga aunque se haya revertido
+   * —revertir borra el ledger, no las huellas— y `serie` solo cambia los CÓDIGOS, que la mitad
+   * de las hojas no tiene. Sin esto, resubir este libro a una empresa que ya lo vio da
+   * `ya_ingerida` en casi todo y la prueba no prueba nada.
+   *
+   * No mueve la verdad de campo: los totales no dependen del año.
+   */
+  const dia = (mmdd: string) => serial(`${anio}-${mmdd}`);
   const { v, mas } = contador();
   const hojas: [string, unknown[][]][] = [];
 
@@ -99,7 +109,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
     'Portada',
     [
       ['COMERCIALIZADORA EL INFIERNO, S.A.'],
-      ['Libro contable · ejercicio 2026'],
+      [`Libro contable · ejercicio ${anio}`],
       ['Documento interno · no distribuir'],
     ],
   ]);
@@ -110,20 +120,20 @@ export function libroElInfierno(serie = ''): LibroHostil {
    */
   const ventas: unknown[][] = [
     ['COMERCIALIZADORA EL INFIERNO, S.A.'],
-    ['Detalle de ventas · ene–jun 2026'],
+    [`Detalle de ventas · ene–jun ${anio}`],
     ['Fecha', 'No. Orden', 'Tienda', 'Cliente', 'Producto', 'Moneda', 'Monto', 'Costo Total'],
   ];
 
   /** Las ocho ventas buenas, cada una con la fecha escrita de una forma distinta. */
   const BUENAS = [
-    { f: serial('2026-01-08'), t: 'TDA-01', c: 'Cliente 1', p: 'Harina 5 lb', m: 1240.5, k: 780 },
-    { f: '15/02/2026',        t: 'TDA-01', c: 'Cliente 2', p: 'Aceite 1 L',  m: 980,    k: 610 },
-    { f: '2026-03-04',        t: 'TDA-02', c: 'Cliente 3', p: 'Refresco 2 L', m: 1530.75, k: 940 },
-    { f: '15 de marzo de 2026', t: 'TDA-02', c: 'Cliente 1', p: 'Detergente', m: 2110, k: 1305 },
-    { f: serial('2026-04-02'), t: 'TDA-03', c: 'Cliente 4', p: 'Harina 5 lb', m: 'Q 1,234.50', k: 760 },
-    { f: '18/04/2026',        t: 'TDA-03', c: 'Cliente 2', p: 'Aceite 1 L',  m: ' 1 890,00 ', k: 1160 },
-    { f: serial('2026-05-11'), t: 'TDA-01', c: 'Cliente 5', p: 'Refresco 2 L', m: 2450.25, k: 1500 },
-    { f: '2026-06-20',        t: 'TDA-02', c: 'Cliente 3', p: 'Detergente',  m: 1760, k: 1080 },
+    { f: dia('01-08'), t: 'TDA-01', c: 'Cliente 1', p: 'Harina 5 lb', m: 1240.5, k: 780 },
+    { f: `15/02/${anio}`,        t: 'TDA-01', c: 'Cliente 2', p: 'Aceite 1 L',  m: 980,    k: 610 },
+    { f: `${anio}-03-04`,        t: 'TDA-02', c: 'Cliente 3', p: 'Refresco 2 L', m: 1530.75, k: 940 },
+    { f: `15 de marzo de ${anio}`, t: 'TDA-02', c: 'Cliente 1', p: 'Detergente', m: 2110, k: 1305 },
+    { f: dia('04-02'), t: 'TDA-03', c: 'Cliente 4', p: 'Harina 5 lb', m: 'Q 1,234.50', k: 760 },
+    { f: `18/04/${anio}`,        t: 'TDA-03', c: 'Cliente 2', p: 'Aceite 1 L',  m: ' 1 890,00 ', k: 1160 },
+    { f: dia('05-11'), t: 'TDA-01', c: 'Cliente 5', p: 'Refresco 2 L', m: 2450.25, k: 1500 },
+    { f: `${anio}-06-20`,        t: 'TDA-02', c: 'Cliente 3', p: 'Detergente',  m: 1760, k: 1080 },
   ]; // prettier-ignore
 
   /** `Q 1,234.50` y ` 1 890,00 ` valen lo que dicen: el lector de montos tiene que leerlos. */
@@ -137,18 +147,9 @@ export function libroElInfierno(serie = ''): LibroHostil {
   }
 
   // NO aterrizan, y cada una por un motivo distinto:
+  ventas.push([dia('06-25'), cod('OV-9001'), 'TDA-01', 'Cliente 9', 'Aceite 1 L', 'EUR', 220, 130]);
   ventas.push([
-    serial('2026-06-25'),
-    cod('OV-9001'),
-    'TDA-01',
-    'Cliente 9',
-    'Aceite 1 L',
-    'EUR',
-    220,
-    130,
-  ]);
-  ventas.push([
-    '2026-02-31',
+    `${anio}-02-31`,
     cod('OV-9002'),
     'TDA-01',
     'Cliente 8',
@@ -159,7 +160,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
   ]);
   ventas.push(['TOTAL', '', '', '', '', 'GTQ', 13_416, 8_265]);
   // Pie de página: tres celdas que "cubren" la tabla y compiten con el encabezado real.
-  ventas.push([2026, 6, 'Hoja 1 de 1']);
+  ventas.push([anio, 6, 'Hoja 1 de 1']);
   hojas.push(['Ventas', ventas]);
 
   /* ── 3. Ventas (2): copia exacta ─────────────────────────────────────────────────────── */
@@ -194,7 +195,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
       ['Mes', 'Total Ventas'],
       ...Object.entries(porMes)
         .sort((a, b) => Number(a[0]) - Number(b[0]))
-        .map(([m, t]) => [serial(`2026-0${m}-01`), t]),
+        .map(([m, t]) => [serial(`${anio}-0${m}-01`), t]),
     ],
   ]);
 
@@ -206,7 +207,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
     clientes.push([
       `Cliente ${i}`, `10000${i}-K`, i % 2 ? 'Detalle' : 'Mayoreo',
       `Contacto ${i}`, `5100001${i}`, i % 2 ? 'Contado' : '30 días',
-      12_000 + i * 430, serial('2026-06-15'), 3_400 + i * 210,
+      12_000 + i * 430, dia('06-15'), 3_400 + i * 210,
     ]); // prettier-ignore
   }
   hojas.push(['Clientes_B2B', clientes]);
@@ -257,8 +258,8 @@ export function libroElInfierno(serie = ''): LibroHostil {
     const monto = r2(3_150 + i * 187.4);
     const mes = (i % 6) + 1;
     ordenes.push([
-      id, serial(`2026-0${mes}-1${(i % 8) + 1}`), PROVEEDORES[i % 3], 'GTQ', monto,
-      serial(`2026-0${Math.min(mes + 1, 9)}-1${(i % 8) + 1}`),
+      id, serial(`${anio}-0${mes}-1${(i % 8) + 1}`), PROVEEDORES[i % 3], 'GTQ', monto,
+      serial(`${anio}-0${Math.min(mes + 1, 9)}-1${(i % 8) + 1}`),
     ]); // prettier-ignore
     totalOC = r2(totalOC + monto);
     // El detalle: cuatro líneas por orden que suman EXACTAMENTE su total.
@@ -318,8 +319,8 @@ export function libroElInfierno(serie = ''): LibroHostil {
   for (let i = 0; i < 8; i++) {
     const monto = 900 + i * 65;
     facturas.push([
-      cod(`FAC-${500 + i}`), serial(`2026-0${(i % 6) + 1}-0${(i % 8) + 1}`), `Cliente ${(i % 5) + 1}`,
-      'USD', monto, serial(`2026-0${Math.min((i % 6) + 2, 9)}-0${(i % 8) + 1}`),
+      cod(`FAC-${500 + i}`), serial(`${anio}-0${(i % 6) + 1}-0${(i % 8) + 1}`), `Cliente ${(i % 5) + 1}`,
+      'USD', monto, serial(`${anio}-0${Math.min((i % 6) + 2, 9)}-0${(i % 8) + 1}`),
     ]); // prettier-ignore
     mas('revenue', r2(monto * TASA_USD));
   }
@@ -331,7 +332,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
   ];
   for (let i = 0; i < 6; i++) {
     cobros.push([
-      cod(`REC-${900 + i}`), serial(`2026-0${(i % 6) + 2}-2${(i % 8) + 1}`), cod(`FAC-${500 + i}`),
+      cod(`REC-${900 + i}`), serial(`${anio}-0${(i % 6) + 2}-2${(i % 8) + 1}`), cod(`FAC-${500 + i}`),
       `Cliente ${(i % 5) + 1}`, 900 + i * 65, 'USD',
     ]); // prettier-ignore
   }
@@ -341,7 +342,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
   hojas.push([
     'Presupuesto',
     [
-      ['Rubro', 'Q1 2026', 'Q2 2026', 'Q3 2026', 'Q4 2026'],
+      ['Rubro', `Q1 ${anio}`, `Q2 ${anio}`, `Q3 ${anio}`, `Q4 ${anio}`],
       ['Ventas proyectadas', 42_000, 45_000, 47_500, 51_000],
       ['Compras proyectadas', 26_000, 27_800, 29_100, 31_400],
       ['Gastos proyectados', 11_200, 11_500, 11_900, 12_400],
@@ -358,7 +359,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
   for (let i = 0; i < 6; i++) {
     const monto = r2(1_450 + i * 96.5);
     const a = AMBIGUOS[i % 2]!;
-    servicios.push([serial(`2026-0${(i % 6) + 1}-25`), a[0], a[1], 'GTQ', monto]);
+    servicios.push([serial(`${anio}-0${(i % 6) + 1}-25`), a[0], a[1], 'GTQ', monto]);
     totalServicios = r2(totalServicios + monto);
   }
   // También entran cuando el cliente dice qué son. Ver `marcadas`.
@@ -370,7 +371,7 @@ export function libroElInfierno(serie = ''): LibroHostil {
   for (let i = 0; i < 9; i++) {
     const monto = r2(310 + i * 47.25);
     mostrador.push([
-      serial(`2026-0${(i % 6) + 1}-0${(i % 9) + 1}`),
+      serial(`${anio}-0${(i % 6) + 1}-0${(i % 9) + 1}`),
       'Venta de mostrador',
       1,
       'GTQ',

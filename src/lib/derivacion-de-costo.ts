@@ -45,6 +45,34 @@
  */
 export const SIN_DERIVAR = 'derivacionSuprimida';
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * MARCA DE FILA DERIVADA: SU TIPO LO DECIDIÓ UNA REGLA CONTABLE, NO EL NOMBRE DEL PRODUCTO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * El pipeline crea filas que NO están en el archivo: el costo de una venta que trae su costo en
+ * la línea, el ingreso devengado de una factura emitida, el costo de una cuenta por pagar. Su
+ * tipo no es una interpretación del texto de la fila — es una regla contable, y por eso no se
+ * le pregunta al cliente.
+ *
+ * ⚠️ SIN ESTA MARCA, LA RESPUESTA DEL CLIENTE LAS PISA. Medido en producción el 2026-09-01: el
+ * concepto "Aceite 1 L" agrupaba DOS filas —la venta de GTQ 1.890 y su costo derivado de
+ * GTQ 1.160, que comparten `product`—. El dueño contestó "es un ingreso", que es CIERTO de su
+ * venta, y con eso convirtió el costo en ingreso: **+1.160 de ingreso y −1.160 de costo**. El
+ * total del archivo cuadraba al centavo, así que era invisible; lo que se movía era el MARGEN
+ * BRUTO, que es cifra de portada.
+ *
+ * Y agrupar por producto es correcto y no se va a cambiar: es lo que hace contestable la
+ * pantalla cuando la hoja no trae descripción. Lo que estaba mal era aplicarle al costo una
+ * respuesta que el dueño dio sobre la venta.
+ */
+export const ES_DERIVADA = 'derivadaDelPipeline';
+
+/** ¿Esta fila la creó el pipeline a partir de otra? Su tipo no lo contesta el cliente. */
+export function esFilaDerivada(payload: Record<string, unknown>): boolean {
+  return payload[ES_DERIVADA] === true;
+}
+
 /** Los dos únicos tipos que una factura de proveedor puede producir. */
 export type TipoDeEgreso = 'cogs' | 'opex';
 
