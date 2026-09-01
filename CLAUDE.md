@@ -754,6 +754,28 @@ Conventions & gotchas:
   tipo no se deriva nada y la fila va a revisión. Y **el prompt ahora define la frontera
   cogs/opex** (punto 15), que antes quedaba al criterio del modelo: eso hacía que el margen
   bruto —cifra de portada— saliera distinto entre dos corridas del mismo archivo.
+- ⚠️ **CONTESTAR NO DESMARCA UNA FILA QUE LA RESPUESTA NO ARREGLA** (`quedaLimpiaAlContestar`,
+  2026-09-01). El peor fallo posible de esta pantalla, medido en producción con
+  `libro-el-infierno`: **el cliente contestó 18 conceptos, los vio vaciarse, y no aterrizó ni
+  uno.** Sin error en ninguna parte. La cadena entera:
+  1. Una venta en **EUR** —moneda que no manejamos, conservada a propósito para que la fila se
+     marque— llegó además con confianza baja.
+  2. `evaluateFlagReason` devuelve `low_confidence` **antes** de mirar fecha, monto y moneda,
+     así que el problema REAL de la fila quedó escondido detrás.
+  3. `esArreglablePorCategoria` miró ese motivo, dijo que sí, y la fila se ofreció como
+     concepto.
+  4. El cliente la contestó y el `POST` le limpió la marca.
+  5. Al promover, `resolveFxRate` no encontró tasa para EUR y **lanzó**. La promoción es UNA
+     transacción, así que se cayó la de las otras 17 filas resueltas.
+  Es la **promoción parcial (migración 0020) rota a nivel de FILA**: una sola fila impromovible
+  dejando fuera a todas las demás, que es exactamente el problema que esa migración existe para
+  eliminar.
+  **La pregunta correcta no es "¿el motivo es de categoría?" sino "¿con una respuesta PERFECTA
+  esta fila quedaría limpia?"**, y se contesta con la MISMA `evaluateFlagReason` que decide todo
+  lo demás (confianza en 1, tipo y categoría puestos) en vez de con una segunda lista de motivos
+  que se separaría de la primera. Vive una sola vez y tiene **tres consumidores**: el GET no
+  pregunta lo que no se arregla, el POST no limpia una marca que sobrevive a la respuesta, y el
+  correo no avisa por lo que el cliente no puede resolver.
 - **CONTESTAR UNA CUENTA POR PAGAR PRODUCE SU COSTO** (`lib/derivacion-de-costo.ts`,
   2026-09-01). La regla del 2026-08-30 (*"una factura RECIBIDA produce su COSTO además de la
   cuenta por pagar"*) estaba **a medias**: `construirFilas` la deriva cuando el MODELO da el
