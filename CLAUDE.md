@@ -994,7 +994,7 @@ Conventions & gotchas:
     el botón principal está deshabilitado, así que "omitir" es el único camino para pasar de
     largo una pregunta — eso es deliberado, no un bug.
   - Los radios salen de la ESCALA (`rounded-lg`), no en píxeles: hay un test que lo vigila.
-  - ⚠️ **TRES DEFECTOS QUE SOLO SE VIERON ABRIENDO LA PANTALLA EN CHROME** (2026-09-01, con la
+  - ⚠️ **CUATRO DEFECTOS QUE SOLO SE VIERON ABRIENDO LA PANTALLA EN CHROME** (2026-09-01, con la
     suite entera en verde y el deploy ya en producción). Los dos son de la clase que ningún
     test de fuente puede ver, y valen más como método que como arreglo:
     1. **La celda de la tabla lleva `whitespace-nowrap`** —para que el NOMBRE DEL ARCHIVO no se
@@ -1020,6 +1020,19 @@ Conventions & gotchas:
        error que `email-shell.test.ts` ya documenta con el logo ("probaba la implementación, no
        lo que el cliente de correo necesita"). Ahora la condición mira el concepto en pantalla
        y la conducta se mide MONTANDO el componente.
+    4. **El scroll del deep link se disparaba UNA vez y llegaba demasiado pronto.** Medido con
+       el enlace del correo: la fila aparece a los ~375 ms midiendo 152 px, se llama
+       `scrollIntoView`, y `scrollY` se queda en **0** — con el panel cerrado el documento
+       apenas pasa el alto de la ventana, así que no hay a dónde scrollear. Un segundo después
+       el panel se abre solo, la fila pasa a 716 px, el documento a 1473, y quedaban **549 px**
+       de scroll que nadie volvía a pedir: la fila resaltada abajo del pliegue y la pregunta
+       fuera de la vista. Ahora se RE-AFIRMA mientras la fila crezca (`ResizeObserver`) y se
+       deja de insistir cuando deja de crecer o si el cliente scrollea por su cuenta —
+       arrebatarle la pantalla a quien decidió mirar otra cosa es peor que no hacer scroll.
+       ⚠️ El test de ese eslabón afirmaba `MutationObserver` + `scrollIntoView` en la fuente y
+       **pasaba en verde con el scroll roto**: esperar a que la fila EXISTA no es lo mismo que
+       llegar cuando hay layout. La conducta la mide `deep-link-scroll.test.tsx`, que monta la
+       pantalla y hace crecer la fila.
     La lección de método: **una tarjeta nueva dentro de una tabla existente hereda reglas de
     layout que su propio render no ve**, y el precio se paga en el navegador del cliente. Los
     dos quedan fijados en `tarjeta-guiada.test.tsx`, comprobados por mutación; el del ajuste de
