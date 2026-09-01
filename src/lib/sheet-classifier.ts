@@ -1,3 +1,4 @@
+import { esRenglonDeTotal } from './sheet-unpivot';
 /**
  * Decide POR REGLA, leyendo los encabezados, si una hoja contiene movimientos financieros.
  *
@@ -609,7 +610,44 @@ export function noPuedeProducirMovimientos(
   leerFecha: (v: unknown, orden?: 'dmy' | 'mdy') => unknown,
   leerNumero: (v: unknown) => unknown,
 ): boolean {
-  const muestra = rows.slice(1, 60);
+  const encabezado = rows[0] ?? [];
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * EL RENGLÓN DE TOTAL Y EL PIE DE PÁGINA NO CUENTAN EN CONTRA (2026-09-01)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Este filtro exige que el 80 % de una columna se lea como fechas. Las dos suciedades más
+   * comunes de un Excel hecho a mano —un renglón de `TOTAL` al final y un pie de página de
+   * tres celdas— no traen fecha, así que **restan cobertura** y pueden empujar a una hoja
+   * legítima por debajo del umbral. Y este filtro corre ANTES del modelo: cuando descarta, la
+   * hoja entera desaparece sin dejar una sola fila que alguien pueda revisar, que es el fallo
+   * más caro de esta casa.
+   *
+   * Medido con `libro-el-infierno`: `Ventas` con ocho movimientos buenos escritos en cuatro
+   * formatos de fecha distintos, más una fecha imposible, un `TOTAL` y un pie de página,
+   * quedaba en 9/12 = 75 % y se descartaba ENTERA — ocho ventas reales y su costo.
+   *
+   * El resto del pipeline ya tolera las dos: el modelo declara `skip` sobre un TOTAL y
+   * `sheet-header` sabe que un pie de página no es un encabezado. Lo que faltaba era que este
+   * filtro no las contara como evidencia EN CONTRA. `esRenglonDeTotal` se consume de
+   * `sheet-unpivot` en vez de reescribirse: si los dos juzgaran distinto qué es un total, la
+   * misma fila se excluiría de un lado y no del otro.
+   *
+   * ⚠️ Solo se excluyen del DENOMINADOR. No se descartan ni se marcan acá — eso lo decide
+   * `staging-rules` con toda la fila delante.
+   */
+  const esSuciedad = (f: unknown[]): boolean => {
+    const primera = f.find((c) => c !== null && c !== undefined && c !== '');
+    if (typeof primera === 'string' && esRenglonDeTotal(primera)) return true;
+    // Un pie de página rotula la hoja, no la tabla: ocupa mucho menos que el encabezado.
+    const llenas = f.filter((c) => c !== null && c !== undefined && c !== '').length;
+    const anchoEncabezado = encabezado.filter(
+      (c) => c !== null && c !== undefined && c !== '',
+    ).length;
+    return anchoEncabezado >= 4 && llenas > 0 && llenas <= anchoEncabezado / 2;
+  };
+
+  const muestra = rows.slice(1, 60).filter((f) => !esSuciedad(f));
   // Con muy pocas filas no se puede afirmar nada: una hoja chica se manda igual.
   if (muestra.length < 5) return false;
 

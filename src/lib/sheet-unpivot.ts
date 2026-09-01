@@ -152,6 +152,40 @@ const PALABRAS_DE_AGREGADO = [
   'ending balance', 'opening balance', 'cash flow',
 ]; // prettier-ignore
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * SEXTA GUARDA: UN PRESUPUESTO ES UN PLAN, NO CONTABILIDAD (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Una hoja de presupuesto tiene EXACTAMENTE la misma forma que la matriz de gastos que este
+ * módulo existe para rescatar: concepto a la izquierda, un período por columna, todo en
+ * positivo. Y pasa las cinco guardas anteriores sin despeinarse — sus renglones no llevan
+ * vocabulario de agregado, sus conceptos no aparecen en ninguna hoja de detalle (son
+ * proyecciones, no ocurrieron), y no hay identidad aritmética entre ellos.
+ *
+ * Medido con `libro-el-infierno`: `Presupuesto` con `Ventas proyectadas · Compras proyectadas ·
+ * Gastos proyectados` por trimestre se despivotó en **12 movimientos** y metió al dashboard
+ * dinero que nadie cobró ni pagó. Es el peor tipo de error de este módulo —contar de más— y
+ * encima con cifras redondas y grandes, que son las que más mueven una portada.
+ *
+ * El vocabulario es CERRADO como el de los agregados, y por el mismo motivo: la forma de decir
+ * "esto todavía no pasó" en una hoja contable son cuatro palabras. NO se incluye `plan` —
+ * `Planilla` la contiene y es el gasto más común de una PYME— ni `meta`, que aparece dentro de
+ * `metalurgia` y `metas de venta` a la vez.
+ *
+ * Y basta UN renglón para descalificar la hoja entera, igual que con las líneas de estado: una
+ * matriz que mezcla real y proyectado no se puede partir sin saber cuál columna es cuál.
+ */
+const PALABRAS_DE_PLAN = [
+  'proyectad', 'proyeccion', 'presupuest', 'estimad', 'forecast', 'budget',
+  'proyectado', 'pronostic', 'escenario',
+]; // prettier-ignore
+
+function esLineaDePlan(etiqueta: string): boolean {
+  const t = sinAcentos(etiqueta);
+  return PALABRAS_DE_PLAN.some((p) => t.includes(p));
+}
+
 /** Un renglón de TOTAL. Se excluye del despivotado, no descalifica a la hoja. */
 export function esRenglonDeTotal(etiqueta: string): boolean {
   const t = sinAcentos(etiqueta);
@@ -344,6 +378,9 @@ export function despivotarReporte(
      * en la hoja de detalle que los origina, y quedarse con ellos contaría de más.
      */
     if (esLineaDeEstado(etiqueta)) return null;
+
+    // Sexta guarda: ver `PALABRAS_DE_PLAN`. Un presupuesto tiene la misma forma y no es dinero.
+    if (esLineaDePlan(etiqueta)) return null;
 
     utiles.push({
       etiqueta,
