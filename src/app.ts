@@ -12,6 +12,7 @@ import { adminCreditRules } from '@/modules/admin/credit-rules';
 import { adminCredits } from '@/modules/admin/credits';
 import { adminAlertRules } from '@/modules/admin/alert-rules';
 import { adminMonitoring } from '@/modules/admin/monitoring';
+import { adminReconciliation } from '@/modules/admin/reconciliation';
 import { adminPlans } from '@/modules/admin/plans';
 import { adminDemoRequests } from '@/modules/admin/demo-requests';
 import { publicDemoRequests } from '@/modules/public/demo-requests';
@@ -113,6 +114,7 @@ const adminApi = new Elysia()
   .use(adminCredits)
   .use(adminAlertRules)
   .use(adminMonitoring)
+  .use(adminReconciliation)
   .use(adminPlans)
   .use(adminDemoRequests);
 

@@ -322,4 +322,58 @@ describe('hoja grande y uniforme: se cortocircuita', () => {
     expect(d!.status).toBe('promoted');
     expect(d!.flagged_count).toBe(1);
   });
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * 9-10) EL DIAGNÓSTICO QUEDA ESCRITO, NO EN UN LOG QUE ROTA
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * `lib/cuadre.ts` es lo único del pipeline capaz de detectar un fallo sobre un archivo que
+   * nadie vio nunca — los tests cubren archivos que ya vimos, y ahí estuvo el hueco durante
+   * siete reportes de clientes. Su veredicto iba a `console.warn` y a ningún otro lado, pese a
+   * que su propio encabezado afirmaba que "queda ESCRITO en el resumen de la carga".
+   *
+   * Verificado el 2026-08-31 contra producción: buscando el veredicto de dos cargas que un
+   * cliente acababa de reportar, ya no existía. Railway conserva una ventana corta, no agrega
+   * y no alerta.
+   *
+   * Se afirma sobre el worker REAL y no sobre la función, porque lo que falla no es el cálculo
+   * —eso ya tiene sus tests unitarios— sino que nadie lo guarde.
+   */
+  test('9) el veredicto del cuadre queda guardado en el documento', async () => {
+    const [d] = await owner`select reconciliation from documents where id = ${documentId}`;
+    const r = d!.reconciliation as {
+      verificadoEl: string;
+      cuadra: boolean;
+      documento: unknown[];
+      hojas: { hoja: string; cuadres: { veredicto: string }[] }[];
+    } | null;
+
+    expect(r).not.toBeNull();
+    expect(r!.documento.length).toBeGreaterThan(0);
+    // Y por HOJA, que es lo que el total del documento no puede ver: dos errores de signo
+    // opuesto en dos hojas distintas se cancelan y la carga parece perfecta.
+    expect(r!.hojas.map((h) => h.hoja)).toContain(HOJA);
+    /*
+     * `en_revision` y no `cuadra`, y es lo correcto: esta corrida deja a propósito una fila de
+     * Q 999.999 esperando revisión. Es un veredicto PROPIO justamente para esto — el dinero
+     * está identificado y con dueño, no perdido —, y confundirlo con `falta` haría que el caso
+     * caro se pierda entre decenas del rutinario.
+     */
+    expect(r!.hojas[0]!.cuadres[0]!.veredicto).toBe('en_revision');
+    // Y el documento no se marca como descuadrado por eso: una fila en revisión es normal.
+    expect(r!.cuadra).toBe(true);
+  });
+
+  test('10) cada fila de staging sabe de qué hoja salió', async () => {
+    // Migración 0039. Sin esto el cuadre por hoja no existe, y además la cola de revisión
+    // interna le muestra al operador una fila suelta sin decirle de dónde vino.
+    const [f] = await owner`
+      select count(*)::int as total,
+             count(*) filter (where sheet_name = ${HOJA})::int as con_hoja
+      from staging_rows where document_id = ${documentId}
+    `;
+    expect(f!.total).toBeGreaterThan(0);
+    expect(f!.con_hoja).toBe(f!.total);
+  });
 });

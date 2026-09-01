@@ -365,6 +365,25 @@ export const metricsProducts = new Elysia().use(tenantDerive).get(
             revenueSharePct: t.Number(),
             previousRevenue: t.Number(),
             trend: t.Union([t.Literal('up'), t.Literal('down'), t.Literal('flat')]),
+            /*
+             * ⚠️ FALTABA, y Elysia recorta en silencio lo que el esquema no declara.
+             *
+             * `productPerformance` calcula `costKnown` y su comentario explica por qué es
+             * imprescindible: `cogs` se agrega con `coalesce(..., 0)`, así que un producto al
+             * que nunca se le cargó costo es indistinguible —EN EL NÚMERO— de uno que costó
+             * cero, y los dos salen con 100 % de margen. El campo existe para poder DECIRLO en
+             * vez de esconderlo.
+             *
+             * No estaba en el esquema de respuesta, así que moría en el borde HTTP: la pantalla
+             * de Ventas por producto nunca lo recibió y no tiene cómo distinguir un producto
+             * rentable de uno sin costo cargado. El asesor IA sí lo ve, porque llama a
+             * `productPerformance` directo y no pasa por acá — o sea que el chat y la pantalla
+             * podían contestar distinto sobre el mismo producto.
+             *
+             * Lo encontró el libro `12-la-ceiba.xlsx` pidiendo el endpoint de verdad; ningún
+             * test que consulte la función o la tabla podía verlo.
+             */
+            costKnown: t.Boolean(),
           }),
         ),
       }),

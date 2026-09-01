@@ -1,3 +1,5 @@
+import { asDate } from './row-assembly';
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
  * EL LIBRO DE EXCEL ES UNA BASE DE DATOS MAL NORMALIZADA. ESTO LEE SU ESQUEMA.
@@ -65,8 +67,91 @@ export interface HojaParaComparar {
  * tres valores (`Disponible`/`Vendido`/`Reservado`) se "referenciarían" mutuamente al 100 %.
  * El corte se combina con la exigencia de que la columna destino sea ÚNICA por fila, que es
  * lo que de verdad separa una clave de una etiqueta.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * BAJÓ DE 8 A 4 (2026-08-31), Y EL MOTIVO ES QUE APAGABA LA GUARDA JUSTO EN EL NEGOCIO CHICO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Este número no solo decide relaciones: de él dependen DOS reglas sobre el dinero del
+ * cliente —"una factura cuya venta ya está registrada no vuelve a devengar" y "un cobro no es
+ * una venta nueva"— porque las dos preguntan al esquema del libro si la hoja apunta a otra.
+ * Sin referencia detectada, las dos guardas no llegan a evaluarse.
+ *
+ * Con 8, una hoja de **6 cobros** contra facturas que ya se devengaron volvía a registrar su
+ * ingreso: medido en `libro-la-ceiba.ts`, **+44,9 % de ingreso inventado**. Y esa es
+ * exactamente la contabilidad de una PYME chica —seis recibos en el período es lo normal—,
+ * así que la protección contra contar dos veces estaba apagada para quien menos puede
+ * desmentirlo, y fallaba hacia ARRIBA, que es la dirección que parece una buena noticia.
+ *
+ * ═══ POR QUÉ 4 Y NO MENOS ═══
+ *
+ * El piso está MEDIDO, no elegido. Con 3 se pone en rojo el test que este mismo archivo ya
+ * tenía —"con pocos valores no se afirma nada (el azar alcanza para cubrir)"—, que es la
+ * defensa contra el falso positivo que el párrafo de arriba describe. 4 es el último valor
+ * donde esa defensa sigue en pie.
+ *
+ * ═══ QUÉ SE MIDIÓ ANTES DE TOCARLO ═══
+ *
+ *   · Los 1.151 tests unitarios, incluido el corpus de 19 hojas de archivos reales: sin cambio.
+ *   · Los DIEZ archivos reales de clientes (`~/Downloads/0*_*.xlsx`, los que CLAUDE.md exige
+ *     correr antes de mergear cualquier cambio de ingesta): **veredicto idéntico hoja por
+ *     hoja** entre 8 y 4, comparado con un diff.
+ *
+ * Lo que no cubre este número sigue cubierto por lo de siempre: el destino tiene que ser
+ * ÚNICO por fila y la columna que apunta tiene que tener `CARDINALIDAD_MINIMA` de valores
+ * distintos. El `Estado` de tres valores del ejemplo falla las dos, no ésta.
  */
-const MIN_VALORES_PARA_RELACION = 8;
+const MIN_VALORES_PARA_RELACION = 4;
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * CON MENOS VALORES TODAVÍA, SI LOS VALORES SON CÓDIGOS DE DOCUMENTO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Bajar el mínimo de 8 a 4 arregló la hoja de seis cobros, y el generador de libros encontró
+ * enseguida la siguiente: **una de dos o tres recibos vuelve a registrar su ingreso.** Seguir
+ * bajando el número no es la salida — por debajo de 4 se pone en rojo el test propio de este
+ * módulo contra el falso positivo, y con razón: dos valores que coinciden por azar son
+ * perfectamente posibles.
+ *
+ * Lo que separa los dos casos no es CUÁNTOS valores hay sino QUÉ son. El riesgo que el mínimo
+ * protege es una columna de ETIQUETAS (`Disponible` / `Vendido` / `Reservado`) que se solapa
+ * con otra por casualidad. `FAC-1007` no es una etiqueta: es un código de documento, y que
+ * aparezca idéntico en dos hojas del mismo libro no pasa por azar.
+ *
+ * Así que el mínimo baja a 2 **solo cuando los valores compartidos parecen códigos**. Es una
+ * señal de FORMA, no de vocabulario, así que no hay que mantener una lista y funciona igual en
+ * cualquier rubro y en cualquier idioma — que es la misma razón por la que este módulo decide
+ * por estructura y no por nombre de hoja.
+ *
+ * ⚠️ Sigue exigiéndose todo lo demás: destino ÚNICO por fila, cardinalidad ≥ 0,9 en el origen y
+ * cobertura ≥ 0,9. Esto solo relaja el conteo.
+ */
+const MIN_VALORES_SI_SON_CODIGOS = 2;
+
+/**
+ * ¿Estos valores parecen códigos de documento y no etiquetas?
+ *
+ * Un código de documento real —`FAC-1007`, `OC-0031`, `ORD-00068`, `LOC-00001`, `3VW100020`—
+ * mezcla letras y dígitos, o es un número largo. Una etiqueta —`Contado`, `Vendido`,
+ * `Guatemala`— es una palabra sin dígitos. Se exige que la mayoría cumpla, no todas: un
+ * archivo real trae una fila con el código mal escrito y eso no cambia lo que la columna ES.
+ */
+function parecenCodigos(valores: Set<string>): boolean {
+  let codigos = 0;
+  for (const v of valores) {
+    if (v.length > 32) continue;
+    const tieneDigito = /\d/.test(v);
+    if (!tieneDigito) continue;
+    /*
+     * Un número pelado y CORTO no basta: una columna de cantidades (`3`, `5`, `12`) lo
+     * cumpliría. Se pide o bien una letra o un separador junto al dígito (`FAC-1007`), o bien
+     * un número de al menos cuatro cifras, que ya no es una cantidad de mostrador.
+     */
+    if (/[a-z]/.test(v) || /[-_/.]/.test(v) || /^\d{4,}$/.test(v)) codigos++;
+  }
+  return codigos >= valores.size * 0.8;
+}
 
 /**
  * Qué proporción de los valores de la columna que apunta tiene que existir del otro lado.
@@ -119,6 +204,35 @@ function comoClave(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const limpio = v.trim().toLowerCase();
   if (limpio === '' || limpio.length > LARGO_MAXIMO_DE_CLAVE) return null;
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * UNA FECHA ESCRITA COMO TEXTO NO ES UNA CLAVE (2026-08-31)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * El caso numérico ya estaba cubierto por `ES_SERIAL_DE_FECHA` unas líneas más arriba, con el
+   * motivo escrito: una columna de fechas tiene cardinalidad alta y valores cortos, o sea que
+   * pasa por identificador. Lo que faltaba es que **la mitad de los archivos reales no traen la
+   * fecha como serial**: la traen como `15/07/2026`, como `2026-07-15` o como `15 de julio de
+   * 2026`, que es lo que sale de cualquier libro que pasó por un CSV.
+   *
+   * El daño es el peor de los posibles porque es una PÉRDIDA silenciosa, no un duplicado:
+   * dos hojas cuyas fechas se solapan —que es lo normal, son la contabilidad del mismo
+   * período— se "referencian" mutuamente, el esquema del libro cree que una registra un hecho
+   * que la otra ya contó, y `ventaYaRegistradaEnOtraHoja` **suprime la hoja entera**. Medido
+   * con el generador: `Facturacion → Ventas` por la columna de fecha, cobertura 1,00, y la
+   * facturación completa del cliente desaparece del dashboard. Es el bug de U3TECH (cero
+   * ingresos con la facturación bien leída) entrando por otra puerta.
+   *
+   * `sheet-duplication.ts` ya había aprendido exactamente esto en el sentido contrario —
+   * `tieneColumnaDeFecha` miraba solo `Date` y seriales, así que una hoja con fechas ISO en
+   * texto no contaba como autosuficiente. Misma ceguera, otro módulo.
+   *
+   * Se usa `asDate`, el MISMO lector del pipeline, y no un regex propio: si algún día el
+   * producto aprende a leer un formato nuevo de fecha, esta guarda tiene que aprenderlo el
+   * mismo día. Dos definiciones de "esto es una fecha" que se separan vuelven a abrir el
+   * agujero sin que nada falle.
+   */
+  if (asDate(v) !== null) return null;
   return limpio;
 }
 
@@ -158,7 +272,11 @@ function columnasClave(rows: unknown[][]): ColumnaClave[] {
 
     // Una columna medio vacía no es la clave de nada.
     if (presentes < datos.length * COBERTURA_MINIMA) continue;
-    if (valores.size < MIN_VALORES_PARA_RELACION) continue;
+    // Ver `MIN_VALORES_SI_SON_CODIGOS`: el mínimo depende de QUÉ son los valores, no solo de
+    // cuántos. Una hoja de tres recibos que nombran su factura es evidencia; tres etiquetas
+    // que coinciden, no.
+    const minimo = parecenCodigos(valores) ? MIN_VALORES_SI_SON_CODIGOS : MIN_VALORES_PARA_RELACION;
+    if (valores.size < minimo) continue;
     if (valores.size < presentes * CARDINALIDAD_MINIMA) continue;
 
     out.push({ indice: c, valores, presentes, unica: valores.size === presentes });

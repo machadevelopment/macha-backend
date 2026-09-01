@@ -806,6 +806,86 @@ Conventions & gotchas:
     que el cliente esperaba ver.
   - **Por moneda y nunca sumado**: un dólar contado como quetzal subestima ~7,7 veces, así que
     un total mezclado escondería justo el tipo de error que esto busca.
+- **EL CUADRE ES POR HOJA, Y SU VEREDICTO SE GUARDA** (2026-08-31, migraciones `0039` y `0040`).
+  Tres cambios que atacan la misma raíz: **el pipeline se equivoca en silencio y nadie se
+  entera hasta que un cliente lo reporta.**
+  - **Cada descarte declara SU DINERO** (`lib/sheet-money.ts`). Los cinco puntos donde el
+    worker descarta una hoja registraban `filas: rows.length` y **ninguno el monto**: el
+    sistema podía decir "descarté 220 filas" y no "descarté Q 2.707.318". Cada bug de ingesta
+    de estos meses fue una exclusión o una inclusión equivocada, y el dinero es lo único que
+    las vuelve evidentes de un vistazo — para el dueño, que es quien puede desmentirlas, y para
+    nosotros, que así podemos ordenar por riesgo. Medido sobre los diez archivos reales:
+    `LineasOrdenCompra[duplica] Q 510.691` en la ferretería, `ResumenGerencial[reporte]
+    Q 100.256` en el hotel. ⚠️ Es una ESTIMACIÓN por encabezados y magnitudes —esa hoja nunca
+    tuvo mapa del modelo— y **no alimenta el ledger**: explica y ranquea, nunca contabiliza.
+  - **El cuadre se hace POR HOJA** (`evaluarCuadrePorHoja`), no solo por documento. Sumando el
+    libro entero, **una hoja que aterriza el DOBLE y otra que aterriza CERO cuadran perfecto**:
+    los dos errores se cancelan y la razón da 1,00 exacto. Esa es la forma de KapePrueba (dos
+    hojas de detalle perdidas + una cartera inventando ingresos) y la de CarsGT (cobros
+    devengando de nuevo + stock como costo). Se compara contra `staging_rows` y no contra el
+    ledger porque `transactions` guarda `document_id` y no `sheet_name` — de ahí la migración
+    `0039` — y porque staging conserva la moneda ORIGINAL, sin el ruido de la conversión. La
+    expansión se calcula **por hoja**: una de facturación expande 2× y una de gastos 1×, y el
+    promedio del libro daría una banda demasiado ancha para una y demasiado angosta para la
+    otra.
+  - **El veredicto se PERSISTE** (`documents.reconciliation`, migración `0040`) y hay cola en
+    `/admin/reconciliation`. El encabezado de `cuadre.ts` afirmaba que "un descuadre queda
+    ESCRITO en el resumen de la carga" y **era falso**: iba a `console.warn`, y verificado
+    contra producción el 2026-08-31, el veredicto de dos cargas recién reportadas por el
+    cliente **ya no existía** — Railway conserva una ventana corta, no agrega y no alerta. Es
+    el mismo error que `read-summary.ts` documenta haber corregido para los datos de lectura
+    ("hoy va a console.info y rota con los logs de Railway"): la lección estaba aprendida en un
+    módulo y sin aplicar en el que más la necesitaba.
+- **FUZZER DE LIBROS: 300 permutaciones con verdad de campo, en `bun test`**
+  (`lib/hostiles/fuzz.ts` + `lib/hostiles-fuzz.test.ts`, 2026-08-31). Los libros escritos a
+  mano cubren lo que YA conocemos; los fallos de esta ingesta viven en la **combinación** de
+  doce filtros por cada forma de libro, y ese espacio no se escribe a mano. Se permutan formato
+  de fecha (serial · `DD/MM` · ISO · mes en palabras · `MM/DD`), líneas de título, cantidad de
+  filas, egresos en negativo, costo en la línea, renglón de TOTAL, consolidado propio,
+  cabecera+detalle, catálogo, inventario, matriz de gastos, facturación+cobros y hoja basura.
+  Semilla explícita y nunca `Math.random()`: un fallo se reproduce con `generarLibro(N)`.
+  **La primera corrida dio 120 libros rotos de 200 y destapó tres defectos preexistentes**, los
+  tres pérdidas o duplicaciones silenciosas que ningún cliente había reportado:
+  1. **Una fecha escrita como TEXTO se usaba de clave foránea** (`sheet-relations.comoClave`).
+     `ES_SERIAL_DE_FECHA` cubría el caso numérico, pero medio archivo real trae la fecha como
+     `15/07/2026` o `15 de julio de 2026` — lo que sale de cualquier libro que pasó por un CSV.
+     Dos hojas del mismo período se "referenciaban" por su fecha, el esquema creía que una
+     repetía un hecho ya contado y `ventaYaRegistradaEnOtraHoja` **suprimía la hoja entera**. Es
+     el bug de U3TECH (cero ingresos con la facturación bien leída) por otra puerta. Un solo
+     cambio: 80 → 162 libros exactos.
+  2. **La misma ceguera en el dedup** (`sheet-duplication`). `aNumero` es lenient a propósito
+     —tiene que leer `Q 1,234.50`— así que convierte `01/04/2026` en **1042026**, muy por
+     encima del rango de un serial. Dos hojas del mismo período sumaban ~14 M cada una y
+     quedaban dentro del 1 %: una se descartaba con todo su dinero (−Q 63.871 medidos).
+  3. **Columnas de IDENTIFICADOR contadas como dinero**, en el mismo dedup: `FAC-1000` valía
+     mil, `Cliente 3` valía tres. Con cinco columnas espurias por hoja, un empate del 1 % por
+     azar deja de ser raro y el precio del empate es descartar una hoja entera. Ahora una celda
+     es cifra solo si, quitados los símbolos de moneda, no queda más que dígitos y separadores.
+  Estado: **289/300 exactos**. Los 11 restantes son UN hueco conocido y fijado: un consolidado
+  propio de **menos de 6 meses** vuelve a contar su ingreso, porque la señal de resumen por
+  período (`sheet-shape` 6-bis) exige 6 meses distintos y el dedup exige 8 filas. No se afloja:
+  `sheet-shape` ya razona que "una hoja de cinco filas no se toca", y perder contabilidad en
+  silencio es peor que mostrar de más. Medido: bajar el piso del dedup de 8 a 4 **no arregla
+  ninguno**.
+- **`MIN_VALORES_PARA_RELACION` bajó de 8 a 4, y a 2 si los valores son CÓDIGOS**
+  (`sheet-relations`, 2026-08-31). De ese número dependen dos reglas sobre el dinero —"la
+  factura no devenga si su venta ya está registrada" y "un cobro no es una venta nueva"—: sin
+  referencia detectada, ninguna llega a evaluarse. Con 8, una hoja de **seis cobros** contra
+  facturas ya devengadas volvía a registrar su ingreso: **+44,9 % medido**. Seis recibos es la
+  contabilidad normal de una PYME chica, así que la guarda estaba apagada para quien menos
+  puede desmentirla y fallaba **hacia arriba**, la dirección que parece una buena noticia.
+  El piso de 4 está MEDIDO (con 3 se pone en rojo el test propio del módulo contra el falso
+  positivo), y por debajo solo se baja cuando los valores compartidos **parecen códigos de
+  documento** (mezclan letras y dígitos, o son números de 4+ cifras): `FAC-1007` no es una
+  etiqueta y coincidir en dos hojas del mismo libro no le pasa por azar. Verificado contra los
+  **diez archivos reales de clientes**: veredicto idéntico hoja por hoja.
+- **`costounitario` salió de la firma `existencias`** (`sheet-classifier`, 2026-08-31). Mismo
+  caso que cerró `preciounitario` el 2026-08-30, por la otra puerta y más común: una línea de
+  ORDEN DE COMPRA no lleva precio de venta, lleva costo. `LineasOC` cumplía la firma entera,
+  metía 48 artículos inventados en el inventario del cliente **y la sacaba de `vivas`**, así que
+  el dedup cabecera/detalle —que existe exactamente para ese par— nunca llegaba a verla. Los dos
+  inventarios de mostrador que motivaron la firma siguen entrando por `Precio Lista` /
+  `Precio Venta`, que es lo que de verdad los separa de una compra.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
@@ -837,6 +917,30 @@ Conventions & gotchas:
   - **El dato de apoyo de la tarjeta**: cifra exacta, frase de ayuda y "vs mes anterior" iban en `body` (14px/1.5) donde el prototipo usa 10px con interlínea apretada. Tres líneas de 21px contra 13px, más el chip del delta en su propia fila, dejaban la tarjeta en ~258px contra ~152px. Tokens nuevos: `micro` (10px) y `delta` (12px).
   - **El título de pantalla**: el panel seguía en `text-h1 font-normal` (27px/400) — más grande Y más delgado que el prototipo (24px/600), o sea que ocupaba más y mandaba menos. `pagetitle` (20px/600) se había creado cinco semanas antes en CU-868kt8bg0 **con la nota escrita de que el dashboard ya no usa `h1`**, y el dashboard siguió usándolo. Por eso ahora hay test (`styles/densidad-prototipo.test.ts`) y no solo un comentario: el comentario ya falló una vez.
   Pendiente y NO hecho acá: el rail derecho del panel. En el prototipo trae tres consejos con contenido real (una cobranza vencida con monto y días de mora, una oportunidad de venta con su valor, el net burn del mes); en el nuestro es un texto que explica lo que el producto *haría* más dos alertas del mismo tipo repetidas. Eso no es escala, es contenido, y probablemente pesa más en la sensación de "no se asimilan" que cualquier píxel.
+- **`costKnown` faltaba en el esquema de respuesta de `/metrics/products`** (2026-08-31).
+  Elysia recorta en silencio lo que el esquema no declara. `productPerformance` calcula ese
+  campo y documenta por qué es imprescindible —`cogs` se agrega con `coalesce(..., 0)`, así que
+  un producto SIN costo cargado es indistinguible en el número de uno que costó cero, y los dos
+  salen con 100 % de margen— y el campo **moría en el borde HTTP**: la pantalla de Ventas por
+  producto nunca lo recibió. El asesor IA sí lo ve, porque llama a la función directo, o sea que
+  **el chat y la pantalla podían contestar distinto sobre el mismo producto**. Solo se ve
+  pidiendo el ENDPOINT; ningún test que consulte la función o la tabla podía verlo. Pendiente
+  del lado del frontend: consumirlo y pintar el aviso.
+- **El texto del banner de ingesta contradecía la promoción parcial, tres semanas**
+  (`ingest-status-banner`, corregido 2026-08-31). Decía *"Nada entra a tus reportes hasta que la
+  carga completa esté revisada"* y desde la migración `0020` —promoción PARCIAL, decisión de
+  Keneth del 2026-08-07— **las filas limpias entran solas**. El comentario del propio componente
+  seguía describiendo la atomicidad vieja. No es redacción: el correo de confirmación que se está
+  construyendo dice —bien— que "el resto de tus datos ya está en tu dashboard", así que los dos
+  mensajes se contradicen sobre la misma carga con minutos de diferencia. Y el texto además
+  decía que las filas "necesitan que **las revisemos**", cuando desde el acuerdo con Semi
+  (2026-08-20) las contesta el CLIENTE. Corregido en ES y EN.
+- **El resumen de lectura muestra el DINERO de cada descarte**, no solo las filas
+  (`read-summary`, 2026-08-31), y el descarte por "no hay fecha con dinero al lado" dejó de
+  reportarse como `catalogo`. Ese motivo afirma que la hoja *"describe tus clientes, productos o
+  proveedores"* —algo sobre el CONTENIDO que no sabemos—; cuando la explicación no le calza a lo
+  que el dueño tiene delante, deja de creerle al resumen entero, que es la única herramienta con
+  la que puede desmentirnos. Motivo nuevo: `sin_fecha_ni_monto`.
 - **La cifra de KPI se ENCOGE antes que cortarse** (CU-868ku6r48, 2026-08-19). `truncate` sobre una cifra financiera no recorta: **miente**. Si lo que se pierde es la `K`, `GTQ 389.9K` se lee como trescientos ochenta y nueve quetzales donde hay trescientos ochenta y nueve mil — un factor de mil, en la cifra principal del dashboard, sin que nada falle. Ahora `escalaDeCifra()` baja a `kpi-sm` (20px) o `kpi-xs` (17px) según el largo de la cadena, y `truncate` queda como última red. **El tamaño se decide por longitud de cadena y NO midiendo el DOM**: la tarjeta se pinta en el servidor, así que un `ResizeObserver` haría que la primera pintura saliera con el tamaño equivocado y saltara al hidratar, en cada carga.
 - **El Consejo Financiero Diario lleva severidad y acción** (CU-868ku6r48). El esquema de la herramienta `emit_insights` (backend, `lib/anthropic.ts`) pide `severity` (`critical`/`warning`/`info`, obligatoria) y `action` (opcional). **Va en el esquema y no en el prompt** porque el prompt de insights es editable por un super_admin desde `platform_settings`: una regla escrita en el template no llega a producción. La severidad se pinta con `Badge` —chip con fondo y borde— y no como texto de color: acá no hay flecha que sirva de canal redundante, a diferencia del delta de un KPI. `info` va en `neutral` a propósito, para no gastar la señal que `critical` necesita. Los consejos se ordenan por urgencia antes de pintarse: el backend no garantiza orden y el panel vive en el rail derecho, donde lo que queda abajo no se lee. Un consejo sin `severity` (los guardados antes de este ticket en el ledger `insight_requests`) se trata como `info` — no se puede afirmar que algo urge cuando nadie lo evaluó.
 - **Regla de los DOS VERDES** (CU-868knx0vh, aprobada por Jose 2026-08-11). El color sigue sin decorar, pero ahora hay dos verdes con roles que no se pisan. **Verde de marca** (salvia `#A0AF9A` + gradiente, token `brand`): dice "esto es Macha" — Insight Point, acentos, pantallas de vitrina, cabecera de reportes. **Verde funcional** (`#16A34A`, token `success`): dice "este dato va bien" — deltas, chips, series. Rojo funcional para lo negativo. **Prueba de fuego: si el color dice "va bien o mal" es funcional; si dice "esto es Macha" es salvia.** Nunca el mismo tono para ambos, y el salvia **nunca sobre un dato**. El color de estado nunca aparece SOLO. **Matizado en CU-868ktknbq (2026-08-19): texto+fondo+borde era UNA forma de cumplirlo, no la única.** Lo que la regla protege es que el estado no dependa únicamente del color —quien no distingue verde de rojo tiene que poder leerlo igual—, así que basta cualquier canal redundante. El delta de una tarjeta de KPI lo cumple con la FLECHA (↗ ↘) y por eso ya va sin caja (`DeltaBadge presentation="inline"`): el chip se llevaba una fila entera de cada tarjeta. **El chip sigue siendo el default y sigue siendo obligatorio donde no hay flecha** — un rótulo de estado a secas (`key-alerts-card`) no tiene otro canal que el fondo y el borde. Hay test que lo fija (`styles/densidad-prototipo.test.ts`): si alguien quita la flecha del delta en línea, falla.

@@ -143,8 +143,8 @@ const SINONIMOS: Record<keyof ColumnMap, string[]> = {
    * de KapePrueba. Si el doble fuera más torpe que el modelo de verdad, este test se pondría
    * verde por una incapacidad del doble y el bug seguiría vivo en producción.
    */
-  date: ['fecha', 'fechadepago', 'fechaemision', 'fechadeemision', 'fechafactura', 'fechamovimiento', 'dia', 'date', 'ultimacompra', 'fechaingreso'], // prettier-ignore
-  amount: ['monto', 'ventaneta', 'total', 'importe', 'valor', 'montoq', 'amount', 'montototal', 'preciototal', 'debe', 'saldo', 'saldoxcobrar', 'saldoporcobrar', 'ventanetaacumulada', 'costoadquisicion'], // prettier-ignore
+  date: ['fecha', 'fechadepago', 'fechaemision', 'fechadeemision', 'fechafactura', 'fechamovimiento', 'dia', 'date', 'ultimacompra', 'fechaingreso', 'mes'], // prettier-ignore
+  amount: ['monto', 'ventaneta', 'total', 'importe', 'valor', 'montoq', 'amount', 'montototal', 'preciototal', 'debe', 'saldo', 'saldoxcobrar', 'saldoporcobrar', 'ventanetaacumulada', 'costoadquisicion', 'totallinea', 'totalventas'], // prettier-ignore
   currency: ['moneda', 'divisa', 'currency'],
   description: ['descripcion', 'concepto', 'detalle', 'glosa'],
   counterparty: ['cliente', 'proveedor', 'colaborador', 'contraparte', 'razonsocial', 'empleado'], // prettier-ignore
