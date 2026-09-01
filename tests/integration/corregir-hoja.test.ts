@@ -282,6 +282,21 @@ describe('POST /documents/:id/cancel sobre una carga esperando confirmación', (
     expect(publicar.status).not.toBe(500);
   });
 
+  test('`review` también se descarta: tampoco publicó nada', async () => {
+    /*
+     * El caso hermano, y el que estaba abierto en producción: `review` significa que no se
+     * promovió NADA —el archivo entero llegó marcado— así que tampoco hay filas en el dashboard
+     * que borrar. Una carga de KapePrueba llevaba cuatro días ahí sin forma de sacarla.
+     */
+    const doc = await crearCarga('toda-marcada.xlsx');
+    await owner`update documents set status = 'review' where id = ${doc}`;
+
+    const res = await pedir(`/${doc}/cancel`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const [d] = await owner`select status from documents where id = ${doc}`;
+    expect(d!.status).toBe('cancelled');
+  });
+
   test('una carga YA publicada sigue diciendo que use «revertir»', async () => {
     /*
      * La otra mitad, y es la que hace segura a la primera: cancelar una `promoted` no desharía

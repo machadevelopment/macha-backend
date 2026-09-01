@@ -301,7 +301,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      * malentendido detrás de un 200 — y sobre todo, cancelar una `promoted` no desharía sus
      * filas: para eso está `revert`, y el mensaje lo dice para que nadie use una por la otra.
      *
-     * ⚠️ `awaiting_confirmation` ENTRA, y sin eso el portón (0042) dejaba cargas trabadas SIN
+     * ⚠️ `awaiting_confirmation` y `review` ENTRAN, y sin eso el portón (0042) dejaba cargas SIN
      * SALIDA (verificado en producción 2026-09-01: tres cargas de la empresa `test` que el
      * cliente no podía sacarse de encima, con `cancel` devolviendo 409). No tocan el
      * dashboard —el portón las retiene— pero se quedan en su lista para siempre pidiéndole una
@@ -315,8 +315,16 @@ export const ingestion = new Elysia({ prefix: '/documents' })
      *
      * Es la forma exacta que el portón vino a crear: reintroduce el "trámite bloqueante" que la
      * migración 0020 eliminó, pero sobre la carga entera. Cancelar es la puerta de salida.
+     *
+     * `review` va por el MISMO motivo y es el caso hermano: significa que no se promovió NADA
+     * —el archivo entero llegó marcado— así que tampoco hay filas en el dashboard que borrar.
+     * Verificado: una carga de KapePrueba llevaba cuatro días ahí sin forma de sacarla.
+     *
+     * `promoted` NO entra aunque tenga filas retenidas, y esa es la línea: ahí sí hay datos
+     * publicados, y cancelar los dejaría en el ledger. Para eso está `revert`, y el mensaje del
+     * 409 lo nombra para que nadie use una por la otra.
      */
-    const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation'];
+    const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation', 'review'];
     if (!CANCELABLES.includes(doc.status)) {
       set.status = 409;
       return {
