@@ -27,7 +27,7 @@ import {
 // Una sola definición de "esto lo puede contestar el cliente", compartida con el worker que
 // manda el correo: si el conteo del correo y la lista de esta pantalla se separan, el producto
 // promete un número de preguntas y muestra otro.
-import { esArreglablePorCategoria } from '@/lib/conceptos-pendientes';
+import { esArreglablePorCategoria, quedaLimpiaAlContestar } from '@/lib/conceptos-pendientes';
 
 const ALLOWED_MIME_EXT: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -626,6 +626,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
     for (const f of filas) {
       if (!esArreglablePorCategoria(f.flagReason)) continue;
+      /*
+       * Y además tiene que quedar LISTA con la respuesta. `evaluateFlagReason` devuelve
+       * `low_confidence` antes de mirar fecha, monto y moneda, así que una fila con un
+       * problema de dato se presenta como contestable con su problema real escondido detrás.
+       * Preguntarla es pedirle al cliente una respuesta que no cambia nada — y peor, dejarle
+       * la impresión de que lo resolvió. Ver `quedaLimpiaAlContestar`.
+       */
+      if (!quedaLimpiaAlContestar(f)) continue;
       const p = f.payload as {
         description?: unknown;
         product?: unknown;
@@ -780,6 +788,15 @@ export const ingestion = new Elysia({ prefix: '/documents' })
 
       for (const fila of pendientes) {
         if (!esArreglablePorCategoria(fila.flagReason)) continue;
+        /*
+         * ⚠️ Y NO SE LIMPIA UNA MARCA QUE SOBREVIVE A LA RESPUESTA. Medido en producción con
+         * `libro-el-infierno`: una venta en EUR llegó con confianza baja, se ofreció como
+         * concepto, el cliente la contestó, la marca se limpió — y al promover `resolveFxRate`
+         * no encontró tasa para EUR y LANZÓ. La promoción es UNA transacción, así que se cayó
+         * la de las otras 17 filas resueltas: el cliente contestó 18 cosas, vio los conceptos
+         * vaciarse, y no aterrizó ni una. Sin error en ninguna parte.
+         */
+        if (!quedaLimpiaAlContestar(fila)) continue;
         const p = fila.payload as Record<string, unknown>;
         /*
          * EL MISMO criterio que usa el GET, y tiene que serlo: si acá se buscara solo por

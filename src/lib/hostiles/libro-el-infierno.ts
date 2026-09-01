@@ -76,7 +76,21 @@ const MESES_ES = [
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
 ]; // prettier-ignore
 
-export function libroElInfierno(): LibroHostil {
+/**
+ * `escala` multiplica todos los montos. Existe para poder subir el MISMO libro dos veces a una
+ * empresa real sin que la huella por fila (`ingested_rows`) lo reconozca como ya ingerido — que
+ * es la conducta correcta y por eso no se puede desactivar. No cambia ninguna decisión del
+ * pipeline: las proporciones, las formas y los empates se conservan.
+ */
+export function libroElInfierno(serie = ''): LibroHostil {
+  /*
+   * `serie` se pega a los CÓDIGOS de documento (`OV-`, `OC-`, `FAC-`, `REC-`, `LOC-`). Existe
+   * para poder subir este mismo libro dos veces a una empresa real sin que la huella por fila
+   * (`ingested_rows`) lo reconozca como ya ingerido — que es la conducta correcta y por eso no
+   * se desactiva. No mueve un centavo ni rompe las referencias entre hojas: los códigos siguen
+   * siendo consistentes entre `Facturacion` y `Cobros`, y entre `OrdenesCompra` y `LineasOC`.
+   */
+  const cod = (c: string) => `${c}${serie}`;
   const { v, mas } = contador();
   const hojas: [string, unknown[][]][] = [];
 
@@ -117,7 +131,7 @@ export function libroElInfierno(): LibroHostil {
   const montoDe = (m: unknown) => (typeof m === 'number' ? m : VALOR[String(m)]!);
 
   for (const b of BUENAS) {
-    ventas.push([b.f, `OV-${1000 + ventas.length}`, b.t, b.c, b.p, 'GTQ', b.m, b.k]);
+    ventas.push([b.f, cod(`OV-${1000 + ventas.length}`), b.t, b.c, b.p, 'GTQ', b.m, b.k]);
     mas('revenue', montoDe(b.m));
     mas('cogs', b.k); // El costo en la línea produce su propia transacción.
   }
@@ -125,7 +139,7 @@ export function libroElInfierno(): LibroHostil {
   // NO aterrizan, y cada una por un motivo distinto:
   ventas.push([
     serial('2026-06-25'),
-    'OV-9001',
+    cod('OV-9001'),
     'TDA-01',
     'Cliente 9',
     'Aceite 1 L',
@@ -133,7 +147,16 @@ export function libroElInfierno(): LibroHostil {
     220,
     130,
   ]);
-  ventas.push(['2026-02-31', 'OV-9002', 'TDA-01', 'Cliente 8', 'Harina 5 lb', 'GTQ', 500, 300]);
+  ventas.push([
+    '2026-02-31',
+    cod('OV-9002'),
+    'TDA-01',
+    'Cliente 8',
+    'Harina 5 lb',
+    'GTQ',
+    500,
+    300,
+  ]);
   ventas.push(['TOTAL', '', '', '', '', 'GTQ', 13_416, 8_265]);
   // Pie de página: tres celdas que "cubren" la tabla y compiten con el encabezado real.
   ventas.push([2026, 6, 'Hoja 1 de 1']);
@@ -230,7 +253,7 @@ export function libroElInfierno(): LibroHostil {
   ];
   let totalOC = 0;
   for (let i = 0; i < 12; i++) {
-    const id = `OC-${2000 + i}`;
+    const id = cod(`OC-${2000 + i}`);
     const monto = r2(3_150 + i * 187.4);
     const mes = (i % 6) + 1;
     ordenes.push([
@@ -242,7 +265,7 @@ export function libroElInfierno(): LibroHostil {
     const parte = r2(monto / 4);
     for (let k = 0; k < 4; k++) {
       const m = k === 3 ? r2(monto - parte * 3) : parte;
-      lineas.push([`LOC-${i}-${k}`, id, `ABR-000${(k % 2) + 1}`, 10 + k, r2(m / (10 + k)), m]);
+      lineas.push([cod(`LOC-${i}-${k}`), id, `ABR-000${(k % 2) + 1}`, 10 + k, r2(m / (10 + k)), m]);
     }
   }
   // Su costo entra cuando el cliente contesta que es mercadería. Ver `marcadas`.
@@ -295,7 +318,7 @@ export function libroElInfierno(): LibroHostil {
   for (let i = 0; i < 8; i++) {
     const monto = 900 + i * 65;
     facturas.push([
-      `FAC-${500 + i}`, serial(`2026-0${(i % 6) + 1}-0${(i % 8) + 1}`), `Cliente ${(i % 5) + 1}`,
+      cod(`FAC-${500 + i}`), serial(`2026-0${(i % 6) + 1}-0${(i % 8) + 1}`), `Cliente ${(i % 5) + 1}`,
       'USD', monto, serial(`2026-0${Math.min((i % 6) + 2, 9)}-0${(i % 8) + 1}`),
     ]); // prettier-ignore
     mas('revenue', r2(monto * TASA_USD));
@@ -308,7 +331,7 @@ export function libroElInfierno(): LibroHostil {
   ];
   for (let i = 0; i < 6; i++) {
     cobros.push([
-      `REC-${900 + i}`, serial(`2026-0${(i % 6) + 2}-2${(i % 8) + 1}`), `FAC-${500 + i}`,
+      cod(`REC-${900 + i}`), serial(`2026-0${(i % 6) + 2}-2${(i % 8) + 1}`), cod(`FAC-${500 + i}`),
       `Cliente ${(i % 5) + 1}`, 900 + i * 65, 'USD',
     ]); // prettier-ignore
   }

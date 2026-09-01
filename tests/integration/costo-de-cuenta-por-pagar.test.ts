@@ -195,3 +195,103 @@ describe('contestar una cuenta por pagar produce su costo', () => {
     expect(total).toBeCloseTo(TOTAL, 2);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UNA FILA QUE LA RESPUESTA NO ARREGLA NO PUEDE TUMBAR A LAS DEMÁS (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * MEDIDO EN PRODUCCIÓN con `libro-el-infierno`: una venta en EUR —moneda que no manejamos,
+ * conservada a propósito para que se marque— llegó con confianza baja, así que
+ * `evaluateFlagReason` devolvió `low_confidence` ANTES de mirar la moneda y su problema real
+ * quedó escondido. Se ofreció como concepto, el cliente la contestó, y la respuesta le limpió
+ * la marca. Al promover, `resolveFxRate` no encontró tasa para EUR y **lanzó**: la promoción
+ * es UNA transacción, así que se cayó la de las otras 17 filas resueltas.
+ *
+ * El cliente vio los conceptos vaciarse, el dashboard sin moverse y ningún error en ninguna
+ * parte. Contestó 18 cosas y no aterrizó ni una — que es exactamente el fallo que toda esta
+ * pantalla existe para eliminar.
+ */
+describe('la fila que no se arregla contestando no se ofrece ni se desmarca', () => {
+  const SUF = randomUUID().slice(0, 8);
+  let docId: string;
+
+  test('preparar: una cuenta por pagar sana y una venta en EUR, las dos con confianza baja', async () => {
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status, row_count, flagged_count)
+      values (${companyId}, ${userId}, ${`${companyId}/eur-${SUF}.xlsx`}, ${`eur-${SUF}.xlsx`},
+              100, 'application/vnd.ms-excel', 'promoted', 2, 2) returning id
+    `;
+    docId = d!.id;
+
+    await owner`
+      insert into staging_rows (company_id, document_id, target_entity, payload, confidence,
+                                flag_reason, review_status, sheet_name)
+      values (${companyId}, ${docId}, 'bill', ${owner.json({
+        counterparty: 'Proveedor Sano',
+        issueDate: '2026-04-15',
+        dueDate: '2026-05-15',
+        originalAmount: 4200,
+        originalCurrency: 'GTQ',
+      })}, 0.40, 'low_confidence:0.40', 'pending', 'OrdenesCompra')
+    `;
+
+    // La venta en EUR: su motivo VISIBLE es la confianza, y el real es la moneda.
+    await owner`
+      insert into staging_rows (company_id, document_id, target_entity, payload, confidence,
+                                flag_reason, review_status, sheet_name)
+      values (${companyId}, ${docId}, 'transaction', ${owner.json({
+        type: 'revenue',
+        category: null,
+        date: '2026-04-20',
+        description: 'Venta en euros',
+        originalAmount: 220,
+        originalCurrency: 'EUR',
+      })}, 0.40, 'low_confidence:0.40', 'pending', 'Ventas')
+    `;
+  });
+
+  test('el GET NO ofrece la fila en EUR: contestarla no la deja lista', async () => {
+    const r = await pedir(`/${docId}/conceptos-pendientes`);
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { conceptos: { ejemplo: string }[] };
+    const ejemplos = body.conceptos.map((c) => c.ejemplo);
+
+    expect(ejemplos).toContain('Proveedor Sano');
+    // Pedirle una categoría para esto es pedirle una respuesta que no cambia nada, y dejarle
+    // la impresión de que lo resolvió.
+    expect(ejemplos).not.toContain('Venta en euros');
+  });
+
+  test('el POST tampoco la desmarca aunque se la manden a la fuerza', async () => {
+    const r = await pedir(`/${docId}/conceptos`, {
+      method: 'POST',
+      body: JSON.stringify({
+        respuestas: [
+          { concepto: claveDeConcepto('Proveedor Sano')!, type: 'cogs', category: 'mercaderia' },
+          { concepto: claveDeConcepto('Venta en euros')!, type: 'revenue', category: 'ventas' },
+        ],
+      }),
+    });
+    expect(r.status).toBe(200);
+
+    const filas = await owner`
+      select payload->>'originalCurrency' as moneda, review_status, flag_reason
+      from staging_rows where document_id = ${docId}
+    `;
+    const eur = filas.find((f) => f.moneda === 'EUR')!;
+    const gtq = filas.find((f) => f.moneda === 'GTQ')!;
+
+    // La sana se resuelve y queda promovible: su dinero tiene que aterrizar.
+    expect(gtq.review_status).toBe('approved');
+    expect(gtq.flag_reason).toBeNull();
+
+    /*
+     * Y la de EUR sigue marcada. Es lo que impide que `resolveFxRate` lance dentro de la
+     * transacción de promoción y se lleve por delante a la de al lado.
+     */
+    expect(eur.review_status).toBe('pending');
+    expect(eur.flag_reason).not.toBeNull();
+  });
+});
