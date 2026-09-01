@@ -94,9 +94,12 @@ export const TEMPLATES = {
      *    preguntas. Prometer 60 y mostrar 6 destruye el aviso para siempre.
      *  · **"te tomará menos de un minuto"** es la promesa que justifica la interrupción, y por
      *    eso el disparador exige que haya conceptos contestables: sin eso sería mentira.
-     *  · **El pie dice que el resto de sus datos YA está en el dashboard.** Es la mitad que
-     *    corrige el malentendido de la promoción parcial, y tiene que seguir coincidiendo con
-     *    el banner del Dashboard: los dos hablan de la misma carga con minutos de diferencia.
+     *  · ⚠️ **EL PIE CAMBIÓ CON EL PORTÓN (migración 0042).** Decía "el resto de tus datos ya
+     *    están en tu dashboard", y desde que ninguna carga se promueve sola **eso es falso**:
+     *    lo que hay es una carga esperando su visto bueno. Es exactamente la mentira que el
+     *    banner de ingesta sostuvo tres semanas después de la promoción parcial, y este correo
+     *    la habría heredado. Los dos textos hablan de la misma carga con minutos de diferencia
+     *    y tienen que decir lo mismo.
      */
     reviewNeeded: (datos: { archivos: string[]; conceptos: number; ctaUrl: string }) => {
       const uno = datos.archivos.length === 1;
@@ -116,7 +119,8 @@ export const TEMPLATES = {
             ' — te tomará menos de un minuto.',
           ctaLabel: 'Revisar y confirmar',
           ctaUrl: datos.ctaUrl,
-          footnote: 'Esto no afecta el resto de tus datos, que ya están en tu dashboard.',
+          footnote:
+            'Tu carga está lista y esperando tu confirmación: en cuanto la revises, entra a tu dashboard.',
         }),
       };
     },
@@ -207,7 +211,7 @@ export const TEMPLATES = {
           ctaLabel: 'Review and confirm',
           ctaUrl: datos.ctaUrl,
           footnote:
-            "This doesn't affect the rest of your data, which is already in your dashboard.",
+            'Your upload is ready and waiting for your confirmation: once you review it, it goes into your dashboard.',
         }),
       };
     },

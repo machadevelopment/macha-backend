@@ -54,7 +54,15 @@ import { uploadDocumentUrl } from '@/lib/app-urls';
  */
 
 /** Estados en los que una carga está esperando una respuesta del cliente. */
-const ESPERANDO_AL_CLIENTE = ['review', 'promoted'] as const;
+/*
+ * ⚠️ `awaiting_confirmation` entra acá (migración 0042) y es ahora el estado MÁS COMÚN de una
+ * carga recién procesada: desde el portón, ninguna se promueve sola. Dejarlo fuera repetiría
+ * el error que este mismo archivo documenta haber corregido —"el aviso se pierde el caso más
+ * común"— pero al revés y peor: el correo es lo único que le dice al cliente que su
+ * contabilidad está esperando su visto bueno, y sin él la carga se queda invisible para
+ * siempre, que es exactamente el riesgo que el portón reintroduce.
+ */
+const ESPERANDO_AL_CLIENTE = ['review', 'promoted', 'awaiting_confirmation'] as const;
 
 export interface ResultadoDelAviso {
   /** `false` si no había nada que avisar, o si ya se había avisado. */
@@ -94,6 +102,8 @@ export async function avisarConceptosPendientes(
       id: documents.id,
       filename: documents.originalFilename,
       flaggedCount: documents.flaggedCount,
+      // Hace falta para distinguir "tiene preguntas" de "espera tu visto bueno".
+      status: documents.status,
     })
     .from(documents)
     .where(
@@ -101,7 +111,23 @@ export async function avisarConceptosPendientes(
     )
     .orderBy(asc(documents.createdAt));
 
-  const conFlags = candidatos.filter((d) => (d.flaggedCount ?? 0) > 0);
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * UNA CARGA SIN NADA MARCADO TAMBIÉN ESPERA AL CLIENTE (migración 0042)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Antes el filtro era `flagged_count > 0`, y con el portón eso deja fuera el caso que MÁS
+   * necesita el correo: una carga que el modelo entendió PERFECTO no tiene una sola fila
+   * marcada, no dispara aviso, y su contabilidad se queda esperando una confirmación que nadie
+   * le pidió — invisible para siempre. Es exactamente el riesgo que el portón reintroduce, y
+   * el correo es la única mitigación que tiene.
+   *
+   * Así que ahora entra por CUALQUIERA de las dos vías: tiene filas que el cliente puede
+   * contestar, **o** está esperando su confirmación. La copia del correo distingue las dos.
+   */
+  const conFlags = candidatos.filter(
+    (d) => (d.flaggedCount ?? 0) > 0 || d.status === 'awaiting_confirmation',
+  );
   if (conFlags.length === 0) return vacio('sin_conceptos');
 
   /*
@@ -146,13 +172,18 @@ export async function avisarConceptosPendientes(
   const cubiertos: { id: string; filename: string }[] = [];
   for (const d of nuevos) {
     const n = await contarConceptosPendientes(db, companyId, d.id);
-    if (n === 0) continue;
     conceptos += n;
+    /*
+     * ⚠️ Una carga que espera confirmación entra AUNQUE no tenga una sola pregunta: el portón
+     * la retiene igual, y sin correo se queda invisible. Lo que se sigue excluyendo es la que
+     * ya está publicada y solo tiene filas marcadas por un problema de DATO —fecha ilegible,
+     * moneda que no manejamos—: esas no las arregla ninguna categoría, así que llevar al
+     * cliente a una pantalla vacía es peor que no avisar.
+     */
+    if (n === 0 && d.status !== 'awaiting_confirmation') continue;
     cubiertos.push({ id: d.id, filename: d.filename });
   }
 
-  // Ni un solo concepto contestable: lo que quedó marcado es problema de DATO y va por revisión
-  // interna. Interrumpir al cliente para llevarlo a una pantalla vacía es peor que no avisar.
   if (cubiertos.length === 0) return vacio('sin_conceptos');
   if (!cubiertos.some((d) => d.id === documentId)) return vacio('sin_conceptos');
 

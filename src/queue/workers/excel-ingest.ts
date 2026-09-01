@@ -467,6 +467,16 @@ export function startExcelIngestWorker(): Promise<string> {
          * su verdad de campo y el cuadre igual gritó DESCUADRE por `Cobros`.
          */
         const hojasSuprimidas = new Set<string>();
+        /**
+         * El portón (migración 0042) retuvo la carga: NADA aterrizó en el ledger, y eso es lo
+         * correcto, no un descuadre. Sin esta bandera el cuadre reporta `nada_aterrizo` sobre
+         * TODA carga nueva — y un detector que grita siempre es uno que nadie mira, que es
+         * justamente la lección que este mismo módulo aprendió el 2026-09-01 con la hoja de
+         * cobros. El veredicto POR HOJA sigue corriendo entero: compara contra `staging_rows`,
+         * que sí está poblado, y es el que de verdad detecta una hoja perdida o contada dos
+         * veces. Lo que espera a la confirmación es solo la comparación contra el LEDGER.
+         */
+        let esperandoConfirmacion = false;
         /** Consulta el esquema y deja registrado el veredicto, en un solo lugar. */
         const marcarSiSuprimida = (hoja: string): boolean => {
           const suprimida = yaRegistradaEnOtraHoja(hoja);
@@ -2272,6 +2282,61 @@ export function startExcelIngestWorker(): Promise<string> {
         });
 
         const promotedThisRun = await withCompanyScope(companyId, async (db) => {
+          /*
+           * ═══════════════════════════════════════════════════════════════════════════════════
+           * EL PORTÓN: NADA SE PROMUEVE SOLO (migración 0042, 2026-09-01)
+           * ═══════════════════════════════════════════════════════════════════════════════════
+           *
+           * Este es uno de los DOS caminos a la promoción; el otro es
+           * `encolarPromocionDeLoResuelto`, que lo afirma por su cuenta. Ver la nota larga allá
+           * para el porqué y para el riesgo que esto reintroduce a propósito.
+           *
+           * Se pregunta ANTES de llamar a `promoteDocument` y no dentro: esa función es el
+           * mecanismo de promover y la usa también el camino que abre el portón, así que
+           * meterle la condición de producto la volvería imposible de llamar desde ahí.
+           */
+          const [gate] = await db
+            .select({ confirmedAt: documents.confirmedAt })
+            .from(documents)
+            .where(eq(documents.id, documentId));
+          /*
+           * ⚠️ Una carga que NO produjo una sola fila no tiene nada que confirmar. Pedirle al
+           * cliente que apruebe un archivo vacío —el caso típico es resubir el mismo libro,
+           * cuyas filas ya estaban ingeridas— es interrumpirlo para nada, y encima lo dejaría
+           * mirando una pantalla sin una cifra. Esas siguen su camino normal (`no_rows` →
+           * `unsupported`, o el aviso de "ya tenías estos datos").
+           */
+          const [conFilas] = await db
+            .select({ n: rawSql<string>`count(*)` })
+            .from(stagingRows)
+            .where(
+              and(eq(stagingRows.companyId, companyId), eq(stagingRows.documentId, documentId)),
+            );
+          const hayAlgoQueConfirmar = Number(conFilas?.n ?? 0) > 0;
+
+          if (gate && gate.confirmedAt === null && hayAlgoQueConfirmar) {
+            const [p] = await db
+              .select({ n: rawSql<string>`count(*)` })
+              .from(stagingRows)
+              .where(
+                and(
+                  eq(stagingRows.companyId, companyId),
+                  eq(stagingRows.documentId, documentId),
+                  eq(stagingRows.reviewStatus, 'pending'),
+                ),
+              );
+            await db
+              .update(documents)
+              .set({
+                status: 'awaiting_confirmation',
+                rowCount: totalRowsProcessed,
+                flaggedCount: Number(p?.n ?? 0),
+              })
+              .where(eq(documents.id, documentId));
+            esperandoConfirmacion = true;
+            return false;
+          }
+
           const promotion = await promoteDocument(db, companyId, documentId);
 
           // Otra ejecución del MISMO documento ya promovió (dos workers a la vez: ver la
@@ -2503,14 +2568,73 @@ export function startExcelIngestWorker(): Promise<string> {
             )
             .groupBy(rawSql`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`);
 
+          /*
+           * Lo que va a publicarse en cuanto el dueño confirme, por moneda. Solo se consulta
+           * cuando hace falta: con la carga ya promovida, lo comparable es el ledger.
+           */
+          const aPublicarPorMoneda = new Map<string, number>();
+          let filasAPublicar = 0;
+          if (esperandoConfirmacion) {
+            const filas = await db
+              .select({
+                moneda: rawSql<string>`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`,
+                monto: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric), 0)`,
+                filas: rawSql<string>`count(*)`,
+              })
+              .from(stagingRows)
+              .where(
+                and(
+                  eq(stagingRows.companyId, companyId),
+                  eq(stagingRows.documentId, documentId),
+                  rawSql`${stagingRows.reviewStatus} <> 'rejected'`,
+                  rawSql`${stagingRows.reviewStatus} <> 'pending'`,
+                ),
+              )
+              .groupBy(rawSql`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`);
+            for (const f of filas) {
+              aPublicarPorMoneda.set(f.moneda, Number(f.monto));
+              /*
+               * ⚠️ Y la EXPANSIÓN también sale de acá. Es lo que convierte la cota del cuadre
+               * de una constante imposible de elegir en un cálculo, y con el ledger vacío daba
+               * 0,00× — o sea que una carga de facturas, que legítimamente expande 2×, se
+               * reportaba como "sobra: la misma plata contada dos veces". El numerador tiene
+               * que salir de la misma fuente que el monto o la banda no le corresponde a nada.
+               */
+              filasAPublicar += Number(f.filas);
+            }
+          }
+
+          /*
+           * ⚠️ CON EL PORTÓN, LO COMPARABLE ES LO QUE VA A PUBLICARSE (migración 0042).
+           *
+           * El ledger está vacío a propósito: la carga espera la confirmación del dueño.
+           * Comparar contra él daría `nada_aterrizo` en TODA carga nueva, y un detector que
+           * grita siempre es uno que nadie mira — la misma lección que este módulo aprendió
+           * con la hoja de cobros.
+           *
+           * Así que en ese momento la pregunta correcta no es "¿aterrizó?" sino "¿lo que
+           * estamos a punto de publicar se parece a lo que el archivo traía?" — que además es
+           * exactamente lo que el cliente tiene delante en la pantalla de confirmación. La
+           * cifra sale de `staging_rows`, igual que la del cuadre POR HOJA, así que las dos
+           * miran lo mismo. El paso staging→ledger lo verifica la propia `promoteDocument`,
+           * que es atómica y devuelve qué insertó.
+           */
+          const porMonedaComparable = esperandoConfirmacion
+            ? [...aPublicarPorMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto }))
+            : [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto }));
+
           const cuadres = evaluarCuadre(
             [...leidoDelArchivo.values()].map((l) => ({
               ...l,
               // Ver `declaradoNoDato`: un renglón de TOTAL se leyó pero nunca iba al ledger.
               monto: Math.max(0, l.monto - (declaradoNoDato.get(l.moneda) ?? 0)),
             })),
-            [...porMoneda.entries()].map(([moneda, monto]) => ({ moneda, monto })),
-            expansion,
+            porMonedaComparable,
+            esperandoConfirmacion
+              ? filasMedidas > 0
+                ? filasAPublicar / filasMedidas
+                : 1
+              : expansion,
             pendientes.map((p) => ({ moneda: p.moneda, monto: Number(p.monto) })),
           );
 
@@ -2541,6 +2665,16 @@ export function startExcelIngestWorker(): Promise<string> {
               hoja: stagingRows.sheetName,
               moneda: rawSql<string>`coalesce(${stagingRows.payload}->>'originalCurrency', 'GTQ')`,
               promovido: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric) filter (where ${stagingRows.promotedAt} is not null), 0)`,
+              /*
+               * Lo que VA a publicarse en cuanto el dueño confirme: ni rechazado ni pendiente.
+               * Con el portón puesto nada está promovido todavía, así que sin esto el cuadre
+               * por hoja reporta `nada_aterrizo` sobre TODAS las hojas de TODA carga nueva —
+               * y un detector que grita siempre es uno que nadie mira. En ese momento la
+               * pregunta correcta no es "¿aterrizó?" sino "¿lo que estamos a punto de publicar
+               * se parece a lo que el archivo traía?", que es exactamente lo que el cliente
+               * está mirando en la pantalla de confirmación.
+               */
+              porPublicar: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric) filter (where ${stagingRows.reviewStatus} <> 'rejected' and ${stagingRows.reviewStatus} <> 'pending'), 0)`,
               pendiente: rawSql<string>`coalesce(sum((${stagingRows.payload}->>'originalAmount')::numeric) filter (where ${stagingRows.reviewStatus} = 'pending'), 0)`,
               filas: rawSql<string>`count(*)`,
             })
@@ -2564,7 +2698,12 @@ export function startExcelIngestWorker(): Promise<string> {
           for (const f of porHojaEnStaging) {
             const clave = f.hoja!;
             const e = agrupado.get(clave) ?? { aterrizado: [], revision: [], filas: 0 };
-            e.aterrizado.push({ moneda: f.moneda, monto: Number(f.promovido) });
+            e.aterrizado.push({
+              moneda: f.moneda,
+              // Ver `porPublicar`: mientras el portón retiene la carga, lo comparable es lo que
+              // va a publicarse, no lo que ya se publicó (que es cero a propósito).
+              monto: Number(esperandoConfirmacion ? f.porPublicar : f.promovido),
+            });
             e.revision.push({ moneda: f.moneda, monto: Number(f.pendiente) });
             e.filas += Number(f.filas);
             agrupado.set(clave, e);

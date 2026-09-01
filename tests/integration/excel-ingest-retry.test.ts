@@ -2,6 +2,7 @@ import { describe, expect, test, beforeAll, afterAll, mock } from 'bun:test';
 import * as XLSX from 'xlsx';
 import { setupTestDatabase, ownerConnection, testOwnerUrl, testAppUrl } from './setup';
 import { crearDobleDeCola } from './doble-de-cola';
+import { confirmarYPromover } from './confirmar-carga';
 
 /**
  * CU-868kkgypv criterio 3: un fallo a media ejecución seguido de reintento no puede
@@ -272,6 +273,8 @@ describe('reintento de excel.ingest tras un fallo a media ejecución', () => {
     llamadas.length = 0;
 
     await handler!({ documentId, companyId });
+    // El portón (migración 0042): el dueño confirma y recién ahí entra al ledger.
+    await confirmarYPromover(owner, companyId, documentId);
 
     // Solo la hoja que faltaba. Esto es lo que ahorra el gasto real en Anthropic.
     expect(llamadas).toEqual([HOJA_B]);

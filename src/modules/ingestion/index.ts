@@ -934,4 +934,135 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         ),
       }),
     },
+  )
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * EL PORTÓN: QUÉ ENTENDIMOS DE TU ARCHIVO, ANTES DE PUBLICARLO (migración 0042, 2026-09-01)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Decisión de Keneth. Hasta hoy la carga se promovía sola; ahora el dueño ve PRIMERO el
+   * resumen por hoja con el dinero que cada una aporta, y su contabilidad entra recién cuando
+   * dice que está bien.
+   *
+   * ═══ POR QUÉ POR HOJA Y NO POR FILA ═══
+   *
+   * Porque los siete fallos de ingesta de esta semana NO fueron filas dudosas: fueron
+   * decisiones sobre HOJAS, tomadas con alta confianza y equivocadas — una cartera de clientes
+   * leída como ingresos (Q 13.362), un consolidado propio contado dos veces (+945), un
+   * presupuesto entrando como dinero real, cobros devengando otra vez (+52 %). Ninguna la
+   * habría atrapado una revisión fila por fila; todas se ven de un vistazo en una lista de
+   * hojas con su monto al lado.
+   *
+   * Y se devuelven las DOS cosas en una sola respuesta —las hojas y los conceptos que solo el
+   * dueño sabe— porque son una sola parada. Dos pantallas seguidas para la misma carga es la
+   * forma más segura de que la segunda no se conteste.
+   */
+  .get('/:id/confirmacion', async ({ companyId, role, params, set, db }) => {
+    assertClientCapability(role, 'upload_excel', set);
+
+    const [doc] = await db
+      .select({
+        id: documents.id,
+        status: documents.status,
+        confirmedAt: documents.confirmedAt,
+        readSummary: documents.readSummary,
+        rowCount: documents.rowCount,
+        flaggedCount: documents.flaggedCount,
+      })
+      .from(documents)
+      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+    if (!doc) {
+      set.status = 404;
+      return { error: 'Document not found' };
+    }
+
+    return {
+      documentId: doc.id,
+      status: doc.status,
+      /** `null` = todavía no la confirmó. Es lo que decide si la pantalla es un portón. */
+      confirmedAt: doc.confirmedAt?.toISOString() ?? null,
+      filas: doc.rowCount ?? 0,
+      marcadas: doc.flaggedCount ?? 0,
+      /*
+       * El MISMO resumen que ya se le muestra después de procesar (`read-summary`), no una
+       * segunda lectura: si el portón dijera una cosa y el resumen otra sobre la misma carga,
+       * el cliente dejaría de creerle a los dos. Ver `lib/read-summary.ts`.
+       */
+      hojas: doc.readSummary?.hojas ?? [],
+    };
+  })
+
+  /**
+   * "Todo correcto, publicar" — y opcionalmente "esta hoja no la cuentes".
+   *
+   * ⚠️ `confirmed_at` se escribe ANTES de encolar la promoción, no después: el portón lo
+   * pregunta `promoteDocument`, así que encolar primero produce una promoción que se rechaza a
+   * sí misma y el cliente aprieta publicar y no pasa nada. Es el mismo orden que ya cuesta caro
+   * en este archivo cuando se invierte.
+   *
+   * Las hojas que el cliente EXCLUYE se rechazan fila por fila (`review_status: 'rejected'`),
+   * que es el único estado que `promoteDocument` nunca promueve — y es el mismo camino que usa
+   * staff, no uno paralelo. No se BORRAN: el rastro de qué decidió el dueño sobre su propio
+   * archivo tiene que quedar.
+   *
+   * Lo que este endpoint NO hace es volver a incluir una hoja que se descartó. Eso exige
+   * reprocesar el archivo con el modelo y es un trabajo distinto; hoy esa hoja se reporta y
+   * queda visible en el resumen con su motivo, que es lo que permite que alguien la desmienta.
+   */
+  .post(
+    '/:id/confirmar',
+    async ({ companyId, userId, role, params, body, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
+
+      const [doc] = await db
+        .select({ id: documents.id, status: documents.status, confirmedAt: documents.confirmedAt })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
+
+      // Confirmar dos veces no es un error: el cliente puede haber apretado dos veces, o
+      // vuelto por el enlace del correo. Es idempotente y se le dice que ya estaba.
+      if (doc.confirmedAt !== null) {
+        return { confirmado: true, yaEstaba: true, hojasExcluidas: 0 };
+      }
+
+      const excluidas = body.excluir ?? [];
+      let hojasExcluidas = 0;
+      for (const hoja of excluidas) {
+        const r = await db
+          .update(stagingRows)
+          .set({ reviewStatus: 'rejected', reviewedBy: userId, reviewedAt: new Date() })
+          .where(
+            and(
+              eq(stagingRows.companyId, companyId),
+              eq(stagingRows.documentId, params.id),
+              eq(stagingRows.sheetName, hoja),
+              isNull(stagingRows.promotedAt),
+            ),
+          )
+          .returning({ id: stagingRows.id });
+        if (r.length > 0) hojasExcluidas++;
+      }
+
+      await db
+        .update(documents)
+        .set({ confirmedAt: new Date(), confirmedBy: userId })
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+
+      // Y recién ahora se promueve. Ver la nota del orden arriba.
+      await encolarPromocionDeLoResuelto(db, companyId, params.id);
+
+      return { confirmado: true, yaEstaba: false, hojasExcluidas };
+    },
+    {
+      body: t.Object({
+        /** Nombres de hoja que el cliente dice que NO debe contarse. */
+        excluir: t.Optional(t.Array(t.String({ minLength: 1, maxLength: 200 }), { maxItems: 50 })),
+      }),
+    },
   );
