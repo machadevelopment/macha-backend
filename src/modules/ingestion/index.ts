@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
@@ -999,6 +999,63 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       return { error: 'Document not found' };
     }
 
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * LA MUESTRA: TRES FILAS DE CADA HOJA, YA INTERPRETADAS (2026-09-01)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * Sin esto, la pantalla le pide al cliente que apruebe un nombre de hoja y un total. Eso
+     * alcanza para detectar una hoja de más o de menos —que es lo que atrapó los siete fallos
+     * de esta semana— pero **no alcanza para el que queda**: leer la columna equivocada.
+     *
+     * Es el fallo que `sheet-header` documenta como el peor de su clase: "no falla nada
+     * visible, los datos salen de las columnas equivocadas". El total puede verse perfecto y
+     * cada fila estar mal. Lo único que lo delata es ver tres filas como quedaron y
+     * reconocerlas —o no— contra el archivo que el dueño tiene abierto al lado.
+     *
+     * Tres y no diez: la pantalla es para decidir, no para auditar. Y se toman las PRIMERAS de
+     * cada hoja, no una muestra al azar, porque el cliente puede compararlas con su archivo sin
+     * buscarlas.
+     */
+    const muestras = await db
+      .select({
+        hoja: stagingRows.sheetName,
+        payload: stagingRows.payload,
+        entidad: stagingRows.targetEntity,
+      })
+      .from(stagingRows)
+      .where(
+        and(
+          eq(stagingRows.companyId, companyId),
+          eq(stagingRows.documentId, params.id),
+          isNotNull(stagingRows.sheetName),
+        ),
+      )
+      .orderBy(asc(stagingRows.id))
+      .limit(400);
+
+    const porHoja = new Map<string, { muestra: unknown[]; tipos: Record<string, number> }>();
+    for (const m of muestras) {
+      const clave = m.hoja!;
+      const e = porHoja.get(clave) ?? { muestra: [], tipos: {} };
+      const p = m.payload as Record<string, unknown>;
+      // El TIPO con el que entró cada fila, contado por hoja: es lo que permite decir "esta
+      // hoja entró como ingreso" y ofrecer cambiarla entera.
+      const tipo = typeof p.type === 'string' ? p.type : m.entidad;
+      e.tipos[tipo] = (e.tipos[tipo] ?? 0) + 1;
+      if (e.muestra.length < 3) {
+        e.muestra.push({
+          fecha: (p.date ?? p.issueDate ?? null) as string | null,
+          concepto: (p.description ?? p.product ?? p.counterparty ?? null) as string | null,
+          monto: typeof p.originalAmount === 'number' ? p.originalAmount : null,
+          moneda: typeof p.originalCurrency === 'string' ? p.originalCurrency : null,
+          tipo,
+          categoria: typeof p.category === 'string' ? p.category : null,
+        });
+      }
+      porHoja.set(clave, e);
+    }
+
     return {
       documentId: doc.id,
       status: doc.status,
@@ -1006,6 +1063,8 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       confirmedAt: doc.confirmedAt?.toISOString() ?? null,
       filas: doc.rowCount ?? 0,
       marcadas: doc.flaggedCount ?? 0,
+      /** Por hoja: qué tipos produjo y tres filas como quedaron. Ver el bloque de arriba. */
+      detalle: Object.fromEntries(porHoja),
       /*
        * El MISMO resumen que ya se le muestra después de procesar (`read-summary`), no una
        * segunda lectura: si el portón dijera una cosa y el resumen otra sobre la misma carga,
@@ -1050,7 +1109,66 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       // Confirmar dos veces no es un error: el cliente puede haber apretado dos veces, o
       // vuelto por el enlace del correo. Es idempotente y se le dice que ya estaba.
       if (doc.confirmedAt !== null) {
-        return { confirmado: true, yaEstaba: true, hojasExcluidas: 0 };
+        return { confirmado: true, yaEstaba: true, hojasExcluidas: 0, hojasReclasificadas: 0 };
+      }
+
+      /*
+       * ═════════════════════════════════════════════════════════════════════════════════════
+       * RECLASIFICAR UNA HOJA ENTERA (2026-09-01)
+       * ═════════════════════════════════════════════════════════════════════════════════════
+       *
+       * Excluir una hoja resuelve "esto no debería contar". Lo que faltaba es "esto SÍ cuenta,
+       * pero no es lo que ustedes creen" — y es un caso distinto y más común: el modelo
+       * clasificó bien la FORMA de la hoja y mal su naturaleza.
+       *
+       * Va por HOJA y no fila por fila porque una hoja es homogénea por construcción: quien
+       * escribe `Servicios_Varios` no mete ventas ahí. Preguntar concepto por concepto lo que
+       * el dueño puede decir de un golpe convierte una decisión en un formulario — que es
+       * exactamente lo que la pantalla de conceptos existe para evitar.
+       *
+       * ⚠️ NO toca las filas DERIVADAS. Ver `ES_DERIVADA`: el costo de una venta y el ingreso
+       * devengado de una factura los crea una regla contable, no la naturaleza de la hoja.
+       * Reclasificar `Ventas` como gasto no puede convertir su costo derivado en gasto también
+       * — es el mismo fallo que se midió con el concepto "Aceite 1 L", a escala de hoja.
+       *
+       * Tampoco toca `invoice`/`bill`: la forma contable de una fila (factura, cuenta por
+       * pagar) la determinó su estructura, y el cliente está diciendo qué ES, no dónde vive.
+       */
+      const reclasificar = body.reclasificar ?? [];
+      let hojasReclasificadas = 0;
+      for (const r of reclasificar) {
+        const filas = await db
+          .select({ id: stagingRows.id, payload: stagingRows.payload })
+          .from(stagingRows)
+          .where(
+            and(
+              eq(stagingRows.companyId, companyId),
+              eq(stagingRows.documentId, params.id),
+              eq(stagingRows.sheetName, r.hoja),
+              eq(stagingRows.targetEntity, 'transaction'),
+              isNull(stagingRows.promotedAt),
+            ),
+          );
+        let tocadas = 0;
+        for (const f of filas) {
+          const p = f.payload as Record<string, unknown>;
+          if (esFilaDerivada(p)) continue;
+          await db
+            .update(stagingRows)
+            .set({
+              payload: { ...p, type: r.type, ...(r.category ? { category: r.category } : {}) },
+              // Lo dijo el dueño: la confianza sube y la marca se limpia, igual que al
+              // contestar un concepto. Sin esto `staging-rules` la vuelve a marcar.
+              confidence: '1.0000',
+              flagReason: null,
+              reviewStatus: 'approved',
+              reviewedBy: userId,
+              reviewedAt: new Date(),
+            })
+            .where(and(eq(stagingRows.id, f.id), eq(stagingRows.companyId, companyId)));
+          tocadas++;
+        }
+        if (tocadas > 0) hojasReclasificadas++;
       }
 
       const excluidas = body.excluir ?? [];
@@ -1079,12 +1197,28 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       // Y recién ahora se promueve. Ver la nota del orden arriba.
       await encolarPromocionDeLoResuelto(db, companyId, params.id);
 
-      return { confirmado: true, yaEstaba: false, hojasExcluidas };
+      return { confirmado: true, yaEstaba: false, hojasExcluidas, hojasReclasificadas };
     },
     {
       body: t.Object({
         /** Nombres de hoja que el cliente dice que NO debe contarse. */
         excluir: t.Optional(t.Array(t.String({ minLength: 1, maxLength: 200 }), { maxItems: 50 })),
+        /** Hojas cuya naturaleza el cliente corrige. Ver el bloque de `reclasificar`. */
+        reclasificar: t.Optional(
+          t.Array(
+            t.Object({
+              hoja: t.String({ minLength: 1, maxLength: 200 }),
+              type: t.Union([
+                t.Literal('revenue'),
+                t.Literal('cogs'),
+                t.Literal('opex'),
+                t.Literal('other'),
+              ]),
+              category: t.Optional(t.String({ minLength: 1, maxLength: 80 })),
+            }),
+            { maxItems: 50 },
+          ),
+        ),
       }),
     },
   );
