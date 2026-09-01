@@ -883,6 +883,38 @@ Conventions & gotchas:
     Es el mismo engaño del total que motivó el cuadre por hoja, del otro lado. El total queda
     como RESPALDO de lo que la vista por hoja no cubre (filas sin `sheet_name`, o sea cargas
     anteriores a la 0039).
+- **EL LIBRO "EL INFIERNO" Y LOS TRES BUGS QUE ENCONTRÓ** (`lib/hostiles/libro-el-infierno.ts`,
+  2026-09-01). Diecisiete hojas en un cuaderno y solo SIETE producen movimientos: copia exacta
+  de una hoja, consolidado propio de cuatro filas, cartera de clientes con los encabezados mal
+  escritos, cabecera y detalle, matriz de gastos con los meses con typo, un estado de resultados
+  con la MISMA forma, cobros de facturas ya devengadas, presupuesto por trimestres, cinco
+  formatos de fecha en la misma columna, montos escritos a mano, una moneda que no manejamos, un
+  renglón de TOTAL y un pie de página que compite con el encabezado. Trae además 30 filas que el
+  CLIENTE contesta, con su dinero en la verdad de campo: si contestar no mueve la cifra, el test
+  se pone rojo.
+  1. ⚠️ **`Ventas` se descartaba ENTERA.** Ocho movimientos buenos en cuatro formatos de fecha,
+     más una fecha imposible, un TOTAL y un pie de página, daban **9/12 = 75 %** contra el 80 %
+     que exige `noPuedeProducirMovimientos`. Las dos suciedades más comunes de un Excel hecho a
+     mano restaban cobertura y se llevaban la hoja por delante **antes del modelo**, sin dejar
+     una sola fila que alguien pudiera revisar. El resto del pipeline ya las tolera —el modelo
+     declara `skip` sobre un TOTAL, `sheet-header` sabe que un pie de página no es encabezado—;
+     faltaba que este filtro no las contara como evidencia EN CONTRA. Solo salen del
+     DENOMINADOR: descartarlas o marcarlas sigue siendo cosa de `staging-rules`.
+  2. ⚠️ **El renglón de TOTAL DUPLICABA la columna en `sheet-duplication`.** Un TOTAL es por
+     definición la suma de las filas de arriba, así que incluirlo hace que una hoja con TOTAL no
+     pueda empatar NUNCA con su consolidado ni con su detalle — y ese módulo entero se apoya en
+     que dos hojas sumen lo mismo. Medido: `Ventas` (GTQ 13.196) sumaba 26.612.
+  3. ⚠️ **Un PRESUPUESTO se despivotaba como dinero real.** `Ventas proyectadas · Compras
+     proyectadas · Gastos proyectados` por trimestre entraban como 12 movimientos: pasaban las
+     cinco guardas sin despeinarse, porque no llevan vocabulario de agregado, sus conceptos no
+     aparecen en ninguna hoja de detalle (no ocurrieron) y no hay identidad aritmética entre
+     ellos. Sexta guarda, con vocabulario CERRADO como el de los agregados — **sin `plan`**
+     (`Planilla` lo contiene y es el gasto más común de una PYME) ni `meta`.
+  `esRenglonDeTotal` se CONSUME de `sheet-unpivot` en los dos lugares nuevos: si dos módulos
+  juzgaran distinto qué es un total, la misma fila se excluiría de un lado y no del otro.
+  **Medido: el fuzzer pasó de 295 a 300/300 libros exactos** —los arreglos del TOTAL cerraron
+  también los cinco huecos que quedaban— y el veredicto es IDÉNTICO en las 55 hojas de los diez
+  archivos reales de clientes.
 - **FUZZER DE LIBROS: 300 permutaciones con verdad de campo, en `bun test`**
   (`lib/hostiles/fuzz.ts` + `lib/hostiles-fuzz.test.ts`, 2026-08-31). Los libros escritos a
   mano cubren lo que YA conocemos; los fallos de esta ingesta viven en la **combinación** de
@@ -908,7 +940,7 @@ Conventions & gotchas:
      mil, `Cliente 3` valía tres. Con cinco columnas espurias por hoja, un empate del 1 % por
      azar deja de ser raro y el precio del empate es descartar una hoja entera. Ahora una celda
      es cifra solo si, quitados los símbolos de moneda, no queda más que dígitos y separadores.
-  Estado: **295/300 exactos**. El hueco que quedaba —un consolidado propio de menos de 6 meses
+  Estado: **300/300 exactos** (los tres arreglos de `libro-el-infierno` cerraron los cinco que quedaban). El hueco que quedaba —un consolidado propio de menos de 6 meses
   volvía a contar su ingreso— **se cerró el 2026-09-01**, y la forma de cerrarlo es lo que vale.
   Se midió primero en PRODUCCIÓN: un libro con `Ventas` (4 movimientos, GTQ 945) y su
   `Resumen_Mensual` (4 filas, GTQ 945) dejó el dashboard con **+945,00 sobre una verdad de campo
