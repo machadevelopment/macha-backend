@@ -84,6 +84,20 @@ const mediana = (xs: number[]): number =>
  * `medirFilas` sin duplicar la lógica de acumulación por moneda. Los demás campos van en
  * `null` a propósito: acá no se arma ninguna fila.
  */
+/**
+ * Columnas que traen NÚMEROS y no son dinero. Ver el bloque de arriba: con el portón, esta
+ * estimación se le muestra al cliente, así que sumar su columna de teléfonos no es un detalle.
+ *
+ * La lista es corta y cerrada a propósito, como la de agregados de `sheet-unpivot`: la forma de
+ * titular un identificador en una hoja contable son seis palabras. NO incluye `total` ni
+ * `monto` por razones obvias, ni `numero` a secas — "Número de factura" es identificador pero
+ * "Número de unidades" no, y el que decide es el sufijo, no el prefijo.
+ */
+const ES_IDENTIFICADOR = [
+  'telefono', 'celular', 'movil', 'phone', 'nit', 'dpi', 'cui', 'rtu',
+  'codigopostal', 'zipcode', 'cuenta bancaria', 'cuentabancaria',
+]; // prettier-ignore
+
 export function mapaDeDineroProbable(rows: unknown[][]): ColumnMap {
   const vacio: ColumnMap = {
     date: null, amount: null, currency: null, description: null, counterparty: null,
@@ -127,6 +141,28 @@ export function mapaDeDineroProbable(rows: unknown[][]): ColumnMap {
     if (m < MAGNITUD_MINIMA) continue;
 
     const h = encabezados[c] ?? '';
+    /*
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * UN TELÉFONO NO ES PLATA, Y AHORA EL CLIENTE LO VE (2026-09-01)
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     *
+     * Esta estimación no alimenta el ledger —explica y ranquea— así que un desatino costaba
+     * poco. Con el PORTÓN (migración 0042) pasó a mostrarse en la pantalla donde el dueño
+     * decide si publica su contabilidad, y ahí cambia todo: verificado en producción, la hoja
+     * `Clientes_B2B` descartada declaraba **GTQ 306.000.081,00**, que es la suma de la columna
+     * de TELÉFONOS. Un cliente que lee eso deja de creerle a la pantalla entera — y esa
+     * pantalla es la única herramienta que tiene para desmentirnos.
+     *
+     * El veto es por VOCABULARIO de identificador y no por magnitud: un teléfono guatemalteco
+     * (8 dígitos) y un monto grande son indistinguibles por el número, y poner un techo
+     * arbitrario recortaría la factura legítima de una constructora. Lo que sí los separa es
+     * cómo se llama la columna — nadie titula "Teléfono" a una columna de dinero.
+     *
+     * `nit` y `telefono` ya viven en la firma `contactos` de `sheet-classifier` por la misma
+     * razón: son cómo se FICHA a una contraparte, no cómo se registra un hecho.
+     */
+    if (ES_IDENTIFICADOR.some((p) => h.includes(p))) continue;
+
     candidatos.push({
       indice: c,
       magnitud: m,
