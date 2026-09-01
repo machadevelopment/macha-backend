@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { LIBROS, libroInventarioAislado } from './hostiles/libros';
+import { libroElInfierno } from './hostiles/libro-el-infierno';
 import { correrPipeline } from './hostiles/pipeline-doble';
 
 /**
@@ -101,5 +102,92 @@ describe('HUECO CONOCIDO: inventario que nadie referencia', () => {
     expect(c.totales.opex).toBeCloseTo(stock, 2);
     // Si algún día esto falla porque `opex` da 0, el hueco se cerró: borrar este bloque.
     expect(c.destino.get('Inventario')).toBe('movimientos:15');
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL INFIERNO: TODAS LAS TRAMPAS EN UN SOLO CUADERNO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Diecisiete hojas y solo siete producen movimientos. Se afirma HOJA POR HOJA y no solo el
+ * total, porque el total se deja engañar: dos errores de signo opuesto se cancelan y el libro
+ * parece correcto — que es la forma exacta de los fallos de composición de esta ingesta.
+ *
+ * Este libro encontró CUATRO defectos reales el día que se escribió (2026-09-01), y los cuatro
+ * están arreglados:
+ *
+ *  1. `Ventas` se descartaba ENTERA. Ocho movimientos buenos en cuatro formatos de fecha, más
+ *     una fecha imposible, un TOTAL y un pie de página, daban 9/12 = 75 % de cobertura contra
+ *     el 80 % que exige el filtro de supervivencia. Las dos suciedades más comunes de un Excel
+ *     hecho a mano restaban cobertura y se llevaban la hoja por delante, antes del modelo.
+ *  2. El renglón de TOTAL DUPLICABA la columna en `sheet-duplication`, así que ninguna hoja con
+ *     TOTAL podía empatar con su consolidado ni con su detalle: el módulo entero se apoya en
+ *     que dos hojas sumen lo mismo.
+ *  3. `Presupuesto` —proyecciones por trimestre— se despivotaba en 12 movimientos y metía al
+ *     dashboard dinero que nadie cobró ni pagó. Pasaba las cinco guardas del despivotado.
+ *  4. Y el consolidado propio de cuatro filas, que ya se había cerrado ese mismo día.
+ */
+describe('EL INFIERNO: 17 hojas, 7 producen movimientos', () => {
+  const libro = libroElInfierno();
+  const c = correrPipeline(libro);
+
+  test('el ingreso es EXACTO contra la verdad de campo', () => {
+    // Ventas + su mostrador + la facturación en USD devengada UNA vez. Ni el resumen propio, ni
+    // la copia exacta, ni la cartera de clientes, ni los cobros, ni el presupuesto.
+    expect(c.totales.revenue).toBeCloseTo(libro.verdad.revenue, 2);
+  });
+
+  test('cada hoja termina donde debe, y se nombran las diecisiete', () => {
+    const esperado: Record<string, string> = {
+      Portada: 'movimientos:0',
+      Ventas: 'movimientos:16',
+      'Ventas (2)': 'descartada:duplica',
+      Resumen_Ventas: 'descartada:reporte',
+      Clientes_B2B: 'descartada:catalogo:contactos',
+      Productos: 'descartada:catalogo:productos',
+      Tiendas: 'descartada:catalogo:ubicaciones',
+      Inventario: 'inventario',
+      OrdenesCompra: 'movimientos:0',
+      LineasOC: 'descartada:duplica',
+      Gastos_Operativos: 'movimientos:24:despivotada',
+      Estado_Resultados: 'descartada:reporte',
+      Facturacion: 'movimientos:8',
+      Cobros: 'movimientos:0',
+      Presupuesto: 'descartada:reporte',
+      Servicios_Varios: 'movimientos:0',
+      Ventas_Mostrador: 'movimientos:9',
+      Notas: 'movimientos:0',
+    };
+    for (const [hoja, destino] of Object.entries(esperado)) {
+      expect(`${hoja}=${c.destino.get(hoja)}`).toBe(`${hoja}=${destino}`);
+    }
+  });
+
+  test('lo que espera al cliente es lo que su dinero necesita', () => {
+    /*
+     * 30 filas de baja confianza —12 órdenes de compra con su costo derivado y 6 servicios de
+     * concepto ambiguo— más 4 que ninguna categoría arregla: la fila en EUR y la de fecha
+     * imposible, cada una con su costo en la línea.
+     */
+    expect(c.marcadas).toBe(libro.marcadas ?? 0);
+    expect(c.motivos.get('invalid_currency') ?? 0).toBe(2);
+    expect(c.motivos.get('invalid_date') ?? 0).toBe(2);
+    expect(c.motivos.get('low_confidence:0.45') ?? 0).toBe(30);
+  });
+
+  test('el costo y el gasto retenidos son EXACTAMENTE lo que falta para cuadrar', () => {
+    /*
+     * Esta es la afirmación que vale del flujo nuevo: lo que el cliente contesta no es "algo
+     * más", es la diferencia EXACTA entre lo que el dashboard muestra y su contabilidad real.
+     * Si esto deja de cuadrar, contestar dejó de servir para algo.
+     */
+    const faltaCogs = libro.verdad.cogs - c.totales.cogs;
+    const faltaOpex = libro.verdad.opex - c.totales.opex;
+    expect(faltaCogs).toBeGreaterThan(0);
+    expect(faltaOpex).toBeGreaterThan(0);
+    // El costo retenido es el total de `OrdenesCompra`; el gasto, el de `Servicios_Varios`.
+    expect(faltaCogs).toBeCloseTo(50_168.4, 2);
+    expect(faltaOpex).toBeCloseTo(10_147.5, 2);
   });
 });

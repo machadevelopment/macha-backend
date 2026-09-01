@@ -1,4 +1,5 @@
 import { pareceResumenPorPeriodo } from './sheet-shape';
+import { esRenglonDeTotal } from './sheet-unpivot';
 /**
  * Detecta cuando DOS hojas del mismo libro describen EL MISMO DINERO.
  *
@@ -154,7 +155,29 @@ function pareceCifra(v: unknown): boolean {
 }
 
 function sumasDeColumnasDeDinero(rows: unknown[][]): number[] {
-  const datos = rows.slice(1);
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * EL RENGLÓN DE TOTAL SE EXCLUYE, O NINGUNA COMPARACIÓN DE ESTE MÓDULO FUNCIONA (2026-09-01)
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * Un `TOTAL` al final ES, por definición, la suma de las filas de arriba. Incluirlo **duplica
+   * la columna**, así que una hoja con TOTAL nunca puede empatar con su propio consolidado ni
+   * con su detalle — y este módulo entero se apoya en que dos hojas sumen lo mismo.
+   *
+   * Medido con `libro-el-infierno`: `Ventas` (GTQ 13.196 en ocho movimientos) llevaba su
+   * renglón de TOTAL, así que la columna sumaba 26.612 y su `Resumen_Ventas` —que suma
+   * exactamente 13.196, porque es su consolidación— no empataba. El resumen se procesaba y el
+   * ingreso se contaba dos veces.
+   *
+   * Es la misma familia que el arreglo del filtro de supervivencia del mismo día: la suciedad
+   * más común de un Excel hecho a mano envenenando una medición que el resto del pipeline sí
+   * sabe tolerar. `esRenglonDeTotal` se consume de `sheet-unpivot` — una sola definición, o la
+   * misma fila se excluiría de un lado y no del otro.
+   */
+  const datos = rows.slice(1).filter((f) => {
+    const primera = f.find((c) => c !== null && c !== undefined && c !== '');
+    return !(typeof primera === 'string' && esRenglonDeTotal(primera));
+  });
   if (datos.length === 0) return [];
 
   const ancho = Math.max(...rows.map((f) => f.length));
