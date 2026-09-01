@@ -341,7 +341,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
        * publicados, y cancelar los dejaría en el ledger. Para eso está `revert`, y el mensaje del
        * 409 lo nombra para que nadie use una por la otra.
        */
-      const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation', 'review'];
+      const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation', 'review', 'failed'];
       if (!CANCELABLES.includes(doc.status)) {
         set.status = 409;
         return {

@@ -338,6 +338,22 @@ describe('POST /documents/:id/cancel sobre una carga esperando confirmación', (
     expect(d!.status).toBe('cancelled');
   });
 
+  test('`failed` también se descarta: es la que más lo necesita', async () => {
+    /*
+     * Verificado en producción: una carga que no sirvió se queda en rojo en la lista del
+     * cliente y su única acción era `retry` — que si no la arregla la deja ahí para siempre.
+     * Y es MÁS seguro que los otros estados, no menos: si alcanzó a promover algo antes de
+     * fallar, `cancelDocumentRows` lo limpia.
+     */
+    const doc = await crearCarga('reventada.xlsx');
+    await owner`update documents set status = 'failed' where id = ${doc}`;
+
+    const res = await pedir(`/${doc}/cancel`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const [d] = await owner`select status from documents where id = ${doc}`;
+    expect(d!.status).toBe('cancelled');
+  });
+
   test('una carga YA publicada sigue diciendo que use «revertir»', async () => {
     /*
      * La otra mitad, y es la que hace segura a la primera: cancelar una `promoted` no desharía
