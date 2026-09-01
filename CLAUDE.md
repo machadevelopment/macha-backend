@@ -994,6 +994,36 @@ Conventions & gotchas:
     el botón principal está deshabilitado, así que "omitir" es el único camino para pasar de
     largo una pregunta — eso es deliberado, no un bug.
   - Los radios salen de la ESCALA (`rounded-lg`), no en píxeles: hay un test que lo vigila.
+  - ⚠️ **TRES DEFECTOS QUE SOLO SE VIERON ABRIENDO LA PANTALLA EN CHROME** (2026-09-01, con la
+    suite entera en verde y el deploy ya en producción). Los dos son de la clase que ningún
+    test de fuente puede ver, y valen más como método que como arreglo:
+    1. **La celda de la tabla lleva `whitespace-nowrap`** —para que el NOMBRE DEL ARCHIVO no se
+       parta— y esa regla se hereda a toda la prosa del panel expandido. Medido en producción:
+       con el panel cerrado la tabla mide exactamente su contenedor (1164 px) y al abrir la
+       tarjeta pedía 1278. El contenedor tiene `overflow-x: auto`, **así que nada falla**: el
+       cliente simplemente tiene que hacer scroll lateral para leer la pregunta que le estamos
+       haciendo, y la respuesta queda cortada por la derecha. El envoltorio del panel repone
+       `whitespace-normal`. Generaliza a cualquier contenido nuevo dentro de esa celda.
+    2. **El disparador cerrado decía "Ayúdanos a clasificar 0 concepto(s)".** `conceptos` es
+       `undefined` hasta que alguien ABRE el panel —que es cuando se pide la lista— y el conteo
+       caía a `?? 0`. O sea que el control que existe para que el cliente conteste le informaba,
+       antes de tocarlo, que no hay nada que contestar: la razón más directa para no hacer clic,
+       y el mismo modo de fallo que este archivo ya documenta del lado del correo ("un aviso que
+       aterriza en una pantalla vacía enseña a ignorar el próximo"). Sin lista todavía, el texto
+       no lleva número (`ctaSinConteo`).
+    3. **El botón principal quedaba HABILITADO con el rubro vacío desde la segunda pregunta.**
+       `disabled` miraba `listas.length === 0` —las respuestas ACUMULADAS— así que el candado
+       solo protegía a la PRIMERA: contestada una, el cliente podía leer "Guardar y seguir",
+       apretarlo con el campo vacío, y ese concepto quedaba sin contestar sin que nada se lo
+       dijera. Y **los dos tests que cubrían la regla pasaban en verde**, porque afirmaban el
+       STRING `disabled={guardando || listas.length === 0}` en vez de la conducta — el mismo
+       error que `email-shell.test.ts` ya documenta con el logo ("probaba la implementación, no
+       lo que el cliente de correo necesita"). Ahora la condición mira el concepto en pantalla
+       y la conducta se mide MONTANDO el componente.
+    La lección de método: **una tarjeta nueva dentro de una tabla existente hereda reglas de
+    layout que su propio render no ve**, y el precio se paga en el navegador del cliente. Los
+    dos quedan fijados en `tarjeta-guiada.test.tsx`, comprobados por mutación; el del ajuste de
+    línea se afirma sobre la fuente de `document-list` porque la regla vive en la celda.
 - **El deep link `/upload?doc=<id>`** (mismo ticket). El correo y el banner del Dashboard llevan
   al documento exacto: la fila queda resaltada, la pantalla hace scroll hasta ella y su panel de
   preguntas se abre solo. Son CUATRO piezas encadenadas (página → pantalla → lista → panel) y
