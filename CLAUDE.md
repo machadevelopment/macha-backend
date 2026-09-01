@@ -908,12 +908,23 @@ Conventions & gotchas:
      mil, `Cliente 3` valía tres. Con cinco columnas espurias por hoja, un empate del 1 % por
      azar deja de ser raro y el precio del empate es descartar una hoja entera. Ahora una celda
      es cifra solo si, quitados los símbolos de moneda, no queda más que dígitos y separadores.
-  Estado: **289/300 exactos**. Los 11 restantes son UN hueco conocido y fijado: un consolidado
-  propio de **menos de 6 meses** vuelve a contar su ingreso, porque la señal de resumen por
-  período (`sheet-shape` 6-bis) exige 6 meses distintos y el dedup exige 8 filas. No se afloja:
-  `sheet-shape` ya razona que "una hoja de cinco filas no se toca", y perder contabilidad en
-  silencio es peor que mostrar de más. Medido: bajar el piso del dedup de 8 a 4 **no arregla
-  ninguno**.
+  Estado: **295/300 exactos**. El hueco que quedaba —un consolidado propio de menos de 6 meses
+  volvía a contar su ingreso— **se cerró el 2026-09-01**, y la forma de cerrarlo es lo que vale.
+  Se midió primero en PRODUCCIÓN: un libro con `Ventas` (4 movimientos, GTQ 945) y su
+  `Resumen_Mensual` (4 filas, GTQ 945) dejó el dashboard con **+945,00 sobre una verdad de campo
+  de 34.209,00** (+2,8 %), con el costo y los gastos exactos. Los dos arreglos OBVIOS tienen
+  contraejemplo y se descartaron: bajar el piso del dedup ante un empate AL CENTAVO pone en rojo
+  un test que ya existe (`Ventas` 1000+2000+3000 y `Gastos` 1500+2500+2000 suman 6000 las dos,
+  por azar), y exigir además que solo UNA se baste sola tampoco separa ese par —la hoja de
+  gastos de una PYME no nombra proveedor y es de movimientos igual—. Lo que sí lo cierra es
+  **COMBINAR DOS SEÑALES DÉBILES**: empate al centavo **más** forma de consolidado por período
+  (`pareceResumenPorPeriodo`, la señal 6-bis de `sheet-shape` extraída para vivir una sola vez,
+  con su mínimo bajado solo para este llamador). Un marcador de período no elige su día —lo pone
+  la fórmula— y un movimiento sí. ⚠️ **Y el consolidado está EXENTO de compartir encabezado**:
+  un resumen no comparte columnas con su detalle (`Mes · Total Ventas` contra `Fecha · Cliente ·
+  Producto · Monto`), así que exigir la llave apagaba la regla en el único caso para el que se
+  escribió. Verificado: veredicto IDÉNTICO hoja por hoja en los diez archivos reales de
+  clientes, y las dos mitades comprobadas por mutación.
 - **`MIN_VALORES_PARA_RELACION` bajó de 8 a 4, y a 2 si los valores son CÓDIGOS**
   (`sheet-relations`, 2026-08-31). De ese número dependen dos reglas sobre el dinero —"la
   factura no devenga si su venta ya está registrada" y "un cobro no es una venta nueva"—: sin
