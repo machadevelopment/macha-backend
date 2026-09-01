@@ -82,7 +82,20 @@ export type Veredicto =
   /** Aterrizó bastante más: casi siempre, la misma plata contada dos veces. */
   | 'sobra'
   /** El archivo no traía dinero medible: no hay nada que comparar. */
-  | 'sin_datos';
+  | 'sin_datos'
+  /**
+   * La hoja NO se registra a propósito porque el libro ya cuenta ese dinero en otra hoja.
+   *
+   * Es un estado CORRECTO, no un descuadre, y necesita veredicto propio porque su forma es
+   * idéntica a la del fallo más caro: cero aterrizado habiendo dinero en el archivo. Sin esto,
+   * `evaluarCuadre` dice `nada_aterrizo` sobre una hoja de COBROS —que por diseño no vuelve a
+   * contar el ingreso de su factura— y ese es un falso positivo GARANTIZADO en todo libro que
+   * lleve cobros, que son la mayoría. Medido el 2026-09-01 en `12-la-ceiba.xlsx`: la carga
+   * salió con las tres cifras exactas contra la verdad de campo y el cuadre igual gritó
+   * DESCUADRE. Un detector que se equivoca sobre lo correcto enseña a ignorarlo, y entonces no
+   * sirve el día que acierta.
+   */
+  | 'no_se_registra';
 
 export interface Cuadre {
   moneda: string;
@@ -293,13 +306,44 @@ export interface HojaParaCuadrar {
   /** Filas de staging producidas / filas del archivo medidas. Ver `evaluarCuadre`. */
   expansion?: number;
   enRevision?: AterrizadoEnElLedger[];
+  /**
+   * El esquema del libro demostró que esta hoja repite dinero ya registrado en otra
+   * (`ventaYaRegistradaEnOtraHoja` / `compraYaRegistradaEnOtraHoja`), así que la ingesta
+   * suprimió sus filas A PROPÓSITO. Que no aterrice nada es el resultado correcto.
+   */
+  suprimida?: boolean;
 }
 
 export function evaluarCuadrePorHoja(hojas: HojaParaCuadrar[]): CuadreDeHoja[] {
-  return hojas.map((h) => ({
-    hoja: h.hoja,
-    cuadres: evaluarCuadre(h.leido, h.aterrizado, h.expansion ?? 1, h.enRevision ?? []),
-  }));
+  return hojas.map((h) => {
+    const cuadres = evaluarCuadre(h.leido, h.aterrizado, h.expansion ?? 1, h.enRevision ?? []);
+    if (!h.suprimida) return { hoja: h.hoja, cuadres };
+
+    /*
+     * La hoja está suprimida por diseño: lo que NO llegó es el resultado correcto, no plata
+     * perdida. Se reetiqueta en vez de omitirla, porque el veredicto igual se PERSISTE y quien
+     * abra la cola tiene que poder leer qué pasó con esa hoja — omitirla la volvería invisible,
+     * que es el problema opuesto.
+     *
+     * `sobra` NO se reetiqueta: que una hoja suprimida aterrice dinero significa que la
+     * supresión no funcionó, y eso sí es un fallo — el doble conteo que la regla existe para
+     * evitar.
+     */
+    return {
+      hoja: h.hoja,
+      cuadres: cuadres.map((c) =>
+        c.veredicto === 'nada_aterrizo' || c.veredicto === 'falta'
+          ? {
+              ...c,
+              veredicto: 'no_se_registra' as const,
+              detalle:
+                `el archivo traía ${c.moneda} ${c.leido.toFixed(2)} y NO se registra a ` +
+                `propósito: el libro ya cuenta ese dinero en otra hoja`,
+            }
+          : c,
+      ),
+    };
+  });
 }
 
 /** Las hojas que ameritan que alguien las mire, con su motivo ya redactado. */
@@ -307,7 +351,13 @@ export function hojasDescuadradas(porHoja: CuadreDeHoja[]): { hoja: string; deta
   const out: { hoja: string; detalle: string }[] = [];
   for (const h of porHoja) {
     for (const c of h.cuadres) {
-      if (c.veredicto === 'cuadra' || c.veredicto === 'sin_datos' || c.veredicto === 'en_revision')
+      if (
+        c.veredicto === 'cuadra' ||
+        c.veredicto === 'sin_datos' ||
+        c.veredicto === 'en_revision' ||
+        // Ver el veredicto: no aterrizar es su resultado correcto.
+        c.veredicto === 'no_se_registra'
+      )
         continue;
       out.push({ hoja: h.hoja, detalle: `${c.veredicto}: ${c.detalle}` });
     }

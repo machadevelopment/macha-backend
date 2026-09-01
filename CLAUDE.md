@@ -754,6 +754,31 @@ Conventions & gotchas:
   tipo no se deriva nada y la fila va a revisión. Y **el prompt ahora define la frontera
   cogs/opex** (punto 15), que antes quedaba al criterio del modelo: eso hacía que el margen
   bruto —cifra de portada— saliera distinto entre dos corridas del mismo archivo.
+- **CONTESTAR UNA CUENTA POR PAGAR PRODUCE SU COSTO** (`lib/derivacion-de-costo.ts`,
+  2026-09-01). La regla del 2026-08-30 (*"una factura RECIBIDA produce su COSTO además de la
+  cuenta por pagar"*) estaba **a medias**: `construirFilas` la deriva cuando el MODELO da el
+  tipo, y cuando no lo da la fila llega marcada y la contesta el CLIENTE — pero ese camino
+  solo actualizaba el payload, limpiaba el flag y promovía. La fila iba a `bills` y
+  `rollups.ts` suma `cogs`/`opex` solo de `transactions`.
+  Medido en producción con `12-la-ceiba.xlsx`: **12 órdenes de compra por GTQ 56.391,00, el
+  82 % del costo real del libro**. El cliente contestó, las filas marcadas bajaron de 15 a 3,
+  el panel dijo que estaba listo, y el estado de resultados no se movió; el rubro que escribió
+  no aparecía en ninguna categoría y el margen bruto salía en 55,4 %. Es el bug de U3TECH del
+  lado del cliente, y **peor, porque le dijimos que lo había resuelto**: la pantalla existe
+  para que su contabilidad quede exacta, así que una respuesta que no mueve la cifra es la
+  única forma de fallo que no puede tener.
+  - **La derivación vive UNA sola vez** porque son DOS productores de la misma fila del ledger
+    (la ingesta y la respuesta del cliente); si divergen, el mismo archivo da cifras distintas
+    según quién clasificó la fila. Misma lección que `esArreglablePorCategoria` y `cumpleFirma`.
+  - ⚠️ **Hace falta una MARCA (`SIN_DERIVAR`) o el arreglo se come su propia guarda.** Una
+    `bill` cuya derivación la ingesta suprimió a propósito (`compraYaRegistradaEnOtraHoja`: el
+    libro ya registra esa compra en otra hoja) llega a revisión SIN tipo, **indistinguible**
+    desde el handler de una que el modelo no supo clasificar — el cliente contestaría y el
+    costo entraría por segunda vez. `yaTieneSuCosto` mira el payload ANTES de aplicar la
+    respuesta, que es el único momento en que se puede separar "no supo" de "ya está contado".
+  - La fila derivada **hereda `sheet_name`** (sin eso el cuadre por hoja de la 0039 reportaría
+    descuadre en las dos) y entra ya aprobada, para que la promueva el mismo camino que todo lo
+    demás. La fecha es la de **emisión**, nunca la de vencimiento.
 - **Un COBRO no es una venta nueva** (2026-08-30). `ventaYaRegistradaEnOtraHoja` protegía
   únicamente a las filas `invoice`, y ese era el hueco: una hoja de cobros tiene fecha, cliente
   y monto, así que lo natural es que el modelo la clasifique `transaction/revenue` — y ahí nada
