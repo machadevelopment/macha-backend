@@ -23,6 +23,10 @@ import {
   guardarReglasAprendidas,
   type ReglaAprendida,
 } from '@/lib/category-dictionary';
+// Una sola definición de "esto lo puede contestar el cliente", compartida con el worker que
+// manda el correo: si el conteo del correo y la lista de esta pantalla se separan, el producto
+// promete un número de preguntas y muestra otro.
+import { esArreglablePorCategoria } from '@/lib/conceptos-pendientes';
 
 const ALLOWED_MIME_EXT: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -31,28 +35,6 @@ const ALLOWED_MIME_EXT: Record<string, string> = {
 };
 
 const MESSAGES = INTAKE_MESSAGES;
-
-/**
- * ¿A esta fila marcada la arregla que el cliente diga qué es?
- *
- * Sí cuando el problema es de SIGNIFICADO: el sistema no supo qué era (`low_confidence`), no
- * pudo nombrarlo (`missing_category`) o lo nombró con un tipo que no existe (`invalid_type`).
- *
- * No cuando el problema es el DATO: sin fecha legible, sin monto, con una moneda que no
- * manejamos. Ninguna categoría arregla eso, y preguntarlo sería pedirle al cliente una
- * respuesta que no cambia nada — dejándole además la impresión de que ya lo resolvió. Esas
- * filas siguen su camino por revisión interna, que es donde alguien puede mirar el archivo.
- *
- * Se compara por PREFIJO en `low_confidence` porque el motivo lleva el valor pegado
- * (`low_confidence:0.35`), y una igualdad exacta no casaría con ninguno.
- */
-const MOTIVOS_ARREGLABLES = ['missing_category', 'invalid_type'] as const;
-
-function esArreglablePorCategoria(flagReason: string | null): boolean {
-  if (flagReason === null) return false;
-  if (flagReason.startsWith('low_confidence')) return true;
-  return (MOTIVOS_ARREGLABLES as readonly string[]).includes(flagReason);
-}
 
 export const ingestion = new Elysia({ prefix: '/documents' })
   .use(tenantDerive)
