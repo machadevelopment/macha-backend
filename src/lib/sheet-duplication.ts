@@ -1,3 +1,4 @@
+import { pareceResumenPorPeriodo } from './sheet-shape';
 /**
  * Detecta cuando DOS hojas del mismo libro describen EL MISMO DINERO.
  *
@@ -352,6 +353,50 @@ function encabezadosCompartidos(a: unknown[][], b: unknown[][]): number {
 const MIN_FILAS_PARA_AFIRMAR = 8;
 
 /**
+ * ...SALVO QUE UNA DE LAS DOS SEA UN CONSOLIDADO POR PERÍODO Y EMPATEN AL CENTAVO.
+ *
+ * El piso de arriba protege el camino del **1 %**, donde dos hojas chicas que suman parecido se
+ * explican por azar tan bien como por duplicación. Ese razonamiento deja fuera un caso real y
+ * medido: un libro con `Ventas` (4 movimientos, GTQ 945) y su propio `Resumen_Mensual`
+ * (4 filas, GTQ 945) contaba ese ingreso DOS VECES — **+945,00 sobre una verdad de campo de
+ * 34.209,00**, con el costo y los gastos exactos. Ni el dedup lo veía (exigía 8 filas) ni la
+ * señal de resumen por período de `sheet-shape` (exige 6 meses distintos).
+ *
+ * ═══ POR QUÉ NO ALCANZA CON EL EMPATE, Y HAY CONTRAEJEMPLO EN ESTE ARCHIVO ═══
+ *
+ * `Ventas` (1000+2000+3000) y `Gastos` (1500+2500+2000) suman **6000 las dos**, con tres filas
+ * cada una y compartiendo la llave `Documento`. Son dos hojas legítimamente distintas que
+ * empatan al centavo por azar, porque con cifras redondas eso pasa. Bajar el piso a secas pone
+ * ese test en rojo, y hace bien.
+ *
+ * Tampoco alcanza exigir que solo UNA se baste sola: en ese par, `Gastos` no nombra proveedor y
+ * es una hoja de movimientos igual — que es exactamente lo que `pareceLibroDeMovimientos`
+ * advierte por escrito.
+ *
+ * ═══ LO QUE SÍ LOS SEPARA: EL DÍA NO LO ELIGE UN RESUMEN ═══
+ *
+ * Un marcador de período no elige su día —lo pone la fórmula y sale siempre el 1, o el último
+ * del mes— y un movimiento sí. `Resumen_Mensual` trae 46023 · 46054 · 46082 · 46113: cuatro
+ * días 1, un mes por fila, y ni una columna de texto. El par del contraejemplo trae los días
+ * 1·2·3 y 5·6·7 del mismo mes, con su columna de concepto. La misma señal que `sheet-shape`
+ * usa en su 6-bis, y por eso se CONSUME de ahí en vez de reescribirla.
+ *
+ * ═══ DOS SEÑALES DÉBILES, NO UN UMBRAL MÁS FLOJO ═══
+ *
+ * Cuatro fechas del día 1 no bastan solas —hay contabilidad real así, y por eso `sheet-shape`
+ * sigue exigiendo seis— y un empate exacto tampoco. Juntas sí: que una hoja tenga forma de
+ * consolidado Y sume exactamente lo mismo que otra del mismo libro no es azar. Se exigen
+ * además, como siempre, el encabezado o los conceptos compartidos, la autosuficiencia para
+ * elegir cuál se conserva, y que la conservada sobreviva a los filtros siguientes.
+ */
+const MIN_FILAS_SI_ES_CONSOLIDADO = 3;
+
+/** ¿Alguna columna de dinero de una suma exactamente igual que una de la otra? */
+function empatanAlCentavo(a: number[], b: number[]): boolean {
+  return a.some((sa) => sa > 0 && b.some((sb) => Math.abs(sa - sb) < 0.005));
+}
+
+/**
  * Nombres de las hojas de DETALLE que no deben procesarse, porque su dinero ya está contado
  * en otra hoja del mismo libro.
  *
@@ -374,9 +419,18 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
       const a = conSumas[i]!;
       const b = conSumas[j]!;
 
-      // Ver `MIN_FILAS_PARA_AFIRMAR`: con pocas filas, dos totales iguales son casualidad.
-      if (a.rows.length - 1 < MIN_FILAS_PARA_AFIRMAR) continue;
-      if (b.rows.length - 1 < MIN_FILAS_PARA_AFIRMAR) continue;
+      /*
+       * Ver `MIN_FILAS_PARA_AFIRMAR` y `MIN_FILAS_SI_ES_CONSOLIDADO`: con pocas filas dos
+       * totales PARECIDOS son casualidad, pero un consolidado por período que empata AL
+       * CENTAVO con otra hoja del mismo libro no lo es.
+       */
+      const consolidado =
+        empatanAlCentavo(a.sumas, b.sumas) &&
+        (pareceResumenPorPeriodo(a.rows, MIN_FILAS_SI_ES_CONSOLIDADO) ||
+          pareceResumenPorPeriodo(b.rows, MIN_FILAS_SI_ES_CONSOLIDADO));
+      const piso = consolidado ? MIN_FILAS_SI_ES_CONSOLIDADO : MIN_FILAS_PARA_AFIRMAR;
+      if (a.rows.length - 1 < piso) continue;
+      if (b.rows.length - 1 < piso) continue;
 
       const coinciden = a.sumas.some((sa) =>
         b.sumas.some((sb) => Math.abs(sa - sb) / Math.max(sa, sb) <= 0.01),
@@ -390,7 +444,20 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
         const comunes = [...a.conceptos].filter((c) => b.conceptos!.has(c)).length;
         const menor = Math.min(a.conceptos.size, b.conceptos.size);
         if (menor === 0 || comunes / menor < 0.5) continue;
-      } else if (encabezadosCompartidos(a.rows, b.rows) === 0) {
+      } else if (!consolidado && encabezadosCompartidos(a.rows, b.rows) === 0) {
+        /*
+         * ⚠️ EL CONSOLIDADO ESTÁ EXENTO DE COMPARTIR ENCABEZADO, y no es una excepción
+         * cómoda: **un resumen por período no comparte columnas con su detalle, y eso es
+         * justamente lo que lo hace un resumen.** El caso medido lo muestra entero —
+         * `Mes · Total Ventas` contra `Fecha · Cliente · Producto · Cantidad · Monto`: cero
+         * encabezados en común—, así que exigirlos apaga la regla en el único caso para el que
+         * se escribió.
+         *
+         * La llave compartida se pide para que dos hojas cualesquiera que sumen parecido no se
+         * descarten entre sí. Acá ese trabajo lo hacen las otras dos condiciones, y más fuerte:
+         * el empate es AL CENTAVO (no al 1 %) y una de las dos tiene forma de consolidado por
+         * período. Ver la nota de `MIN_FILAS_SI_ES_CONSOLIDADO`.
+         */
         continue;
       }
 

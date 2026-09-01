@@ -259,6 +259,52 @@ export interface FormaDeHoja {
  * Juzga la forma de una hoja por su geometría, con los encabezados YA localizados
  * (`sheet-header.ts`) — sobre la fila 0 cruda daría cualquier cosa en un archivo con títulos.
  */
+/**
+ * Cuántos períodos distintos hacen falta para declarar "resumen" MIRANDO LA HOJA SOLA.
+ *
+ * Seis, y el número está razonado abajo en la señal 6-bis: por debajo, una hoja de cinco filas
+ * con fechas del día 1 puede ser contabilidad real de una PYME chica, y descartarla la pierde
+ * en silencio. Ese es el peor fallo de esta casa y por eso el umbral no baja acá.
+ *
+ * ⚠️ Pero SÍ baja cuando hay una segunda señal independiente. Ver `pareceResumenPorPeriodo`.
+ */
+const MIN_PERIODOS_PARA_RESUMEN = 6;
+
+/**
+ * ¿Esta hoja tiene FORMA de resumen por período? (una fila por mes, el día lo pone la fórmula)
+ *
+ * Es la señal 6-bis extraída para que pueda usarse con otro mínimo, y vive UNA sola vez a
+ * propósito: si el dedup y la forma de hoja juzgaran distinto qué es un resumen, el mismo
+ * archivo daría cifras distintas según cuál filtro lo viera primero. Es la lección que este
+ * repo ya escribió para `cumpleFirma` y para `mesPorNombre`.
+ *
+ * ⚠️ **Con `minimo` por debajo de `MIN_PERIODOS_PARA_RESUMEN` esta función NO alcanza sola.**
+ * Cuatro fechas del día 1 son sugerentes y no concluyentes: hay contabilidad real así. Solo se
+ * puede bajar el mínimo cuando quien pregunta trae otra evidencia independiente — hoy el único
+ * llamador es `sheet-duplication`, y solo después de comprobar que la hoja empata AL CENTAVO
+ * con otra del mismo libro. Ver la nota del piso allá.
+ */
+export function pareceResumenPorPeriodo(
+  rows: unknown[][],
+  minimo = MIN_PERIODOS_PARA_RESUMEN,
+): boolean {
+  const datos = rows.slice(1);
+  if (datos.length === 0) return false;
+
+  const marcadores = datos
+    .map((f) => periodoDeFecha(f[0]))
+    .filter((p): p is NonNullable<typeof p> => p !== null);
+  if (marcadores.length < minimo || marcadores.length / datos.length <= 0.8) return false;
+
+  const meses = new Set(marcadores.map((p) => p.mes)).size;
+  const dias = new Set(marcadores.map((p) => p.dia));
+  // El día lo pone la fórmula, no el hecho: sale siempre el 1, o el último del mes.
+  const diaCoherente = dias.size === 1 || marcadores.every((p) => p.finDeMes);
+
+  // Un resumen tiene el período y CIFRAS, nada más. Ver el veto de la señal 6-bis.
+  return meses / marcadores.length > 0.9 && diaCoherente && !tieneColumnaDescriptiva(datos);
+}
+
 export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
   const ok: FormaDeHoja = { esReporte: false, motivo: '' };
 
@@ -361,9 +407,10 @@ export function analizarFormaDeHoja(rows: unknown[][]): FormaDeHoja {
    * Misma masa mínima y misma exigencia de unicidad que la señal de arriba, más la coherencia
    * de día que impide confundirlo con ocho movimientos reales repartidos en ocho meses.
    */
-  const fechasDePeriodo = primeraColumna.map(periodoDeFecha);
-  const marcadores = fechasDePeriodo.filter((p): p is NonNullable<typeof p> => p !== null);
-  if (marcadores.length >= 6 && marcadores.length / datos.length > 0.8) {
+  const marcadores = primeraColumna
+    .map(periodoDeFecha)
+    .filter((p): p is NonNullable<typeof p> => p !== null);
+  if (marcadores.length >= MIN_PERIODOS_PARA_RESUMEN && marcadores.length / datos.length > 0.8) {
     const meses = new Set(marcadores.map((p) => p.mes)).size;
     const dias = new Set(marcadores.map((p) => p.dia));
     const diaCoherente = dias.size === 1 || marcadores.every((p) => p.finDeMes);

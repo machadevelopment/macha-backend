@@ -103,31 +103,37 @@ describe('libros generados: el dashboard muestra lo que trae el archivo', () => 
   });
 
   /*
-   * ⚠️ EL HUECO SE MIDIÓ EN PRODUCCIÓN, no solo acá (2026-09-01). El libro de la semilla 131,
-   * subido por la aplicación real, dejó el dashboard con **+945,00 de ingreso sobre una verdad
-   * de campo de 34.209,00** (+2,8 %) — con el costo y los gastos EXACTOS. `Ventas` (5 filas,
-   * GTQ 945) y su propio `Resumen_Mensual` (5 filas, GTQ 945) se procesaron las dos.
+   * ✅ CERRADO EL 2026-09-01, y la forma de cerrarlo es la parte que vale.
    *
-   * Y los DOS arreglos naturales tienen contraejemplo, comprobado el mismo día:
+   * El hueco se midió primero en PRODUCCIÓN: el libro de la semilla 131, subido por la
+   * aplicación, dejó el dashboard con **+945,00 de ingreso sobre una verdad de campo de
+   * 34.209,00** (+2,8 %), con el costo y los gastos EXACTOS. `Ventas` (4 movimientos, GTQ 945)
+   * y su propio `Resumen_Mensual` (4 filas, GTQ 945) se procesaron las dos.
+   *
+   * Los dos arreglos OBVIOS tienen contraejemplo y se descartaron:
    *
    *  · Bajar `MIN_FILAS_PARA_AFIRMAR` cuando los totales empatan AL CENTAVO pone en rojo un
    *    test que ya existe en `sheet-duplication.test.ts`: `Ventas` (1000+2000+3000) y `Gastos`
-   *    (1500+2500+2000) suman 6000 las dos, con tres filas cada una y compartiendo la llave
-   *    `Documento`. Son dos hojas distintas que empatan exacto por azar — con cifras redondas
-   *    eso pasa.
-   *  · Exigir además que solo UNA de las dos se baste sola tampoco separa ese par: la hoja de
-   *    gastos de una PYME no nombra proveedor y es una hoja de movimientos igual, que es lo
-   *    que `pareceLibroDeMovimientos` ya advierte por escrito.
+   *    (1500+2500+2000) suman 6000 las dos, con tres filas y la llave `Documento` compartida.
+   *    Dos hojas distintas que empatan exacto por azar — con cifras redondas eso pasa.
+   *  · Exigir además que solo UNA se baste sola tampoco separa ese par: la hoja de gastos de
+   *    una PYME no nombra proveedor y es de movimientos igual, que es lo que
+   *    `pareceLibroDeMovimientos` ya advierte por escrito.
    *
-   * Sigue sin aflojarse, y el criterio no cambia: mostrar de más se VE y el cliente lo
-   * desmiente; perder su contabilidad en silencio, no. El camino cuando aparezca un archivo
-   * real así es COMBINAR dos señales débiles —forma de período Y empate exacto con otra hoja
-   * del mismo libro—, no bajar un umbral.
+   * Lo que sí lo cierra es COMBINAR DOS SEÑALES DÉBILES en vez de aflojar un umbral: empate al
+   * centavo **más** forma de consolidado por período (`pareceResumenPorPeriodo`, la señal 6-bis
+   * de `sheet-shape` con su mínimo bajado solo para este llamador). Un marcador de período no
+   * elige su día —lo pone la fórmula— y un movimiento sí; el par del contraejemplo trae los
+   * días 1·2·3 y 5·6·7 con su columna de texto, así que sigue protegido.
+   *
+   * Medido: **289 → 295 libros exactos de 300**, veredicto IDÉNTICO hoja por hoja en los diez
+   * archivos reales de clientes, y las dos mitades del cambio comprobadas por mutación.
    */
   test('el hueco conocido es SOLO el del consolidado de menos de 6 meses', () => {
     // Si esto cae, apareció una segunda causa y hay que investigarla en vez de ensancharlo.
     expect(exactos.length + conHueco.length).toBe(SEMILLAS);
     // Y sigue siendo una minoría: si creciera, el hueco dejó de ser un caso de borde.
     expect(conHueco.length).toBeLessThan(SEMILLAS * 0.1);
+    console.info(`[fuzz] exactos=${exactos.length} conHueco=${conHueco.length} de ${SEMILLAS}`);
   });
 });
