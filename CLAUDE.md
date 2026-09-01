@@ -1132,6 +1132,51 @@ Conventions & gotchas:
     de documento, que es lo que la guarda promete; (b) interceptaba `console.info` y
     `console.error` pero **no `console.warn`**, y `en_revision` —el falso positivo real— sale
     por ahí, así que seguía midiendo código distinto del que yo creía estar tocando.
+- ⚠️ **CUATRO DEFECTOS MÁS QUE SOLO APARECIERON PROBANDO EL RESCATE DE HOJA EN PRODUCCIÓN**
+  (2026-09-01). Ninguno mueve una cifra: son de PÉRDIDA, agotamiento o encierro, que es la
+  clase que este pipeline no tenía instrumentada.
+  - **Una carga trabada sin salida.** `cancel` solo aceptaba `queued` y `processing`, y el
+    portón (0042) creó un estado terminal nuevo que nadie le agregó. Verificado: tres cargas de
+    la empresa `test` que el cliente no podía sacarse de encima, y su única alternativa era
+    PUBLICAR datos que sabe que están mal para después revertirlos — el trámite bloqueante que
+    la 0020 eliminó, reintroducido sobre la carga entera. Ahora entran
+    `awaiting_confirmation`, `review` y `failed`; los tres tienen en común que **no publicaron
+    nada**. `promoted` NO entra aunque tenga filas retenidas: ahí hay datos que el cliente está
+    usando y el gesto correcto se llama `revert`.
+  - **Descartar no era descartar.** `POST /confirmar` solo miraba `confirmed_at`, así que un
+    documento `cancelled`, `reverted` o `failed` se podía "publicar" y **volvían al dashboard
+    filas que el cliente había dado de baja** (sus `staging_rows` siguen ahí: cancelar marca el
+    documento y da de baja el ledger, no toca staging). Es la lección que
+    `encolarPromocionDeLoResuelto` ya tenía escrita, aprendida en un llamador y sin aplicar en
+    el otro. Estaba tapado por casualidad: la secuencia descartar→publicar no existía porque no
+    se podía descartar.
+  - **Un `:id` malformado colgaba una conexión.** `GET /documents/undefined/confirmacion` daba
+    **500** y dejaba una conexión RESERVADA que el watchdog mataba 90 s después. Al frontend le
+    basta un `documentId` en `undefined`, y **el pool son 10**: unas pocas peticiones así lo
+    agotan, y "el login está roto" es el síntoma con el que eso se reporta. Las nueve rutas
+    `:id` declaran `format: 'uuid'` y Elysia rechaza con 422 antes del handler — sin conexión,
+    sin error de Postgres, sin nada que limpiar.
+  - **Dos correcciones seguidas se pisaban y la carga terminaba en `failed`**: cada corrida
+    borra las filas y los lotes de su hoja mientras la otra los escribe. El frontend ya
+    deshabilitaba el control, pero **la UI no es donde se garantiza nada** — basta una pestaña
+    duplicada. Ahora es 409 y no se encola en silencio.
+- ⚠️ **UN PERFIL DE COLUMNAS VIEJO TUMBABA LA CARGA ENTERA** (2026-09-01, el más grave de la
+  tanda y **anterior a todo esto**). El worker documenta desde CU-868krmrcj que el perfil es
+  *"una pista, no una orden… El perfil nunca aborta una carga"*, y el código lo metía por
+  `columnsCanonicas`, o sea por el único camino que lanza `MapaDeColumnasInconsistente`. Le pasa
+  a **cualquier cliente que cambie el formato de su Excel**, y basta UNA hoja para perder el
+  archivo completo: 0 filas, `failed`, y el único rastro es el `errorReason`.
+  Medido: tras corregir a mano la columna de una hoja, el perfil aprendió esa corrección y la
+  siguiente carga del mismo formato falló entera ("amount: 3 vs 4"). El picker de columna lo
+  vuelve fácil de disparar, pero no lo causó.
+  Las dos fuentes ya no comparten parámetro: `columnsCanonicas` (lo que fijaron los lotes de
+  ESTA corrida) aborta ante conflicto y debe; `columnsSemilla` (el perfil, o sea el archivo de
+  la ÚLTIMA vez) no aborta — **gana el lote, que está mirando el archivo de hoy**.
+  ⚠️ **Y la decisión se extrajo a `mapaDelLote`, que es la parte que vale como método**: vivía
+  dentro de `classifySheetRows`, y **los tests e2e doblan esa función entera**, así que ninguna
+  prueba la ejecutaba nunca. El primer test de integración que escribí quedaba en VERDE al
+  revertir el arreglo — medía código que el doble reemplaza. Se quitó (queda la nota en su
+  lugar) y la conducta se comprueba sobre la función extraída, donde la mutación sí la ve.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
@@ -1331,6 +1376,22 @@ Conventions & gotchas:
      Es el mismo fallo que `conceptos-pendientes` documenta del lado del correo, y encima
      llamaba "conceptos" a las filas. Ahora el aviso **no lleva número**: el único conteo que
      vale lo da el panel, que es el que sabe cuántos son.
+- **EL RANGO DEL ENLACE MANDA EN ANALÍTICA** (`/analytics?from=&to=`, 2026-09-01). La pantalla
+  abría SIEMPRE en "este mes" y descartaba el rango en silencio, así que el enlace llevaba a un
+  período distinto del que promete. Es el mismo daño que `hayDatosFueraDelRango` documenta y que
+  costó un día entero: el cliente ve cifras correctas de OTRO período y concluye que el sistema
+  no leyó su archivo.
+  - Se lee en el SERVIDOR, como el `?doc=` de `/upload`: leído en el cliente, quien abre el
+    enlace vería primero el mes en curso y después un salto.
+  - Se valida con `validateCustomRange`, la MISMA del selector: una segunda validación se
+    separaría de la primera y la URL aceptaría rangos que el formulario rechaza. Un rango
+    incompleto, invertido o futuro degrada a "este mes" **sin error**.
+  - El selector queda en «personalizado», que es lo que el rango ES. Sin eso la pantalla
+    mostraría el rango del enlace con "Este mes" resaltado.
+  - ⚠️ La decisión vive en `periodoInicial` (`lib/period.ts`), función pura. El primer test
+    montaba la pantalla y espiaba `globalThis.fetch`: **`pedidos` se contamina entre tests**
+    —los efectos del render anterior siguen disparando tras `cleanup()`— así que fallaba con el
+    arreglo ya puesto. Sacar la decisión del componente la hace comprobable de verdad.
 - Do **not** use `localStorage`/`sessionStorage` in artifacts/prototypes; use React state.
 
 Rough layout: `app/(app)/` (customer), `app/admin/` (backoffice), `components/ui/` (shadcn), `components/charts/` (Tremor), `lib/format/`, `lib/i18n/`, `styles/globals.css` (tokens).
