@@ -3,6 +3,7 @@ import { env } from './env';
 import { AiProviderError, runAi } from './ai-errors';
 import { buildIndustryTemplateBlock } from './industry-template';
 import { assemblePayload, costoDeLaFila, type ColumnMap, type RowVerdict } from './row-assembly';
+import { SIN_DERIVAR } from './derivacion-de-costo';
 import type { industryTemplateVersions } from '@/db/schema';
 
 /**
@@ -303,16 +304,30 @@ export function construirFilas(
      */
     if (v.e === 'transaction' && params.ventaYaRegistradaEnOtraHoja) continue;
 
+    const payloadBase = assemblePayload({
+      verdict,
+      row,
+      columns,
+      baseCurrency: params.baseCurrency,
+      ordenDeFecha: params.ordenDeFecha,
+    });
+
+    /*
+     * ⚠️ Se MARCA la cuenta por pagar cuya derivación se va a suprimir abajo, y la marca no es
+     * decorativa: desde el acuerdo con Semi esta fila la puede contestar el CLIENTE, y el
+     * handler de esa respuesta deriva el costo que acá falta (`lib/derivacion-de-costo.ts`).
+     * Sin la marca, una `bill` suprimida a propósito y una que el modelo no supo clasificar
+     * son INDISTINGUIBLES para ese handler —las dos llegan sin tipo— y el cliente terminaría
+     * metiendo por segunda vez un costo que el libro ya registra en otra hoja.
+     */
+    if (v.e === 'bill' && params.compraYaRegistradaEnOtraHoja) {
+      (payloadBase as Record<string, unknown>)[SIN_DERIVAR] = true;
+    }
+
     out.push({
       targetEntity: v.e,
       confidence: typeof v.cf === 'number' ? v.cf : 0,
-      payload: assemblePayload({
-        verdict,
-        row,
-        columns,
-        baseCurrency: params.baseCurrency,
-        ordenDeFecha: params.ordenDeFecha,
-      }),
+      payload: payloadBase,
     });
 
     /*
