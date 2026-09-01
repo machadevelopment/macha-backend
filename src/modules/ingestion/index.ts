@@ -42,6 +42,21 @@ const ALLOWED_MIME_EXT: Record<string, string> = {
 
 const MESSAGES = INTAKE_MESSAGES;
 
+/**
+ * ⚠️ EL `:id` SE VALIDA EN EL BORDE, ANTES DE TOCAR LA BASE (2026-09-01).
+ *
+ * `GET /documents/undefined/confirmacion` devolvía **500** y dejaba una conexión RESERVADA que
+ * el watchdog tenía que matar 90 s después (`[db-scope] transacción sin cerrar tras 90000 ms:
+ * es una FUGA`). Visto en producción: al frontend le basta un `documentId` en `undefined` para
+ * producirlo, y **el pool son 10 conexiones** — o sea que unas pocas peticiones malformadas lo
+ * agotan, y "el login está roto" es el síntoma con el que eso se reporta.
+ *
+ * Con el formato declarado, Elysia rechaza con 422 ANTES del handler: no se reserva conexión,
+ * no hay error de Postgres y no hay nada que el watchdog tenga que limpiar. El watchdog sigue
+ * siendo la red; esto es no tirarse.
+ */
+const PARAMS_ID = { params: t.Object({ id: t.String({ format: 'uuid' }) }) };
+
 export const ingestion = new Elysia({ prefix: '/documents' })
   .use(tenantDerive)
   .post(
@@ -278,144 +293,152 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * `cancelled` está excluido de esa lista. O sea que las filas se quedaban en el ledger sin
    * nada que impidiera volver a insertarlas. Resubir el archivo duplicaba los números.
    */
-  .post('/:id/cancel', async ({ companyId, role, params, set, db }) => {
-    // Mismo permiso que revertir: las dos son "deshacer mi propia carga".
-    assertClientCapability(role, 'revert_upload', set);
+  .post(
+    '/:id/cancel',
+    async ({ companyId, role, params, set, db }) => {
+      // Mismo permiso que revertir: las dos son "deshacer mi propia carga".
+      assertClientCapability(role, 'revert_upload', set);
 
-    const [doc] = await db
-      .select({ id: documents.id, status: documents.status })
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
+      const [doc] = await db
+        .select({ id: documents.id, status: documents.status })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
 
-    // Idempotente, igual que revert: un doble clic o un reintento de red no es un error.
-    if (doc.status === 'cancelled') {
-      return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: true };
-    }
+      // Idempotente, igual que revert: un doble clic o un reintento de red no es un error.
+      if (doc.status === 'cancelled') {
+        return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: true };
+      }
 
-    /*
-     * Solo tiene sentido sobre una carga EN CURSO. Cancelar una ya terminada escondería un
-     * malentendido detrás de un 200 — y sobre todo, cancelar una `promoted` no desharía sus
-     * filas: para eso está `revert`, y el mensaje lo dice para que nadie use una por la otra.
-     *
-     * ⚠️ `awaiting_confirmation` y `review` ENTRAN, y sin eso el portón (0042) dejaba cargas SIN
-     * SALIDA (verificado en producción 2026-09-01: tres cargas de la empresa `test` que el
-     * cliente no podía sacarse de encima, con `cancel` devolviendo 409). No tocan el
-     * dashboard —el portón las retiene— pero se quedan en su lista para siempre pidiéndole una
-     * decisión sobre un archivo que ya no quiere, y la única alternativa que le queda es
-     * PUBLICAR datos que sabe que están mal para después revertirlos.
-     *
-     * Es seguro por construcción y no por suerte: el portón se afirma en los DOS llamadores de
-     * la promoción, así que una carga en ese estado no tiene una sola fila promovida. Y
-     * `cancelDocumentRows` deshace igual lo que encuentre, así que la garantía no depende de
-     * que esa premisa siga siendo cierta.
-     *
-     * Es la forma exacta que el portón vino a crear: reintroduce el "trámite bloqueante" que la
-     * migración 0020 eliminó, pero sobre la carga entera. Cancelar es la puerta de salida.
-     *
-     * `review` va por el MISMO motivo y es el caso hermano: significa que no se promovió NADA
-     * —el archivo entero llegó marcado— así que tampoco hay filas en el dashboard que borrar.
-     * Verificado: una carga de KapePrueba llevaba cuatro días ahí sin forma de sacarla.
-     *
-     * `promoted` NO entra aunque tenga filas retenidas, y esa es la línea: ahí sí hay datos
-     * publicados, y cancelar los dejaría en el ledger. Para eso está `revert`, y el mensaje del
-     * 409 lo nombra para que nadie use una por la otra.
-     */
-    const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation', 'review'];
-    if (!CANCELABLES.includes(doc.status)) {
-      set.status = 409;
-      return {
-        error:
-          doc.status === 'promoted'
-            ? 'Esta carga ya terminó. Para deshacer sus datos usa "revertir", no "cancelar".'
-            : `Solo se puede cancelar una carga en curso (estado actual: ${doc.status}).`,
-      };
-    }
+      /*
+       * Solo tiene sentido sobre una carga EN CURSO. Cancelar una ya terminada escondería un
+       * malentendido detrás de un 200 — y sobre todo, cancelar una `promoted` no desharía sus
+       * filas: para eso está `revert`, y el mensaje lo dice para que nadie use una por la otra.
+       *
+       * ⚠️ `awaiting_confirmation` y `review` ENTRAN, y sin eso el portón (0042) dejaba cargas SIN
+       * SALIDA (verificado en producción 2026-09-01: tres cargas de la empresa `test` que el
+       * cliente no podía sacarse de encima, con `cancel` devolviendo 409). No tocan el
+       * dashboard —el portón las retiene— pero se quedan en su lista para siempre pidiéndole una
+       * decisión sobre un archivo que ya no quiere, y la única alternativa que le queda es
+       * PUBLICAR datos que sabe que están mal para después revertirlos.
+       *
+       * Es seguro por construcción y no por suerte: el portón se afirma en los DOS llamadores de
+       * la promoción, así que una carga en ese estado no tiene una sola fila promovida. Y
+       * `cancelDocumentRows` deshace igual lo que encuentre, así que la garantía no depende de
+       * que esa premisa siga siendo cierta.
+       *
+       * Es la forma exacta que el portón vino a crear: reintroduce el "trámite bloqueante" que la
+       * migración 0020 eliminó, pero sobre la carga entera. Cancelar es la puerta de salida.
+       *
+       * `review` va por el MISMO motivo y es el caso hermano: significa que no se promovió NADA
+       * —el archivo entero llegó marcado— así que tampoco hay filas en el dashboard que borrar.
+       * Verificado: una carga de KapePrueba llevaba cuatro días ahí sin forma de sacarla.
+       *
+       * `promoted` NO entra aunque tenga filas retenidas, y esa es la línea: ahí sí hay datos
+       * publicados, y cancelar los dejaría en el ledger. Para eso está `revert`, y el mensaje del
+       * 409 lo nombra para que nadie use una por la otra.
+       */
+      const CANCELABLES = ['queued', 'processing', 'awaiting_confirmation', 'review'];
+      if (!CANCELABLES.includes(doc.status)) {
+        set.status = 409;
+        return {
+          error:
+            doc.status === 'promoted'
+              ? 'Esta carga ya terminó. Para deshacer sus datos usa "revertir", no "cancelar".'
+              : `Solo se puede cancelar una carga en curso (estado actual: ${doc.status}).`,
+        };
+      }
 
-    const [empresa] = await db
-      .select({ locale: companies.locale })
-      .from(companies)
-      .where(eq(companies.id, companyId));
+      const [empresa] = await db
+        .select({ locale: companies.locale })
+        .from(companies)
+        .where(eq(companies.id, companyId));
 
-    /*
-     * CU-868kttzb1: cancelar DESHACE lo que alcanzó a promoverse.
-     *
-     * Antes esto solo cambiaba el estado. La promoción es parcial e incremental (migración
-     * 0020), así que una carga cancelada a medias dejaba filas VIVAS — y como
-     * `findSeenFingerprints` excluye `cancelled` de los estados con datos vivos, sus huellas
-     * dejaban de bloquear: resubir el mismo archivo las metía otra vez. Ese era el bug de
-     * los números duplicados.
-     *
-     * El `errorReason` se escribe en el mismo update de estado que hace `cancelDocumentRows`
-     * no: se pone después, sobre la fila que esa función ya dejó en `cancelled`.
-     */
-    await cancelDocumentRows(db, companyId, params.id);
-    /*
-     * ═══ CANCELAR TAMBIÉN TIENE QUE REFRESCAR EL CACHÉ, POR EL MISMO MOTIVO QUE REVERTIR ═══
-     *
-     * `revert` lo hacía desde el principio y esto no, y la asimetría no era una decisión:
-     * cuando `cancel` solo cambiaba el estado no había filas que deshacer, así que no había
-     * caché que corregir. Desde CU-868kttzb1 cancelar DESHACE lo que alcanzó a promoverse
-     * (promoción parcial, migración 0020) — o sea que sí las hay, y el refresco se quedó del
-     * otro lado del cambio.
-     *
-     * El síntoma es el peor de esta casa porque no falla nada: las cifras del dashboard salen
-     * de `metric_rollups`, que es un CACHÉ, así que seguían contando transacciones ya
-     * soft-borradas hasta que alguna otra carga de esa empresa lo recalculara de rebote. El
-     * cliente ve un ingreso que ya no existe, el asesor —que consulta `transactions`— ve el
-     * verdadero, y las dos cifras se contradicen sin que ninguna se pueda desmentir.
-     *
-     * Va acá y no dentro de `cancelDocumentRows` a propósito: esa función es el DESHACER de
-     * las filas y corre también desde el worker, dentro de la transacción del documento;
-     * `refreshExistingRollups` escribe un caché de toda la empresa y no tiene nada que hacer
-     * dentro de esa transacción. Es la misma división que ya tiene `revert` unas líneas abajo.
-     */
-    await refreshExistingRollups(db, companyId);
-    await db
-      .update(documents)
-      .set({ errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser() })
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      /*
+       * CU-868kttzb1: cancelar DESHACE lo que alcanzó a promoverse.
+       *
+       * Antes esto solo cambiaba el estado. La promoción es parcial e incremental (migración
+       * 0020), así que una carga cancelada a medias dejaba filas VIVAS — y como
+       * `findSeenFingerprints` excluye `cancelled` de los estados con datos vivos, sus huellas
+       * dejaban de bloquear: resubir el mismo archivo las metía otra vez. Ese era el bug de
+       * los números duplicados.
+       *
+       * El `errorReason` se escribe en el mismo update de estado que hace `cancelDocumentRows`
+       * no: se pone después, sobre la fila que esa función ya dejó en `cancelled`.
+       */
+      await cancelDocumentRows(db, companyId, params.id);
+      /*
+       * ═══ CANCELAR TAMBIÉN TIENE QUE REFRESCAR EL CACHÉ, POR EL MISMO MOTIVO QUE REVERTIR ═══
+       *
+       * `revert` lo hacía desde el principio y esto no, y la asimetría no era una decisión:
+       * cuando `cancel` solo cambiaba el estado no había filas que deshacer, así que no había
+       * caché que corregir. Desde CU-868kttzb1 cancelar DESHACE lo que alcanzó a promoverse
+       * (promoción parcial, migración 0020) — o sea que sí las hay, y el refresco se quedó del
+       * otro lado del cambio.
+       *
+       * El síntoma es el peor de esta casa porque no falla nada: las cifras del dashboard salen
+       * de `metric_rollups`, que es un CACHÉ, así que seguían contando transacciones ya
+       * soft-borradas hasta que alguna otra carga de esa empresa lo recalculara de rebote. El
+       * cliente ve un ingreso que ya no existe, el asesor —que consulta `transactions`— ve el
+       * verdadero, y las dos cifras se contradicen sin que ninguna se pueda desmentir.
+       *
+       * Va acá y no dentro de `cancelDocumentRows` a propósito: esa función es el DESHACER de
+       * las filas y corre también desde el worker, dentro de la transacción del documento;
+       * `refreshExistingRollups` escribe un caché de toda la empresa y no tiene nada que hacer
+       * dentro de esa transacción. Es la misma división que ya tiene `revert` unas líneas abajo.
+       */
+      await refreshExistingRollups(db, companyId);
+      await db
+        .update(documents)
+        .set({ errorReason: MESSAGES[empresa?.locale ?? 'es'].cancelledByUser() })
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
 
-    return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: false };
-  })
-  .post('/:id/revert', async ({ companyId, role, params, set, db }) => {
-    assertClientCapability(role, 'revert_upload', set);
+      return { id: doc.id, status: 'cancelled' as const, alreadyCancelled: false };
+    },
+    PARAMS_ID,
+  )
+  .post(
+    '/:id/revert',
+    async ({ companyId, role, params, set, db }) => {
+      assertClientCapability(role, 'revert_upload', set);
 
-    const [doc] = await db
-      .select({ id: documents.id, status: documents.status })
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
+      const [doc] = await db
+        .select({ id: documents.id, status: documents.status })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
 
-    // Idempotente: revertir dos veces no duplica efectos ni es un error para quien
-    // llama (p. ej. un doble clic o un reintento de red).
-    if (doc.status === 'reverted') {
-      return { id: doc.id, status: 'reverted' as const, alreadyReverted: true };
-    }
+      // Idempotente: revertir dos veces no duplica efectos ni es un error para quien
+      // llama (p. ej. un doble clic o un reintento de red).
+      if (doc.status === 'reverted') {
+        return { id: doc.id, status: 'reverted' as const, alreadyReverted: true };
+      }
 
-    // Solo un documento promovido tiene filas de negocio que deshacer. Revertir uno
-    // en cola/proceso/fallido no tiene sentido y ocultaría un malentendido del
-    // usuario detrás de un 200.
-    if (doc.status !== 'promoted') {
-      set.status = 409;
-      return {
-        error: `Solo se puede revertir un documento promovido (estado actual: ${doc.status}).`,
-      };
-    }
+      // Solo un documento promovido tiene filas de negocio que deshacer. Revertir uno
+      // en cola/proceso/fallido no tiene sentido y ocultaría un malentendido del
+      // usuario detrás de un 200.
+      if (doc.status !== 'promoted') {
+        set.status = 409;
+        return {
+          error: `Solo se puede revertir un documento promovido (estado actual: ${doc.status}).`,
+        };
+      }
 
-    await revertDocument(db, companyId, params.id);
-    // Las cifras del dashboard salen de metric_rollups; sin esto seguirían contando
-    // las transacciones recién soft-borradas hasta la próxima ingesta.
-    await refreshExistingRollups(db, companyId);
+      await revertDocument(db, companyId, params.id);
+      // Las cifras del dashboard salen de metric_rollups; sin esto seguirían contando
+      // las transacciones recién soft-borradas hasta la próxima ingesta.
+      await refreshExistingRollups(db, companyId);
 
-    return { id: doc.id, status: 'reverted' as const, alreadyReverted: false };
-  })
+      return { id: doc.id, status: 'reverted' as const, alreadyReverted: false };
+    },
+    PARAMS_ID,
+  )
   /**
    * Reintento de un documento fallido, sin volver a subir el archivo.
    *
@@ -430,146 +453,154 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * Solo desde `failed`: reencolar uno en cola/proceso duplicaría el job, y uno
    * promovido/revertido no tiene nada que reintentar.
    */
-  .post('/:id/retry', async ({ companyId, role, params, set, db }) => {
-    assertClientCapability(role, 'upload_excel', set);
+  .post(
+    '/:id/retry',
+    async ({ companyId, role, params, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
 
-    const [doc] = await db
-      .select({
-        id: documents.id,
-        status: documents.status,
-        createdAt: documents.createdAt,
-        updatedAt: documents.updatedAt,
-      })
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
+      const [doc] = await db
+        .select({
+          id: documents.id,
+          status: documents.status,
+          createdAt: documents.createdAt,
+          updatedAt: documents.updatedAt,
+        })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
 
-    /*
-     * ═══ TAMBIÉN SE PUEDE DESATASCAR UNA CARGA COLGADA (Jose, 2026-08-14) ═══
-     *
-     * Síntoma textual: *"ahorita se quedó trabada la ingesta"*.
-     *
-     * Antes esto exigía `failed` y nada más. Pero un documento puede quedarse en
-     * `processing` PARA SIEMPRE, y ese estado no lo escribe ningún fallo:
-     *
-     *   · pg-boss VENCE el job (`expireInSeconds`, una hora para la ingesta) y abandona la
-     *     promesa del worker. El `catch` que escribe `status='failed'` nunca corre.
-     *   · Con `retryLimit: 3` agotado, pg-boss marca el job fallido en SUS tablas — pero
-     *     nadie escribe `documents.status`. El documento queda en `processing` sin ningún
-     *     job vivo detrás.
-     *   · El proceso muere a media carga (deploy, OOM) después del último reintento.
-     *
-     * En los tres casos el documento quedaba **irrecuperable desde la interfaz**: no se
-     * puede revertir (exige `promoted`), no se puede cancelar (el worker que leería la
-     * cancelación ya no existe) y no se podía reintentar. La única salida era volver a
-     * subir el archivo — y desde el bug de las huellas, ni eso funcionaba.
-     *
-     * ES SEGURO REENCOLARLO, y no por optimismo: el worker es REANUDABLE, no solo
-     * idempotente. Lleva la marca de cada lote confirmado en `document_ingest_batches` y se
-     * los salta ANTES de llamar a Claude, así que un reintento cubre exactamente lo que
-     * falta. Es la misma garantía sobre la que ya se apoyan los reintentos de pg-boss.
-     *
-     * EL UMBRAL ES EL VENCIMIENTO DE LA COLA, no un número inventado: pasado ese tiempo
-     * pg-boss ya dio el job por muerto, así que no puede haber uno vivo con el que chocar.
-     * Y aunque lo hubiera, la reanudación por lote acota el daño a repetir un lote.
-     *
-     * `updated_at` NO se mantiene (no hay trigger y ningún UPDATE lo escribe), así que en la
-     * práctica la referencia es la hora de CREACIÓN del documento. Es el lado conservador a
-     * propósito: exige que pase más tiempo, no menos, y no depende de una columna que hoy
-     * miente. Si algún día se agrega el trigger, este código empieza a ser más preciso solo.
-     */
-    const vencimientoMs = (RETRY_POLICY[QUEUES.excelIngest].expireInSeconds ?? 3_600) * 1_000;
-    const referencia = doc.updatedAt ?? doc.createdAt;
-    const colgado =
-      (doc.status === 'processing' || doc.status === 'queued') &&
-      referencia !== null &&
-      Date.now() - new Date(referencia).getTime() > vencimientoMs;
-
-    if (doc.status !== 'failed' && !colgado) {
-      set.status = 409;
-      return {
-        error:
-          doc.status === 'processing' || doc.status === 'queued'
-            ? `Esta carga todavía está en curso. Si sigue así en un rato, vuelve a intentarlo (estado actual: ${doc.status}).`
-            : `Solo se puede reintentar un documento fallido o una carga colgada (estado actual: ${doc.status}).`,
-      };
-    }
-
-    // Mismo gate de profundidad de cola que la subida: un reintento cuesta lo mismo que
-    // una carga nueva y no debe poder saltárselo.
-    const gate = await checkQueueGate(companyId, 'excel');
-    if (!gate.allowed) {
-      set.status = 429;
-      reportRateLimited({
-        mechanism: 'queue_gate',
-        companyId,
-        route: 'POST /documents/:id/retry',
-        detail: 'excel',
-      });
-      const [company] = await db
-        .select({ locale: companies.locale })
-        .from(companies)
-        .where(eq(companies.id, companyId));
-      return {
-        error: MESSAGES[company?.locale ?? 'es'].queueFull(rateLimitConfig.queueGate.maxJobs),
-        reason: 'queue_full',
-      };
-    }
-
-    // `error_reason` se limpia acá y no al terminar: mientras el job corre, el error
-    // anterior ya no describe el estado del documento.
-    await db
-      .update(documents)
-      .set({ status: 'queued', errorReason: null })
-      .where(eq(documents.id, params.id));
-
-    await enqueue(QUEUES.excelIngest, { documentId: params.id, companyId });
-
-    return { id: doc.id, status: 'queued' as const };
-  })
-  .get('/:id', async ({ companyId, role, params, set, db }) => {
-    assertClientCapability(role, 'view_dashboard_reports', set);
-
-    // CU-868kh8qhp: bucket `read`. Esta es LA ruta de polling de estado del pipeline
-    // de ingesta — el caso concreto que config/rate-limit.ts cita al justificar por
-    // qué el bucket `read` es generoso (120 rpm) en vez de compartir cupo con `ai`.
-    const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents/:id');
-    if (limited) return limited;
-
-    const [doc] = await db
-      .select()
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
-    return {
-      id: doc.id,
-      originalFilename: doc.originalFilename,
-      status: doc.status,
-      rowCount: doc.rowCount,
-      flaggedCount: doc.flaggedCount,
-      errorReason: doc.errorReason,
-      createdAt: doc.createdAt,
       /*
-       * CU-868krmrcj: qué entendió el sistema de ESTE archivo — hojas procesadas, descartadas
-       * con su motivo, y de qué columna salió cada campo.
+       * ═══ TAMBIÉN SE PUEDE DESATASCAR UNA CARGA COLGADA (Jose, 2026-08-14) ═══
        *
-       * Va en el detalle y no en el listado a propósito: es un objeto por documento que solo
-       * tiene sentido mirar de a uno, y meterlo en la lista lo mandaría por la red en cada
-       * poll de estado (esta ruta es la de polling del pipeline) multiplicado por documento.
+       * Síntoma textual: *"ahorita se quedó trabada la ingesta"*.
        *
-       * `null` = documento anterior a la migración 0028, o que nunca llegó a procesarse. La UI
-       * lo distingue de un resumen vacío: al primero no le debe una explicación al cliente,
-       * del segundo sí.
+       * Antes esto exigía `failed` y nada más. Pero un documento puede quedarse en
+       * `processing` PARA SIEMPRE, y ese estado no lo escribe ningún fallo:
+       *
+       *   · pg-boss VENCE el job (`expireInSeconds`, una hora para la ingesta) y abandona la
+       *     promesa del worker. El `catch` que escribe `status='failed'` nunca corre.
+       *   · Con `retryLimit: 3` agotado, pg-boss marca el job fallido en SUS tablas — pero
+       *     nadie escribe `documents.status`. El documento queda en `processing` sin ningún
+       *     job vivo detrás.
+       *   · El proceso muere a media carga (deploy, OOM) después del último reintento.
+       *
+       * En los tres casos el documento quedaba **irrecuperable desde la interfaz**: no se
+       * puede revertir (exige `promoted`), no se puede cancelar (el worker que leería la
+       * cancelación ya no existe) y no se podía reintentar. La única salida era volver a
+       * subir el archivo — y desde el bug de las huellas, ni eso funcionaba.
+       *
+       * ES SEGURO REENCOLARLO, y no por optimismo: el worker es REANUDABLE, no solo
+       * idempotente. Lleva la marca de cada lote confirmado en `document_ingest_batches` y se
+       * los salta ANTES de llamar a Claude, así que un reintento cubre exactamente lo que
+       * falta. Es la misma garantía sobre la que ya se apoyan los reintentos de pg-boss.
+       *
+       * EL UMBRAL ES EL VENCIMIENTO DE LA COLA, no un número inventado: pasado ese tiempo
+       * pg-boss ya dio el job por muerto, así que no puede haber uno vivo con el que chocar.
+       * Y aunque lo hubiera, la reanudación por lote acota el daño a repetir un lote.
+       *
+       * `updated_at` NO se mantiene (no hay trigger y ningún UPDATE lo escribe), así que en la
+       * práctica la referencia es la hora de CREACIÓN del documento. Es el lado conservador a
+       * propósito: exige que pase más tiempo, no menos, y no depende de una columna que hoy
+       * miente. Si algún día se agrega el trigger, este código empieza a ser más preciso solo.
        */
-      readSummary: doc.readSummary ?? null,
-    };
-  })
+      const vencimientoMs = (RETRY_POLICY[QUEUES.excelIngest].expireInSeconds ?? 3_600) * 1_000;
+      const referencia = doc.updatedAt ?? doc.createdAt;
+      const colgado =
+        (doc.status === 'processing' || doc.status === 'queued') &&
+        referencia !== null &&
+        Date.now() - new Date(referencia).getTime() > vencimientoMs;
+
+      if (doc.status !== 'failed' && !colgado) {
+        set.status = 409;
+        return {
+          error:
+            doc.status === 'processing' || doc.status === 'queued'
+              ? `Esta carga todavía está en curso. Si sigue así en un rato, vuelve a intentarlo (estado actual: ${doc.status}).`
+              : `Solo se puede reintentar un documento fallido o una carga colgada (estado actual: ${doc.status}).`,
+        };
+      }
+
+      // Mismo gate de profundidad de cola que la subida: un reintento cuesta lo mismo que
+      // una carga nueva y no debe poder saltárselo.
+      const gate = await checkQueueGate(companyId, 'excel');
+      if (!gate.allowed) {
+        set.status = 429;
+        reportRateLimited({
+          mechanism: 'queue_gate',
+          companyId,
+          route: 'POST /documents/:id/retry',
+          detail: 'excel',
+        });
+        const [company] = await db
+          .select({ locale: companies.locale })
+          .from(companies)
+          .where(eq(companies.id, companyId));
+        return {
+          error: MESSAGES[company?.locale ?? 'es'].queueFull(rateLimitConfig.queueGate.maxJobs),
+          reason: 'queue_full',
+        };
+      }
+
+      // `error_reason` se limpia acá y no al terminar: mientras el job corre, el error
+      // anterior ya no describe el estado del documento.
+      await db
+        .update(documents)
+        .set({ status: 'queued', errorReason: null })
+        .where(eq(documents.id, params.id));
+
+      await enqueue(QUEUES.excelIngest, { documentId: params.id, companyId });
+
+      return { id: doc.id, status: 'queued' as const };
+    },
+    PARAMS_ID,
+  )
+  .get(
+    '/:id',
+    async ({ companyId, role, params, set, db }) => {
+      assertClientCapability(role, 'view_dashboard_reports', set);
+
+      // CU-868kh8qhp: bucket `read`. Esta es LA ruta de polling de estado del pipeline
+      // de ingesta — el caso concreto que config/rate-limit.ts cita al justificar por
+      // qué el bucket `read` es generoso (120 rpm) en vez de compartir cupo con `ai`.
+      const limited = await enforceTokenBucket('read', companyId, set, 'GET /documents/:id');
+      if (limited) return limited;
+
+      const [doc] = await db
+        .select()
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
+      }
+      return {
+        id: doc.id,
+        originalFilename: doc.originalFilename,
+        status: doc.status,
+        rowCount: doc.rowCount,
+        flaggedCount: doc.flaggedCount,
+        errorReason: doc.errorReason,
+        createdAt: doc.createdAt,
+        /*
+         * CU-868krmrcj: qué entendió el sistema de ESTE archivo — hojas procesadas, descartadas
+         * con su motivo, y de qué columna salió cada campo.
+         *
+         * Va en el detalle y no en el listado a propósito: es un objeto por documento que solo
+         * tiene sentido mirar de a uno, y meterlo en la lista lo mandaría por la red en cada
+         * poll de estado (esta ruta es la de polling del pipeline) multiplicado por documento.
+         *
+         * `null` = documento anterior a la migración 0028, o que nunca llegó a procesarse. La UI
+         * lo distingue de un resumen vacío: al primero no le debe una explicación al cliente,
+         * del segundo sí.
+         */
+        readSummary: doc.readSummary ?? null,
+      };
+    },
+    PARAMS_ID,
+  )
 
   /**
    * ═════════════════════════════════════════════════════════════════════════════════════════
@@ -599,148 +630,152 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * respuesta que no cambia nada — y peor, dejarle la impresión de que ya lo arregló. Esas
    * siguen su camino por revisión interna.
    */
-  .get('/:id/conceptos-pendientes', async ({ companyId, role, params, set, db }) => {
-    assertClientCapability(role, 'upload_excel', set);
+  .get(
+    '/:id/conceptos-pendientes',
+    async ({ companyId, role, params, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
 
-    const [doc] = await db
-      .select({ id: documents.id })
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
-
-    /*
-     * El filtro por `companyId` va ADEMÁS del documento, no en su lugar. El documento ya se
-     * verificó arriba, así que es redundante — y se pone igual porque es la regla que este
-     * proyecto no negocia: ninguna consulta a una tabla de negocio sin `company_id`. Una
-     * consulta correcta por accidente deja de serlo la primera vez que alguien la copia.
-     */
-    const filas = await db
-      .select({
-        payload: stagingRows.payload,
-        targetEntity: stagingRows.targetEntity,
-        flagReason: stagingRows.flagReason,
-      })
-      .from(stagingRows)
-      .where(
-        and(
-          eq(stagingRows.companyId, companyId),
-          eq(stagingRows.documentId, params.id),
-          eq(stagingRows.reviewStatus, 'pending'),
-          isNull(stagingRows.promotedAt),
-        ),
-      );
-
-    /*
-     * El agrupado se hace en CÓDIGO y no con un `GROUP BY`. No es pereza: la clave del grupo
-     * es `claveDeConcepto(textoDeConcepto(payload))`, la MISMA normalización que usa el
-     * diccionario para guardar y para buscar. Un `GROUP BY lower(...)` en SQL agruparía
-     * distinto —sin quitar acentos, sin colapsar palabras funcionales— y el cliente vería
-     * "Pago a CLARO" y "pago claro" como dos preguntas, contestaría las dos, y la segunda
-     * regla pisaría a la primera.
-     */
-    const porConcepto = new Map<
-      string,
-      {
-        concepto: string;
-        ejemplo: string;
-        filas: number;
-        entity: string;
-        /** Totales POR MONEDA. Ver la nota de abajo: sumarlas juntas daría una cifra falsa. */
-        montos: Map<string, number>;
+      const [doc] = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
       }
-    >();
 
-    for (const f of filas) {
-      if (!esArreglablePorCategoria(f.flagReason)) continue;
       /*
-       * Y además tiene que quedar LISTA con la respuesta. `evaluateFlagReason` devuelve
-       * `low_confidence` antes de mirar fecha, monto y moneda, así que una fila con un
-       * problema de dato se presenta como contestable con su problema real escondido detrás.
-       * Preguntarla es pedirle al cliente una respuesta que no cambia nada — y peor, dejarle
-       * la impresión de que lo resolvió. Ver `quedaLimpiaAlContestar`.
+       * El filtro por `companyId` va ADEMÁS del documento, no en su lugar. El documento ya se
+       * verificó arriba, así que es redundante — y se pone igual porque es la regla que este
+       * proyecto no negocia: ninguna consulta a una tabla de negocio sin `company_id`. Una
+       * consulta correcta por accidente deja de serlo la primera vez que alguien la copia.
        */
-      if (!quedaLimpiaAlContestar(f)) continue;
-      const p = f.payload as {
-        description?: unknown;
-        product?: unknown;
-        counterparty?: unknown;
-        originalAmount?: unknown;
-        originalCurrency?: unknown;
-      };
-      /*
-       * El texto sale de `description`, `product` o `counterparty` — el primero que exista.
-       * Antes salía SOLO de `description`, y las 1.739 filas de producción que no la traen
-       * quedaban invisibles para el cliente: su pantalla mostraba cero conceptos y las sesenta
-       * filas se iban enteras a revisión interna. Ver `textoDeConcepto`.
-       */
-      const texto = textoDeConcepto(p);
-      const clave = claveDeConcepto(texto);
-      if (clave === null) continue;
+      const filas = await db
+        .select({
+          payload: stagingRows.payload,
+          targetEntity: stagingRows.targetEntity,
+          flagReason: stagingRows.flagReason,
+        })
+        .from(stagingRows)
+        .where(
+          and(
+            eq(stagingRows.companyId, companyId),
+            eq(stagingRows.documentId, params.id),
+            eq(stagingRows.reviewStatus, 'pending'),
+            isNull(stagingRows.promotedAt),
+          ),
+        );
 
-      const monto = typeof p.originalAmount === 'number' ? Math.abs(p.originalAmount) : 0;
       /*
-       * ═══ LOS MONTOS VAN SEPARADOS POR MONEDA, NO SUMADOS ═══
-       *
-       * Estas filas están en STAGING: traen `originalAmount` + `originalCurrency` y todavía no
-       * tienen `amount_base`, porque la conversión ocurre al promover (`lib/promotion.ts`, con
-       * la tasa snapshoteada por fila). O sea que acá no hay una cifra convertida que sumar.
-       *
-       * Sumar GTQ con USD daría un número que no es ninguna de las dos cosas, mostrado al lado
-       * del nombre de un concepto como si fuera plata de verdad. En una herramienta de CFO eso
-       * no es un detalle de formato: un USD contado como un quetzal subestima ~7,7 veces, y el
-       * cliente no tiene forma de notarlo.
-       *
-       * Se agrupa por moneda y la pantalla las muestra por separado. Para el caso común —una
-       * sola moneda— se ve exactamente igual que un total.
+       * El agrupado se hace en CÓDIGO y no con un `GROUP BY`. No es pereza: la clave del grupo
+       * es `claveDeConcepto(textoDeConcepto(payload))`, la MISMA normalización que usa el
+       * diccionario para guardar y para buscar. Un `GROUP BY lower(...)` en SQL agruparía
+       * distinto —sin quitar acentos, sin colapsar palabras funcionales— y el cliente vería
+       * "Pago a CLARO" y "pago claro" como dos preguntas, contestaría las dos, y la segunda
+       * regla pisaría a la primera.
        */
-      const moneda = typeof p.originalCurrency === 'string' ? p.originalCurrency : 'GTQ';
+      const porConcepto = new Map<
+        string,
+        {
+          concepto: string;
+          ejemplo: string;
+          filas: number;
+          entity: string;
+          /** Totales POR MONEDA. Ver la nota de abajo: sumarlas juntas daría una cifra falsa. */
+          montos: Map<string, number>;
+        }
+      >();
 
-      const actual = porConcepto.get(clave);
-      if (actual) {
-        actual.filas++;
-        actual.montos.set(moneda, (actual.montos.get(moneda) ?? 0) + monto);
-      } else {
-        porConcepto.set(clave, {
-          concepto: clave,
-          // El texto CRUDO de la primera fila, no la clave normalizada: el cliente reconoce
-          // lo que él escribió en su archivo, no `pago|claro`. Y es el MISMO texto del que
-          // salió la clave — con `p.description` a secas, una fila identificada por su
-          // producto le mostraría la palabra "null" como nombre del concepto.
-          ejemplo: String(texto),
-          filas: 1,
-          entity: f.targetEntity,
-          montos: new Map([[moneda, monto]]),
-        });
+      for (const f of filas) {
+        if (!esArreglablePorCategoria(f.flagReason)) continue;
+        /*
+         * Y además tiene que quedar LISTA con la respuesta. `evaluateFlagReason` devuelve
+         * `low_confidence` antes de mirar fecha, monto y moneda, así que una fila con un
+         * problema de dato se presenta como contestable con su problema real escondido detrás.
+         * Preguntarla es pedirle al cliente una respuesta que no cambia nada — y peor, dejarle
+         * la impresión de que lo resolvió. Ver `quedaLimpiaAlContestar`.
+         */
+        if (!quedaLimpiaAlContestar(f)) continue;
+        const p = f.payload as {
+          description?: unknown;
+          product?: unknown;
+          counterparty?: unknown;
+          originalAmount?: unknown;
+          originalCurrency?: unknown;
+        };
+        /*
+         * El texto sale de `description`, `product` o `counterparty` — el primero que exista.
+         * Antes salía SOLO de `description`, y las 1.739 filas de producción que no la traen
+         * quedaban invisibles para el cliente: su pantalla mostraba cero conceptos y las sesenta
+         * filas se iban enteras a revisión interna. Ver `textoDeConcepto`.
+         */
+        const texto = textoDeConcepto(p);
+        const clave = claveDeConcepto(texto);
+        if (clave === null) continue;
+
+        const monto = typeof p.originalAmount === 'number' ? Math.abs(p.originalAmount) : 0;
+        /*
+         * ═══ LOS MONTOS VAN SEPARADOS POR MONEDA, NO SUMADOS ═══
+         *
+         * Estas filas están en STAGING: traen `originalAmount` + `originalCurrency` y todavía no
+         * tienen `amount_base`, porque la conversión ocurre al promover (`lib/promotion.ts`, con
+         * la tasa snapshoteada por fila). O sea que acá no hay una cifra convertida que sumar.
+         *
+         * Sumar GTQ con USD daría un número que no es ninguna de las dos cosas, mostrado al lado
+         * del nombre de un concepto como si fuera plata de verdad. En una herramienta de CFO eso
+         * no es un detalle de formato: un USD contado como un quetzal subestima ~7,7 veces, y el
+         * cliente no tiene forma de notarlo.
+         *
+         * Se agrupa por moneda y la pantalla las muestra por separado. Para el caso común —una
+         * sola moneda— se ve exactamente igual que un total.
+         */
+        const moneda = typeof p.originalCurrency === 'string' ? p.originalCurrency : 'GTQ';
+
+        const actual = porConcepto.get(clave);
+        if (actual) {
+          actual.filas++;
+          actual.montos.set(moneda, (actual.montos.get(moneda) ?? 0) + monto);
+        } else {
+          porConcepto.set(clave, {
+            concepto: clave,
+            // El texto CRUDO de la primera fila, no la clave normalizada: el cliente reconoce
+            // lo que él escribió en su archivo, no `pago|claro`. Y es el MISMO texto del que
+            // salió la clave — con `p.description` a secas, una fila identificada por su
+            // producto le mostraría la palabra "null" como nombre del concepto.
+            ejemplo: String(texto),
+            filas: 1,
+            entity: f.targetEntity,
+            montos: new Map([[moneda, monto]]),
+          });
+        }
       }
-    }
 
-    /*
-     * Ordenado por PLATA y no por cantidad de filas. Si el cliente contesta tres de seis y se
-     * va, que las tres que contestó sean las que más mueven su contabilidad. Cien filas de
-     * Q 5 pesan menos que dos de Q 40.000, y el orden de una lista es lo único que decide qué
-     * se contesta cuando nadie la termina.
-     *
-     * El criterio es el MAYOR total de una sola moneda, no la suma de todas: sumarlas para
-     * ordenar volvería a mezclar lo que arriba se separó, y con una tasa implícita de 1:1 el
-     * orden podría quedar al revés para un cliente que factura en dólares.
-     */
-    const conceptos = [...porConcepto.values()]
-      .map((c) => ({
-        concepto: c.concepto,
-        ejemplo: c.ejemplo,
-        filas: c.filas,
-        entity: c.entity,
-        montos: [...c.montos.entries()]
-          .map(([currency, total]) => ({ currency, total }))
-          .sort((a, b) => b.total - a.total),
-      }))
-      .sort((a, b) => (b.montos[0]?.total ?? 0) - (a.montos[0]?.total ?? 0));
+      /*
+       * Ordenado por PLATA y no por cantidad de filas. Si el cliente contesta tres de seis y se
+       * va, que las tres que contestó sean las que más mueven su contabilidad. Cien filas de
+       * Q 5 pesan menos que dos de Q 40.000, y el orden de una lista es lo único que decide qué
+       * se contesta cuando nadie la termina.
+       *
+       * El criterio es el MAYOR total de una sola moneda, no la suma de todas: sumarlas para
+       * ordenar volvería a mezclar lo que arriba se separó, y con una tasa implícita de 1:1 el
+       * orden podría quedar al revés para un cliente que factura en dólares.
+       */
+      const conceptos = [...porConcepto.values()]
+        .map((c) => ({
+          concepto: c.concepto,
+          ejemplo: c.ejemplo,
+          filas: c.filas,
+          entity: c.entity,
+          montos: [...c.montos.entries()]
+            .map(([currency, total]) => ({ currency, total }))
+            .sort((a, b) => b.total - a.total),
+        }))
+        .sort((a, b) => (b.montos[0]?.total ?? 0) - (a.montos[0]?.total ?? 0));
 
-    return { conceptos, total: conceptos.length };
-  })
+      return { conceptos, total: conceptos.length };
+    },
+    PARAMS_ID,
+  )
 
   /**
    * La respuesta del cliente: qué es cada concepto.
@@ -961,6 +996,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       return { filasResueltas, reglasGuardadas, conceptosRecibidos: respuestas.size };
     },
     {
+      ...PARAMS_ID,
       body: t.Object({
         respuestas: t.Array(
           t.Object({
@@ -1003,100 +1039,104 @@ export const ingestion = new Elysia({ prefix: '/documents' })
    * dueño sabe— porque son una sola parada. Dos pantallas seguidas para la misma carga es la
    * forma más segura de que la segunda no se conteste.
    */
-  .get('/:id/confirmacion', async ({ companyId, role, params, set, db }) => {
-    assertClientCapability(role, 'upload_excel', set);
+  .get(
+    '/:id/confirmacion',
+    async ({ companyId, role, params, set, db }) => {
+      assertClientCapability(role, 'upload_excel', set);
 
-    const [doc] = await db
-      .select({
-        id: documents.id,
-        status: documents.status,
-        confirmedAt: documents.confirmedAt,
-        readSummary: documents.readSummary,
-        rowCount: documents.rowCount,
-        flaggedCount: documents.flaggedCount,
-      })
-      .from(documents)
-      .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
+      const [doc] = await db
+        .select({
+          id: documents.id,
+          status: documents.status,
+          confirmedAt: documents.confirmedAt,
+          readSummary: documents.readSummary,
+          rowCount: documents.rowCount,
+          flaggedCount: documents.flaggedCount,
+        })
+        .from(documents)
+        .where(and(eq(documents.id, params.id), eq(documents.companyId, companyId)));
 
-    if (!doc) {
-      set.status = 404;
-      return { error: 'Document not found' };
-    }
-
-    /*
-     * ═══════════════════════════════════════════════════════════════════════════════════════
-     * LA MUESTRA: TRES FILAS DE CADA HOJA, YA INTERPRETADAS (2026-09-01)
-     * ═══════════════════════════════════════════════════════════════════════════════════════
-     *
-     * Sin esto, la pantalla le pide al cliente que apruebe un nombre de hoja y un total. Eso
-     * alcanza para detectar una hoja de más o de menos —que es lo que atrapó los siete fallos
-     * de esta semana— pero **no alcanza para el que queda**: leer la columna equivocada.
-     *
-     * Es el fallo que `sheet-header` documenta como el peor de su clase: "no falla nada
-     * visible, los datos salen de las columnas equivocadas". El total puede verse perfecto y
-     * cada fila estar mal. Lo único que lo delata es ver tres filas como quedaron y
-     * reconocerlas —o no— contra el archivo que el dueño tiene abierto al lado.
-     *
-     * Tres y no diez: la pantalla es para decidir, no para auditar. Y se toman las PRIMERAS de
-     * cada hoja, no una muestra al azar, porque el cliente puede compararlas con su archivo sin
-     * buscarlas.
-     */
-    const muestras = await db
-      .select({
-        hoja: stagingRows.sheetName,
-        payload: stagingRows.payload,
-        entidad: stagingRows.targetEntity,
-      })
-      .from(stagingRows)
-      .where(
-        and(
-          eq(stagingRows.companyId, companyId),
-          eq(stagingRows.documentId, params.id),
-          isNotNull(stagingRows.sheetName),
-        ),
-      )
-      .orderBy(asc(stagingRows.id))
-      .limit(400);
-
-    const porHoja = new Map<string, { muestra: unknown[]; tipos: Record<string, number> }>();
-    for (const m of muestras) {
-      const clave = m.hoja!;
-      const e = porHoja.get(clave) ?? { muestra: [], tipos: {} };
-      const p = m.payload as Record<string, unknown>;
-      // El TIPO con el que entró cada fila, contado por hoja: es lo que permite decir "esta
-      // hoja entró como ingreso" y ofrecer cambiarla entera.
-      const tipo = typeof p.type === 'string' ? p.type : m.entidad;
-      e.tipos[tipo] = (e.tipos[tipo] ?? 0) + 1;
-      if (e.muestra.length < 3) {
-        e.muestra.push({
-          fecha: (p.date ?? p.issueDate ?? null) as string | null,
-          concepto: (p.description ?? p.product ?? p.counterparty ?? null) as string | null,
-          monto: typeof p.originalAmount === 'number' ? p.originalAmount : null,
-          moneda: typeof p.originalCurrency === 'string' ? p.originalCurrency : null,
-          tipo,
-          categoria: typeof p.category === 'string' ? p.category : null,
-        });
+      if (!doc) {
+        set.status = 404;
+        return { error: 'Document not found' };
       }
-      porHoja.set(clave, e);
-    }
 
-    return {
-      documentId: doc.id,
-      status: doc.status,
-      /** `null` = todavía no la confirmó. Es lo que decide si la pantalla es un portón. */
-      confirmedAt: doc.confirmedAt?.toISOString() ?? null,
-      filas: doc.rowCount ?? 0,
-      marcadas: doc.flaggedCount ?? 0,
-      /** Por hoja: qué tipos produjo y tres filas como quedaron. Ver el bloque de arriba. */
-      detalle: Object.fromEntries(porHoja),
       /*
-       * El MISMO resumen que ya se le muestra después de procesar (`read-summary`), no una
-       * segunda lectura: si el portón dijera una cosa y el resumen otra sobre la misma carga,
-       * el cliente dejaría de creerle a los dos. Ver `lib/read-summary.ts`.
+       * ═══════════════════════════════════════════════════════════════════════════════════════
+       * LA MUESTRA: TRES FILAS DE CADA HOJA, YA INTERPRETADAS (2026-09-01)
+       * ═══════════════════════════════════════════════════════════════════════════════════════
+       *
+       * Sin esto, la pantalla le pide al cliente que apruebe un nombre de hoja y un total. Eso
+       * alcanza para detectar una hoja de más o de menos —que es lo que atrapó los siete fallos
+       * de esta semana— pero **no alcanza para el que queda**: leer la columna equivocada.
+       *
+       * Es el fallo que `sheet-header` documenta como el peor de su clase: "no falla nada
+       * visible, los datos salen de las columnas equivocadas". El total puede verse perfecto y
+       * cada fila estar mal. Lo único que lo delata es ver tres filas como quedaron y
+       * reconocerlas —o no— contra el archivo que el dueño tiene abierto al lado.
+       *
+       * Tres y no diez: la pantalla es para decidir, no para auditar. Y se toman las PRIMERAS de
+       * cada hoja, no una muestra al azar, porque el cliente puede compararlas con su archivo sin
+       * buscarlas.
        */
-      hojas: doc.readSummary?.hojas ?? [],
-    };
-  })
+      const muestras = await db
+        .select({
+          hoja: stagingRows.sheetName,
+          payload: stagingRows.payload,
+          entidad: stagingRows.targetEntity,
+        })
+        .from(stagingRows)
+        .where(
+          and(
+            eq(stagingRows.companyId, companyId),
+            eq(stagingRows.documentId, params.id),
+            isNotNull(stagingRows.sheetName),
+          ),
+        )
+        .orderBy(asc(stagingRows.id))
+        .limit(400);
+
+      const porHoja = new Map<string, { muestra: unknown[]; tipos: Record<string, number> }>();
+      for (const m of muestras) {
+        const clave = m.hoja!;
+        const e = porHoja.get(clave) ?? { muestra: [], tipos: {} };
+        const p = m.payload as Record<string, unknown>;
+        // El TIPO con el que entró cada fila, contado por hoja: es lo que permite decir "esta
+        // hoja entró como ingreso" y ofrecer cambiarla entera.
+        const tipo = typeof p.type === 'string' ? p.type : m.entidad;
+        e.tipos[tipo] = (e.tipos[tipo] ?? 0) + 1;
+        if (e.muestra.length < 3) {
+          e.muestra.push({
+            fecha: (p.date ?? p.issueDate ?? null) as string | null,
+            concepto: (p.description ?? p.product ?? p.counterparty ?? null) as string | null,
+            monto: typeof p.originalAmount === 'number' ? p.originalAmount : null,
+            moneda: typeof p.originalCurrency === 'string' ? p.originalCurrency : null,
+            tipo,
+            categoria: typeof p.category === 'string' ? p.category : null,
+          });
+        }
+        porHoja.set(clave, e);
+      }
+
+      return {
+        documentId: doc.id,
+        status: doc.status,
+        /** `null` = todavía no la confirmó. Es lo que decide si la pantalla es un portón. */
+        confirmedAt: doc.confirmedAt?.toISOString() ?? null,
+        filas: doc.rowCount ?? 0,
+        marcadas: doc.flaggedCount ?? 0,
+        /** Por hoja: qué tipos produjo y tres filas como quedaron. Ver el bloque de arriba. */
+        detalle: Object.fromEntries(porHoja),
+        /*
+         * El MISMO resumen que ya se le muestra después de procesar (`read-summary`), no una
+         * segunda lectura: si el portón dijera una cosa y el resumen otra sobre la misma carga,
+         * el cliente dejaría de creerle a los dos. Ver `lib/read-summary.ts`.
+         */
+        hojas: doc.readSummary?.hojas ?? [],
+      };
+    },
+    PARAMS_ID,
+  )
 
   /**
    * "Todo correcto, publicar" — y opcionalmente "esta hoja no la cuentes".
@@ -1250,6 +1290,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       return { confirmado: true, yaEstaba: false, hojasExcluidas, hojasReclasificadas };
     },
     {
+      ...PARAMS_ID,
       body: t.Object({
         /** Nombres de hoja que el cliente dice que NO debe contarse. */
         excluir: t.Optional(t.Array(t.String({ minLength: 1, maxLength: 200 }), { maxItems: 50 })),
@@ -1322,6 +1363,31 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         return { error: 'Esta carga ya se publicó. Revierte y vuelve a subirla para corregirla.' };
       }
 
+      /*
+       * ⚠️ UNA CORRECCIÓN A LA VEZ POR CARGA (2026-09-01, medido en producción).
+       *
+       * Dos correcciones seguidas sobre el mismo documento encolaron dos corridas del worker
+       * que se pisaron —cada una borra las filas y los lotes de su hoja mientras la otra los
+       * escribe— y **la carga terminó en `failed`**: el cliente pierde el archivo entero por
+       * haber corregido dos cosas seguido, que es exactamente lo que esta pantalla lo invita a
+       * hacer.
+       *
+       * El frontend ya deshabilita el control mientras espera, pero **la UI no es donde se
+       * garantiza nada**: basta una pestaña duplicada, un reintento de red o un cliente que no
+       * sea el nuestro. La condición se afirma acá, que es el único punto por el que pasan
+       * todas las correcciones.
+       *
+       * Se devuelve 409 y no se encola en silencio: el cliente tiene que saber que su segunda
+       * corrección no se tomó, o creería que sí y publicaría datos que no revisó.
+       */
+      if (doc.status === 'processing') {
+        set.status = 409;
+        return {
+          error:
+            'Esa carga se está volviendo a leer. Espera a que termine para corregir otra hoja.',
+        };
+      }
+
       const previo = doc.overrides ?? {};
       const forzar = new Set(previo.forzar ?? []);
       if (body.forzar) forzar.add(body.hoja);
@@ -1374,6 +1440,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       return { reprocesando: true, hoja: body.hoja };
     },
     {
+      ...PARAMS_ID,
       body: t.Object({
         hoja: t.String({ minLength: 1, maxLength: 200 }),
         /** "Esta hoja SÍ debería contar": salta los filtros de descarte para ella. */

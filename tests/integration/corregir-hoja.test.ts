@@ -187,6 +187,12 @@ describe('POST /documents/:id/corregir-hoja', () => {
       method: 'POST',
       body: JSON.stringify({ hoja: 'Clientes', forzar: true }),
     });
+    /*
+     * El worker termina y el documento vuelve a esperar confirmación. Se simula porque acá no
+     * corre el worker, y es el ciclo REAL: desde que hay una corrección a la vez por carga
+     * (409 mientras está en `processing`), la segunda solo puede llegar después de la primera.
+     */
+    await owner`update documents set status = 'awaiting_confirmation' where id = ${doc}`;
     await pedir(`/${doc}/corregir-hoja`, {
       method: 'POST',
       body: JSON.stringify({ hoja: 'Ventas', columnas: { amount: 4 } }),
@@ -199,6 +205,41 @@ describe('POST /documents/:id/corregir-hoja', () => {
      * sería "a veces funciona", que es el más caro de diagnosticar.
      */
     expect(fila!.o).toEqual({ forzar: ['Clientes'], columnas: { Ventas: { amount: 4 } } });
+  });
+
+  test('⚠️ una segunda corrección mientras se procesa se RECHAZA, no se encola', async () => {
+    /*
+     * Medido en producción: dos correcciones seguidas encolaron dos corridas del worker que se
+     * pisaron —cada una borra las filas y los lotes de su hoja mientras la otra los escribe— y
+     * **la carga terminó en `failed`**. El cliente pierde el archivo entero por haber corregido
+     * dos cosas seguido, que es justo lo que esta pantalla lo invita a hacer.
+     *
+     * El frontend ya deshabilita el control mientras espera, pero la UI no es donde se
+     * garantiza nada: basta una pestaña duplicada o un reintento de red.
+     */
+    const doc = await crearCarga('dos-correcciones.xlsx');
+    encolados.length = 0;
+
+    const primera = await pedir(`/${doc}/corregir-hoja`, {
+      method: 'POST',
+      body: JSON.stringify({ hoja: 'Ventas', forzar: true }),
+    });
+    expect(primera.status).toBe(200);
+    // La primera dejó el documento en `processing`, que es lo que la segunda tiene que ver.
+
+    const segunda = await pedir(`/${doc}/corregir-hoja`, {
+      method: 'POST',
+      body: JSON.stringify({ hoja: 'Clientes', forzar: true }),
+    });
+    expect(segunda.status).toBe(409);
+
+    /*
+     * Y NO se encoló una segunda corrida: es lo que de verdad rompía. Un 409 que igual encola
+     * dejaría el mismo choque con un mensaje de error encima.
+     */
+    expect(encolados.filter((e) => e.queue === 'excel.ingest')).toHaveLength(1);
+    // La hoja de la segunda tampoco se tocó: sus filas siguen ahí para cuando pueda pedirla.
+    expect(await contar(doc, 'Clientes', 'staging_rows')).toBe(1);
   });
 
   test('una carga YA publicada no se corrige: reprocesar encima la duplicaría', async () => {
@@ -310,4 +351,41 @@ describe('POST /documents/:id/cancel sobre una carga esperando confirmación', (
     expect(res.status).toBe(409);
     expect(JSON.stringify(await res.json())).toContain('revertir');
   });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * UN `:id` QUE NO ES UUID SE RECHAZA EN EL BORDE (2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `GET /documents/undefined/confirmacion` devolvía **500** y dejaba una conexión RESERVADA que
+ * el watchdog mataba 90 s después (`[db-scope] transacción sin cerrar tras 90000 ms: es una
+ * FUGA`). Visto en producción, y al frontend le basta un `documentId` en `undefined` para
+ * producirlo.
+ *
+ * **El pool son 10 conexiones**, así que unas pocas peticiones malformadas lo agotan — y "el
+ * login está roto" es el síntoma con el que eso se reporta. El watchdog sigue siendo la red;
+ * esto es no tirarse.
+ */
+describe('el `:id` de las rutas de documentos', () => {
+  const RUTAS = [
+    ['GET', '/undefined/confirmacion'],
+    ['GET', '/undefined'],
+    ['GET', '/undefined/conceptos-pendientes'],
+    ['POST', '/undefined/cancel'],
+    ['POST', '/undefined/revert'],
+    ['POST', '/undefined/retry'],
+  ] as const;
+
+  for (const [metodo, ruta] of RUTAS) {
+    test(`${metodo} ${ruta} se rechaza sin tocar la base`, async () => {
+      const res = await pedir(ruta, { method: metodo });
+      /*
+       * Lo que importa no es el código exacto sino que NO sea 500: un 500 acá significa que la
+       * consulta llegó a Postgres con un uuid inválido, reventó, y dejó la transacción abierta.
+       */
+      expect(res.status).not.toBe(500);
+      expect(res.status).toBeGreaterThanOrEqual(400);
+    });
+  }
 });
