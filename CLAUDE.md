@@ -1221,6 +1221,38 @@ Conventions & gotchas:
   - ⚠️ **Una cantidad de CERO sí se pinta.** Es un valor legítimo del inventario y significa
     algo (no hay existencia); tratarlo como ausente escondería justo la fila que hay que mirar.
     Hay test y la mutación `if (!v) continue` lo pone en rojo.
+- **EL DUEÑO CORRIGE DÓNDE SE REGISTRA UNA HOJA** (`sheet_overrides.destino`, reporte de Jose
+  2026-09-01). *"Si ponemos solo los del dashboard y el campo va a cuentas por pagar, no lo
+  estamos registrando."* Las cuatro opciones que el cliente veía —ingreso, costo, gasto, otro—
+  son los `type` del ESTADO DE RESULTADOS. La ENTIDAD (movimiento / cuenta por cobrar / cuenta
+  por pagar) la decidía solo la estructura de la hoja, y cuando se equivocaba **no había forma
+  de corregirla**. El caso no es hipotético: una hoja de cobros tiene fecha, cliente y monto, así
+  que el modelo la clasifica `transaction/revenue` —la regla "un cobro no es una venta nueva"
+  existe por eso— y entonces el ingreso entra al dashboard con la cartera en CERO. La única
+  salida era revertir y pedirle al cliente que editara su Excel.
+  Esto **matiza la decisión de Semi** de que *"el cliente decide `type` y `category`, NO
+  `entity`"*: sigue siendo cierta para la fila (la forma contable la determina la estructura),
+  pero cuando la estructura se leyó mal el dueño tiene que poder decirlo, y lo dice por HOJA.
+  - ⚠️ **ES UN REPROCESO Y NO UN `UPDATE`, y eso decide el diseño**: el payload de una
+    `transaction` **no guarda `counterparty` ni `dueDate`** (ver `assemblePayload`). Convertirla
+    desde la fila ya guardada perdería los dos campos con los que se lee Por cobrar — y el aging
+    se calcula con el vencimiento. Hay test unitario que lo fija: la misma fila como `invoice`
+    los trae y como `transaction` no.
+  - **Por HOJA y no por concepto**: una hoja es homogénea por construcción —quien escribe
+    `CuentasPorCobrar` no mete ventas ahí— y un concepto puede agrupar filas de varias hojas,
+    donde el cambio sería ambiguo.
+  - **Son DOS preguntas separadas, no seis opciones en una lista.** No son alternativas: una
+    factura emitida es a la vez un INGRESO y una CUENTA POR COBRAR, así que mezclarlas obligaría
+    al dueño a elegir entre dos respuestas que ambas son ciertas y perdería la mitad.
+  - ⚠️ **`aplicarEntidadForzada` se EXTRAJO de `classifySheetRows`** por la misma lección que
+    `mapaDelLote`: los e2e doblan esa función entera, así que lo que vive adentro no lo ejecuta
+    ninguna prueba. El forzado se escribió primero ahí y el e2e pasó en VERDE con las filas
+    todavía en `transaction`. Ahora el doble llama al mismo código y mutarlo lo pone en rojo.
+  - `skip` no se toca: el modelo dijo que esa fila no es un movimiento y forzarle una entidad la
+    convertiría en dinero.
+  - El e2e fija además que forzar `invoice` produce el **DOBLE** de filas —la cuenta por cobrar
+    y su ingreso devengado—, que es la regla del 2026-08-19 funcionando. Con solo la mitad, el
+    dinero estaría en Por cobrar y el dashboard en cero: el bug de U3TECH.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
