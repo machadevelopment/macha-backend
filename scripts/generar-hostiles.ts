@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LIBROS, libroInventarioAislado } from '../src/lib/hostiles/libros';
 import { libroElInfierno } from '../src/lib/hostiles/libro-el-infierno';
+import { libroElAbismo } from '../src/lib/hostiles/libro-el-abismo';
 import { aWorkbook } from '../src/lib/hostiles/pipeline-doble';
 
 const destino = process.argv[2] ?? './exceles-hostiles';
@@ -26,7 +27,7 @@ const lineas: string[] = [
   '',
 ];
 
-for (const fabricar of [...LIBROS, libroInventarioAislado, libroElInfierno]) {
+for (const fabricar of [...LIBROS, libroInventarioAislado, libroElInfierno, libroElAbismo]) {
   const libro = fabricar();
   const buf = XLSX.write(aWorkbook(libro), { type: 'buffer', bookType: 'xlsx' });
   writeFileSync(join(destino, libro.archivo), buf);
