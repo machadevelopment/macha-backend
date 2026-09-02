@@ -2,6 +2,7 @@ import { and, eq, isNull, sql as rawSql } from 'drizzle-orm';
 import type { DB } from '@/db/client';
 import { inventoryItems } from '@/db/schema';
 import { normalizeHeader } from './sheet-classifier';
+import { columnasClave } from './sheet-relations';
 import {
   createItem,
   recordMovement,
@@ -603,4 +604,66 @@ export async function importarInventario(
   }
 
   return out;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * "ESTA HOJA ES MI INVENTARIO": EL DUEÑO LO DICE, Y NO HAY QUE ADIVINARLO
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * *"No solo los campos del dashboard, sino los campos de analítica y los campos de inventario.
+ * Todas las opciones en donde registremos data."* (Jose, 2026-09-02)
+ *
+ * Los dos caminos de arriba deciden SOLOS si una hoja es de existencias: por vocabulario
+ * (`firmaDeCatalogo` → `mapearColumnasDeInventario`) o por la forma del libro (`analizarEsquema`
+ * → `mapearInventarioSerializado`). Los dos aciertan seguido y los dos tienen su hueco
+ * documentado, y el segundo hueco está MEDIDO y sin cerrar:
+ *
+ *   ⚠️ *"un inventario serializado que ninguna otra hoja referencia entra como GASTO…
+ *   `analizarEsquema` solo reconoce una tabla de entidades si otra hoja la referencia; cuando la
+ *   facturación no nombra el VIN, nada la apunta y los vehículos en stock llegan al modelo.
+ *   Medido: **Q 1.864.500** de egreso que nadie desembolsó."*
+ *
+ * La nota de ese hueco dice que el arreglo NO es aflojar el esquema del libro —hay un
+ * contraejemplo en un test que ya existe— sino reconocer las existencias serializadas de otra
+ * forma. Este es ese camino, y es el mejor de todos porque no es una heurística más: **lo
+ * afirma el dueño**, que sabe qué tiene en su bodega mejor que cualquier señal que podamos
+ * medir. Ninguna de las dos detecciones automáticas se toca, así que no hay forma de que esto
+ * empeore un archivo que hoy entra bien.
+ *
+ * ═══ POR QUÉ HACE FALTA UN MAPEO PROPIO Y NO ALCANZAN LOS DOS DE ARRIBA ═══
+ *
+ * `mapearColumnasDeInventario` exige columna de CANTIDAD y `mapearInventarioSerializado` exige
+ * que el llamador ya sepa cuál es la columna de serie —se la da el esquema, o sea justo lo que
+ * en este caso no existe: si otra hoja la referenciara, no habría hecho falta que el dueño lo
+ * dijera—. Acá la serie se busca sola: la columna ÚNICA POR FILA de la hoja.
+ *
+ * Se prefiere el camino FUNGIBLE cuando la hoja trae cantidad. Al revés, una hoja de bodega con
+ * `SKU · Descripción · Existencia` tiene el SKU único por fila y entraría como serializada, o
+ * sea **una unidad por SKU donde hay cuarenta**: el inventario del cliente saldría en 1.
+ */
+export function mapearInventarioForzado(
+  headerRow: unknown[],
+  filas: unknown[][],
+): MapaDeInventario | null {
+  const fungible = mapearColumnasDeInventario(headerRow);
+  if (fungible) return fungible;
+
+  /*
+   * Sin cantidad: se prueba serializado. La columna de serie es la que no repite un solo valor
+   * — `columnasClave` ya sabe medir eso y es la MISMA función con la que el esquema del libro
+   * decide qué es un identificador. Una segunda definición de "esto parece una clave" sería la
+   * copia de siempre, y acá se traduce en meter artículos inventados al inventario del cliente.
+   */
+  const candidatas = columnasClave([headerRow, ...filas]).filter((c) => c.unica);
+  if (candidatas.length === 0) return null;
+
+  /*
+   * La de MÁS a la izquierda entre las únicas. En una hoja hecha por una persona el
+   * identificador va primero (`VIN`, `No. Serie`, `Certificado`), y con varias candidatas hay
+   * que elegir una sola: tomar la última haría que el resultado dependiera de cuántas columnas
+   * descriptivas trajera la hoja a la derecha.
+   */
+  const serie = candidatas.reduce((a, b) => (a.indice <= b.indice ? a : b));
+  return mapearInventarioSerializado(headerRow, serie.indice);
 }

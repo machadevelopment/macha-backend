@@ -3,6 +3,7 @@ import {
   cuentaComoExistencia,
   mapearColumnasDeInventario,
   mapearInventarioSerializado,
+  mapearInventarioForzado,
 } from './inventory-import';
 import { firmaDeCatalogo, canSkipSheet } from './sheet-classifier';
 
@@ -278,5 +279,87 @@ describe('el estado decide si la unidad sigue en existencia', () => {
     ]) {
       expect(cuentaComoExistencia(v)).toBe(true);
     }
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * "ESTA HOJA ES MI INVENTARIO" — EL MAPEO CUANDO LO AFIRMA EL DUEÑO (2026-09-02)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Los dos caminos automáticos deciden solos y los dos tienen su hueco. Este no decide nada: el
+ * dueño ya dijo que la hoja es su inventario y lo único que falta es leerla. Cierra el hueco
+ * medido de *"un inventario serializado que ninguna otra hoja referencia entra como GASTO —
+ * Q 1.864.500 de egreso que nadie desembolsó"*.
+ */
+describe('mapearInventarioForzado', () => {
+  test('con columna de CANTIDAD usa el camino fungible', () => {
+    const m = mapearInventarioForzado(
+      ['sku', 'descripcion', 'existencia', 'costo unitario'],
+      [
+        ['CAF-001', 'Café en grano', 40, 55],
+        ['CAF-002', 'Café molido', 12, 60],
+      ],
+    );
+    expect(m).not.toBeNull();
+    expect(m!.quantity).toBe(2);
+    expect(m!.sku).toBe(0);
+  });
+
+  test('⚠️ el fungible GANA aunque el SKU sea único por fila', () => {
+    /*
+     * Es la decisión que más cuesta si se toma al revés. Una hoja de bodega tiene el SKU único
+     * por fila, así que entraría por el camino serializado —UNA unidad por SKU— y el
+     * inventario del cliente saldría en 1 donde hay cuarenta. La cantidad, cuando existe, es
+     * la respuesta: la hoja la escribió para eso.
+     */
+    const m = mapearInventarioForzado(
+      ['sku', 'nombre', 'existencia'],
+      [
+        ['A-1', 'Uno', 40],
+        ['A-2', 'Dos', 12],
+        ['A-3', 'Tres', 7],
+        ['A-4', 'Cuatro', 3],
+      ],
+    );
+    expect(m!.quantity).not.toBeNull();
+  });
+
+  test('SIN cantidad, cae al serializado por la columna única de más a la izquierda', () => {
+    /*
+     * La forma de una concesionaria: una fila por unidad, identificada por su serie. La
+     * cantidad de cada una es 1 y escribirla sería redundante — `quantity: null` es lo que
+     * marca este mapa como serializado.
+     */
+    const m = mapearInventarioForzado(
+      ['vin', 'modelo', 'costo'],
+      [
+        ['VIN-9BW11000', 'Modelo 0', 150000],
+        ['VIN-9BW11001', 'Modelo 1', 160000],
+        ['VIN-9BW11002', 'Modelo 2', 170000],
+        ['VIN-9BW11003', 'Modelo 3', 180000],
+      ],
+    );
+    expect(m).not.toBeNull();
+    expect(m!.quantity).toBeNull();
+    expect(m!.sku).toBe(0);
+  });
+
+  test('sin cantidad y sin ninguna columna única, NO se inventa un inventario', () => {
+    /*
+     * Se devuelve `null` y el worker lo dice y descarta la hoja. Mandarla de vuelta al modelo
+     * reintroduciría el costo falso que el dueño está corrigiendo, y adivinar una columna
+     * metería artículos inventados en su bodega.
+     */
+    const m = mapearInventarioForzado(
+      ['fecha', 'concepto'],
+      [
+        ['2026-07-01', 'Alquiler'],
+        ['2026-08-01', 'Alquiler'],
+        ['2026-09-01', 'Alquiler'],
+        ['2026-10-01', 'Alquiler'],
+      ],
+    );
+    expect(m).toBeNull();
   });
 });

@@ -237,7 +237,7 @@ function comoClave(v: unknown): string | null {
 }
 
 /** Una columna que puede ser un identificador, con sus valores ya normalizados. */
-interface ColumnaClave {
+export interface ColumnaClave {
   indice: number;
   valores: Set<string>;
   /** Cuántas filas traen un valor utilizable. */
@@ -252,7 +252,7 @@ interface ColumnaClave {
  * Devuelve varias a propósito: un archivo de PYME rara vez marca cuál es la clave, y la
  * columna que relaciona dos hojas no tiene por qué ser la primera ni llamarse `ID`.
  */
-function columnasClave(rows: unknown[][]): ColumnaClave[] {
+export function columnasClave(rows: unknown[][]): ColumnaClave[] {
   const datos = rows.slice(1);
   if (datos.length === 0) return [];
 

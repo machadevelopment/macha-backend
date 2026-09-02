@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { destinosDeLaFila, destinosDeLaHoja } from './destinos-de-la-fila';
+import type { ClaveDeOpcion } from './destinos-de-la-fila';
+import { destinosDeLaFila, destinosDeLaHoja, opcionesParaConcepto } from './destinos-de-la-fila';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -18,7 +19,7 @@ describe('destinosDeLaFila', () => {
     destinosDeLaFila({ targetEntity, payload: payload as Record<string, unknown> }).sort();
 
   test('una venta simple: ingresos del período', () => {
-    expect(fila('transaction', { type: 'revenue' })).toEqual(['ingresos']);
+    expect(fila('transaction', { type: 'revenue' })).toEqual(['flujo', 'ingresos']);
   });
 
   test('una FACTURA EMITIDA llega a Por cobrar Y a Ingresos', () => {
@@ -27,16 +28,17 @@ describe('destinosDeLaFila', () => {
      * (regla del 2026-08-19). Decir solo "Por cobrar" escondería que también movió el
      * dashboard, que es donde el dueño mira primero.
      */
-    expect(fila('invoice', { type: 'revenue' })).toEqual(['ingresos', 'porCobrar']);
+    expect(fila('invoice', { type: 'revenue' })).toEqual(['flujo', 'ingresos', 'porCobrar']);
   });
 
   test('una CUENTA POR PAGAR llega a Por pagar Y a Costos', () => {
     // Simétrico: desde el 2026-08-30 una factura recibida produce su costo.
-    expect(fila('bill', { type: 'cogs' })).toEqual(['costos', 'porPagar']);
+    expect(fila('bill', { type: 'cogs' })).toEqual(['costos', 'flujo', 'porPagar']);
   });
 
   test('una venta CON PRODUCTO alimenta además Ventas por producto', () => {
     expect(fila('transaction', { type: 'revenue', product: 'Aceite 1 L' })).toEqual([
+      'flujo',
       'ingresos',
       'productos',
     ]);
@@ -47,7 +49,10 @@ describe('destinosDeLaFila', () => {
      * Esa pantalla agrupa los INGRESOS por producto. Contar ahí una compra diría que un
      * producto vendió lo que en realidad costó.
      */
-    expect(fila('transaction', { type: 'cogs', product: 'Aceite 1 L' })).toEqual(['costos']);
+    expect(fila('transaction', { type: 'cogs', product: 'Aceite 1 L' })).toEqual([
+      'costos',
+      'flujo',
+    ]);
   });
 
   test('⚠️ `other` se declara SIN PANTALLA, y eso es el punto', () => {
@@ -78,6 +83,145 @@ describe('destinosDeLaHoja', () => {
       { targetEntity: 'transaction', payload: { type: 'cogs' } },
       { targetEntity: 'transaction', payload: { type: 'revenue' } },
     ]).sort();
-    expect(r).toEqual(['costos', 'ingresos', 'productos']);
+    expect(r).toEqual(['costos', 'flujo', 'ingresos', 'productos']);
+  });
+});
+
+describe('el desglose por TIENDA', () => {
+  const fila = (targetEntity: 'transaction' | 'invoice' | 'bill', payload: object) =>
+    destinosDeLaFila({ targetEntity, payload: payload as Record<string, unknown> }).sort();
+
+  test('una venta con tienda alimenta Ventas por tienda', () => {
+    /*
+     * El desglose por tienda vive DENTRO de Ventas por producto y es una pantalla más donde el
+     * dato aterriza: Jose la nombró al pedir "todas las opciones en donde registremos data".
+     */
+    expect(fila('transaction', { type: 'revenue', store: 'Zona 10' })).toEqual([
+      'flujo',
+      'ingresos',
+      'tiendas',
+    ]);
+  });
+
+  test('un GASTO con tienda NO va al desglose por tienda', () => {
+    /*
+     * Ese donut reparte las VENTAS del período. Un gasto con sucursal contaría ahí como si esa
+     * tienda hubiera vendido lo que en realidad gastó — el mismo error que con `product`.
+     */
+    expect(fila('transaction', { type: 'opex', store: 'Zona 10' })).toEqual(['costos', 'flujo']);
+  });
+
+  test('una tienda en blanco no es una señal', () => {
+    expect(fila('transaction', { type: 'revenue', store: '   ' })).toEqual(['flujo', 'ingresos']);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LAS OPCIONES DE LA TARJETA DE CONCEPTOS (reporte de Jose, 2026-09-02)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * *"Solo añadiste dos, debería ser bueno mostrar absolutamente todas las que tenemos en
+ * Macha… que se muestren todas siempre de una manera bonita y ordenada."*
+ */
+describe('opcionesParaConcepto', () => {
+  const claves = (o: ReturnType<typeof opcionesParaConcepto>) => o.map((x) => x.clave);
+
+  test('SIEMPRE son las seis, en el mismo orden', () => {
+    /*
+     * Esto es el pedido literal, y el motivo es más profundo que la estética: una lista que
+     * cambia de largo según la fila no se puede aprender. Antes las dos de cuenta aparecían
+     * "solo a veces" y el dueño lo reportó como inconsistente.
+     */
+    const seis: ClaveDeOpcion[] = ['revenue', 'cogs', 'opex', 'other', 'invoice', 'bill'];
+    expect(claves(opcionesParaConcepto({ entity: 'transaction', hoja: 'Ventas' }))).toEqual(seis);
+    expect(claves(opcionesParaConcepto({ entity: 'invoice', hoja: null }))).toEqual(seis);
+    expect(claves(opcionesParaConcepto({ entity: 'bill', hoja: 'Compras' }))).toEqual(seis);
+  });
+
+  test('lo que no se puede elegir se APAGA con su motivo, no desaparece', () => {
+    const o = opcionesParaConcepto({ entity: 'invoice', hoja: 'Facturacion' });
+    const invoice = o.find((x) => x.clave === 'invoice')!;
+    // Ya es una cuenta por cobrar: no hay nada que cambiar, y ese es el motivo útil.
+    expect(invoice.disponible).toBe(false);
+    expect(invoice.motivo).toBe('yaEsAsi');
+    // La otra cuenta sí se puede elegir: la hoja es una sola.
+    expect(o.find((x) => x.clave === 'bill')!.disponible).toBe(true);
+  });
+
+  test('con VARIAS hojas ninguna cuenta se puede elegir, y se dice por qué', () => {
+    /*
+     * Cambiar la entidad reprocesa la hoja ENTERA. Con dos hojas tocaría las dos, que no es lo
+     * que el cliente está pidiendo — pero la opción se sigue mostrando con su motivo en vez de
+     * desaparecer sin explicación.
+     */
+    const o = opcionesParaConcepto({ entity: 'transaction', hoja: null });
+    for (const k of ['invoice', 'bill'] as const) {
+      const x = o.find((y) => y.clave === k)!;
+      expect(x.disponible).toBe(false);
+      expect(x.motivo).toBe('variasHojas');
+    }
+  });
+
+  test('⚠️ `yaEsAsi` gana a `variasHojas`', () => {
+    // Al revés, un concepto que ya está donde debe mostraría un impedimento que no le importa.
+    const o = opcionesParaConcepto({ entity: 'bill', hoja: null });
+    expect(o.find((x) => x.clave === 'bill')!.motivo).toBe('yaEsAsi');
+    expect(o.find((x) => x.clave === 'invoice')!.motivo).toBe('variasHojas');
+  });
+
+  test('⚠️ los destinos de los TIPOS se calculan sobre la entidad ACTUAL', () => {
+    /*
+     * Es la mitad del pedido. Para una fila que YA es cuenta por cobrar, contestar "es un
+     * ingreso" no la manda solo al dashboard: la deja en Por cobrar Y en Ingresos. Calcular
+     * siempre como `transaction` volvería a mostrar únicamente los rubros del dashboard, que
+     * es exactamente el hueco que se está cerrando.
+     */
+    const o = opcionesParaConcepto({ entity: 'invoice', hoja: 'Facturacion' });
+    expect(o.find((x) => x.clave === 'revenue')!.destinos.sort()).toEqual([
+      'flujo',
+      'ingresos',
+      'porCobrar',
+    ]);
+  });
+
+  test('las señales de producto y tienda viajan a los destinos de cada opción', () => {
+    const o = opcionesParaConcepto({
+      entity: 'transaction',
+      hoja: 'Ventas',
+      senales: { producto: true, tienda: true },
+    });
+    expect(o.find((x) => x.clave === 'revenue')!.destinos.sort()).toEqual([
+      'flujo',
+      'ingresos',
+      'productos',
+      'tiendas',
+    ]);
+    // Y no se filtran a un gasto, que no aparece en esas dos pantallas.
+    expect(o.find((x) => x.clave === 'opex')!.destinos.sort()).toEqual(['costos', 'flujo']);
+  });
+
+  test('las dos de cuenta prometen el destino que la REGLA CONTABLE garantiza', () => {
+    /*
+     * El tipo que van a tener después del reproceso lo decide el modelo al releer la hoja. Lo
+     * que sí se puede afirmar es la regla: la factura emitida devenga su ingreso (2026-08-19) y
+     * la recibida produce su costo (2026-08-30).
+     */
+    const o = opcionesParaConcepto({ entity: 'transaction', hoja: 'Ventas' });
+    expect(o.find((x) => x.clave === 'invoice')!.destinos.sort()).toEqual([
+      'flujo',
+      'ingresos',
+      'porCobrar',
+    ]);
+    expect(o.find((x) => x.clave === 'bill')!.destinos.sort()).toEqual([
+      'costos',
+      'flujo',
+      'porPagar',
+    ]);
+  });
+
+  test('`other` no promete ninguna pantalla', () => {
+    const o = opcionesParaConcepto({ entity: 'transaction', hoja: 'Ventas' });
+    expect(o.find((x) => x.clave === 'other')!.destinos).toEqual(['sinPantalla']);
   });
 });

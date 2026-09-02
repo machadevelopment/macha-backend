@@ -62,6 +62,7 @@ import {
 } from '@/lib/sheet-classifier';
 import {
   importarInventario,
+  mapearInventarioForzado,
   mapearInventarioSerializado,
   type MapaDeInventario,
 } from '@/lib/inventory-import';
@@ -246,6 +247,10 @@ export function startExcelIngestWorker(): Promise<string> {
         const hojasForzadas = new Set(overrides?.forzar ?? []);
         /** ¿El dueño dijo que esta hoja SÍ debe contar? Entonces no la descarta ningún filtro. */
         const forzada = (hoja: string) => hojasForzadas.has(hoja);
+
+        /** El override, solo si nombra una entidad del ledger. Ver `forzarEntidad` más abajo. */
+        const entidadDelLedger = (d: string | undefined) =>
+          d === 'transaction' || d === 'invoice' || d === 'bill' ? d : undefined;
 
         const doneBatches = await withCompanyScope(companyId, async (db) => {
           const rows = await db
@@ -868,6 +873,68 @@ export function startExcelIngestWorker(): Promise<string> {
            * Se guarda el motivo en lenguaje del cliente: si el archivo termina sin filas, el
            * mensaje puede decir QUÉ hoja no se entendió en vez de un genérico.
            */
+          /*
+           * ═══════════════════════════════════════════════════════════════════════════════
+           * "ESTA HOJA ES MI INVENTARIO" — VA ANTES QUE TODOS LOS FILTROS
+           * ═══════════════════════════════════════════════════════════════════════════════
+           *
+           * *"No solo los campos del dashboard, sino los campos de analítica y los campos de
+           * inventario. Todas las opciones en donde registremos data."* (Jose, 2026-09-02)
+           *
+           * El destino `inventario` no es una entidad más del ledger: es OTRO CAMINO. Las
+           * otras tres (`transaction`/`invoice`/`bill`) se aplican sobre lo que devuelve el
+           * modelo (`forzarEntidad`), y esta lo evita entero — una hoja de existencias tiene
+           * encabezados predecibles y mandarla a la IA desharía lo que el pre-filtro logra.
+           *
+           * ⚠️ VA ARRIBA DE TODO Y ESO ES LA MITAD DEL VALOR. Este `continue` es el que cierra
+           * el hueco que este repo tiene medido y sin cerrar: *"un inventario serializado que
+           * ninguna otra hoja referencia entra como GASTO… medido: Q 1.864.500 de egreso que
+           * nadie desembolsó"*. Esa hoja no la para nada —tiene fecha, costo y producto, así
+           * que pasa el dedup, la forma, el catálogo y el filtro de supervivencia— y llega al
+           * modelo, que con criterio la lee como costo de ventas. Puesto más abajo, cualquiera
+           * de esos filtros podría llevársela antes y el dueño habría dicho "esto es mi
+           * inventario" para nada.
+           *
+           * Y no se afloja NINGUNA de las dos detecciones automáticas: la nota de ese hueco
+           * dice que relajar el esquema del libro tiene contraejemplo en un test que ya
+           * existe. Acá no se relaja nada — lo afirma el dueño, que sabe qué hay en su bodega
+           * mejor que cualquier señal que podamos medir.
+           *
+           * Si la hoja NO mapea como inventario se DICE y se descarta, no se manda al modelo
+           * de vuelta: eso reintroduciría exactamente el costo falso que el dueño está
+           * corrigiendo.
+           */
+          if (overrides?.destino?.[sheetName] === 'inventario') {
+            const mapa = mapearInventarioForzado(rows[0] ?? [], rows.slice(1));
+            if (mapa) {
+              hojasDeInventario.push({
+                sheetName,
+                headerRow: rows[0] ?? [],
+                filas: rows.slice(1),
+                mapa,
+              });
+              console.info(
+                `[excel-ingest] company=${companyId} hoja "${sheetName}" forzada a INVENTARIO ` +
+                  `por el dueño (${rows.length - 1} filas): no va al modelo`,
+              );
+              continue;
+            }
+
+            totalRowsSkippedPreFiltro += rows.length - 1;
+            hojasLeidas.push({
+              estado: 'descartada',
+              nombre: sheetName,
+              motivo: 'sin_fecha_ni_monto',
+              filas: rows.length,
+              montos: dineroDescartado(rows),
+            });
+            console.warn(
+              `[excel-ingest] company=${companyId} hoja "${sheetName}" forzada a inventario ` +
+                `pero no mapea (falta cantidad y no hay columna única): ${rows.length - 1} filas`,
+            );
+            continue;
+          }
+
           const yaContada = forzada(sheetName) ? undefined : detalleDuplicado.get(sheetName);
           if (yaContada) {
             totalRowsSkippedPreFiltro += rows.length;
@@ -1471,7 +1538,13 @@ export function startExcelIngestWorker(): Promise<string> {
              * `UPDATE` porque el payload de una transacción no guarda contraparte ni
              * vencimiento, y sin ellos la pantalla de Por cobrar no se puede leer.
              */
-            forzarEntidad: overrides?.destino?.[sheetName],
+            /*
+             * ⚠️ `inventario` no puede llegar acá —esa hoja se desvía con un `continue` mucho
+             * antes, sin pasar por el modelo— y aun así se descarta explícitamente en vez de
+             * castear: si algún día alguien mueve ese bloque más abajo, esto no le fuerza una
+             * entidad inexistente a las filas, se comporta como si no hubiera override.
+             */
+            forzarEntidad: entidadDelLedger(overrides?.destino?.[sheetName]),
             // Ver el bloque de `ordenDeFechaPorHoja`: se decide por HOJA, no por lote.
             ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
             /*

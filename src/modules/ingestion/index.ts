@@ -35,6 +35,7 @@ import {
 // manda el correo: si el conteo del correo y la lista de esta pantalla se separan, el producto
 // promete un número de preguntas y muestra otro.
 import { esArreglablePorCategoria, quedaLimpiaAlContestar } from '@/lib/conceptos-pendientes';
+import { opcionesParaConcepto, senalesDelPayload } from '@/lib/destinos-de-la-fila';
 
 const ALLOWED_MIME_EXT: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -699,6 +700,15 @@ export const ingestion = new Elysia({ prefix: '/documents' })
            * que con más de una, la opción no se ofrece.
            */
           hojas: Set<string>;
+          /**
+           * Si ALGUNA de sus filas trae producto o tienda.
+           *
+           * ⚠️ Se acumula con OR y no se toma de la primera fila: el concepto agrupa por texto
+           * y sus filas pueden diferir. Con la primera, un concepto cuya primera fila no trae
+           * producto no ofrecería "Ventas por producto" aunque las otras cuarenta lo alimenten
+           * — que es el mismo error de mirar una muestra y afirmar sobre el todo.
+           */
+          senales: { producto: boolean; tienda: boolean };
           /** Totales POR MONEDA. Ver la nota de abajo: sumarlas juntas daría una cifra falsa. */
           montos: Map<string, number>;
         }
@@ -749,10 +759,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
          */
         const moneda = typeof p.originalCurrency === 'string' ? p.originalCurrency : 'GTQ';
 
+        const senales = senalesDelPayload(f.payload as Record<string, unknown>);
+
         const actual = porConcepto.get(clave);
         if (actual) {
           actual.filas++;
           if (f.sheetName) actual.hojas.add(f.sheetName);
+          actual.senales.producto ||= senales.producto ?? false;
+          actual.senales.tienda ||= senales.tienda ?? false;
           actual.montos.set(moneda, (actual.montos.get(moneda) ?? 0) + monto);
         } else {
           porConcepto.set(clave, {
@@ -765,6 +779,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
             filas: 1,
             entity: f.targetEntity,
             hojas: new Set(f.sheetName ? [f.sheetName] : []),
+            senales: { producto: senales.producto ?? false, tienda: senales.tienda ?? false },
             montos: new Map([[moneda, monto]]),
           });
         }
@@ -781,21 +796,43 @@ export const ingestion = new Elysia({ prefix: '/documents' })
        * orden podría quedar al revés para un cliente que factura en dólares.
        */
       const conceptos = [...porConcepto.values()]
-        .map((c) => ({
-          concepto: c.concepto,
-          ejemplo: c.ejemplo,
-          filas: c.filas,
-          entity: c.entity,
-          /*
-           * Solo se nombra la hoja cuando es UNA. Ver la nota de `hojas`: con dos, cambiar la
-           * entidad tocaría las dos hojas enteras y eso no es lo que el cliente está pidiendo,
-           * así que la pantalla no ofrece la opción — `null` es la señal de "acá no".
-           */
-          hoja: c.hojas.size === 1 ? [...c.hojas][0]! : null,
-          montos: [...c.montos.entries()]
-            .map(([currency, total]) => ({ currency, total }))
-            .sort((a, b) => b.total - a.total),
-        }))
+        .map((c) => {
+          const hoja = c.hojas.size === 1 ? [...c.hojas][0]! : null;
+          return {
+            concepto: c.concepto,
+            ejemplo: c.ejemplo,
+            filas: c.filas,
+            entity: c.entity,
+            /*
+             * ═══ LA LISTA COMPLETA DE LO QUE ESTE CONCEPTO PUEDE SER ═══
+             *
+             * *"Solo añadiste dos, debería ser bueno mostrar absolutamente todas las que
+             * tenemos en Macha… que se muestren todas siempre de una manera bonita y
+             * ordenada."* (Jose, 2026-09-02)
+             *
+             * Viaja RESUELTA desde el backend —qué opciones hay, a qué pantallas llega cada
+             * una, cuáles no se pueden elegir y por qué— y no se calcula en el componente.
+             * `destinos-de-la-fila.ts` es el único que sabe a dónde va a parar una fila, y esa
+             * misma respuesta la usan el portón y el resumen de lectura. Una segunda copia en
+             * el frontend sería la divergencia de siempre, esta vez en el único lugar donde se
+             * le muestra al cliente como una promesa de lo que va a pasar con su plata.
+             */
+            opciones: opcionesParaConcepto({
+              entity: c.entity as 'transaction' | 'invoice' | 'bill',
+              hoja,
+              senales: c.senales,
+            }),
+            /*
+             * Solo se nombra la hoja cuando es UNA. Ver la nota de `hojas`: con dos, cambiar la
+             * entidad tocaría las dos hojas enteras y eso no es lo que el cliente está pidiendo,
+             * así que la pantalla no ofrece la opción — `null` es la señal de "acá no".
+             */
+            hoja,
+            montos: [...c.montos.entries()]
+              .map(([currency, total]) => ({ currency, total }))
+              .sort((a, b) => b.total - a.total),
+          };
+        })
         .sort((a, b) => (b.montos[0]?.total ?? 0) - (a.montos[0]?.total ?? 0));
 
       return { conceptos, total: conceptos.length };
@@ -1558,7 +1595,20 @@ export const ingestion = new Elysia({ prefix: '/documents' })
          * mezclarlas obligaría al dueño a elegir entre dos respuestas que ambas son ciertas.
          */
         destino: t.Optional(
-          t.Union([t.Literal('transaction'), t.Literal('invoice'), t.Literal('bill')]),
+          t.Union([
+            t.Literal('transaction'),
+            t.Literal('invoice'),
+            t.Literal('bill'),
+            /*
+             * ⚠️ `inventario` es de otra naturaleza que las tres de arriba y se acepta acá
+             * igual porque la pregunta que contesta el dueño es la misma —"¿dónde se registra
+             * esta hoja?"— y el mecanismo también: reprocesar. Lo que cambia es que esta NO va
+             * al modelo, va a `inventory-import`. Además de completar la lista de pantallas
+             * que pidió Jose, es la única salida al hueco medido del inventario serializado
+             * que ninguna hoja referencia (Q 1.864.500 de egreso que nadie desembolsó).
+             */
+            t.Literal('inventario'),
+          ]),
         ),
       }),
     },

@@ -204,7 +204,12 @@ export const documents = pgTable(
        * guarda `counterparty` ni `dueDate`: convertirla desde la fila ya guardada perdería los
        * dos campos con los que se lee Por cobrar. Re-leer el archivo es la única forma.
        */
-      destino?: Record<string, 'transaction' | 'invoice' | 'bill'>;
+      /**
+       * ⚠️ `inventario` NO es una entidad del ledger: es OTRO CAMINO. Las otras tres se aplican
+       * sobre lo que devuelve el modelo (`forzarEntidad`); esta lo evita entero y manda la hoja
+       * a `inventory-import`, sin pagar un token. Ver el bloque del worker.
+       */
+      destino?: Record<string, 'transaction' | 'invoice' | 'bill' | 'inventario'>;
     } | null>(),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
     /** Quién confirmó. Sin FK, igual que `staging_rows.reviewed_by`. */
