@@ -1241,6 +1241,24 @@ Conventions & gotchas:
   - Medido en el e2e nuevo, en dos tiempos: sin decir nada la hoja de stock entra como
     GTQ 1.050.000 de costo con el inventario en cero; forzada, cero filas de staging y seis
     artículos a una unidad cada uno, y resubirla no duplica ("0 altas, 6 sin cambio").
+  - ⚠️ **Y «mi inventario» va TAMBIÉN en la tarjeta de conceptos, no solo en el portón**
+    (reporte de Keneth mirando la pantalla, mismo día: *"pero inventario no aparece acá"*).
+    Se había agregado a un solo lado, así que el portón ofrecía CUATRO destinos y la tarjeta
+    SEIS opciones sin inventario: **la lista de dónde puede ir la data era distinta según dónde
+    mirara el dueño**, que es la misma inconsistencia que motivó todo esto, movida de sitio.
+    Y hay un caso real: si una hoja de existencias llegó hasta la tarjeta, ahí es donde el
+    dueño está mirando el código que no reconoce — mandarlo al portón a buscar la hoja es
+    pedirle que resuelva en otra pantalla el problema que tiene delante. **La lección que
+    generaliza: una opción nueva va en TODAS las pantallas que hacen la misma pregunta, o la
+    inconsistencia solo cambia de lugar.**
+  - ⚠️ **El aviso del reproceso tuvo que volverse GENÉRICO al sumarlo**: decía *"volvemos a leer
+    la hoja para sacar el CLIENTE y el VENCIMIENTO de sus columnas"*, cierto de las dos cuentas
+    y FALSO del inventario — una lista de existencias no tiene ninguno de los dos. Un aviso solo
+    para las tres tiene que decir lo único que las tres comparten, o promete algo que no va a
+    pasar. Lo específico lo lleva cada tarjeta en su pie.
+  - **Orden de deploy: FRONTEND primero.** Es el lado tolerante (sin `opciones` cae a las cuatro
+    de siempre), así que puede esperar la clave nueva antes de que exista. Al revés, el backend
+    mandaría una clave que el componente no sabe pintar.
 - **Y LA MUESTRA ENSEÑA TODOS LOS CAMPOS, NO LOS DEL ESTADO DE RESULTADOS**
   (`lib/campos-de-la-fila.ts`, mismo reporte). *"Los campos realmente cabal son los campos que
   vos ya tenés en la base de datos, o sea que sólo con agregarlos ahí deberíamos estar check."*
