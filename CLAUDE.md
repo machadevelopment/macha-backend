@@ -1177,6 +1177,29 @@ Conventions & gotchas:
   prueba la ejecutaba nunca. El primer test de integración que escribí quedaba en VERDE al
   revertir el arreglo — medía código que el doble reemplaza. Se quitó (queda la nota en su
   lugar) y la conducta se comprueba sobre la función extraída, donde la mutación sí la ve.
+- **CADA HOJA DICE A QUÉ PANTALLAS LLEGA, NO SOLO AL DASHBOARD** (`lib/destinos-de-la-fila.ts`,
+  reporte de Jose 2026-09-01). *"La data no va únicamente al dashboard… si ponemos solo los del
+  dashboard y el campo va a cuentas por pagar, no lo estamos registrando."* El portón (0042)
+  mostraba el DINERO y el TIPO de cada hoja —los rubros del dashboard— y callaba que la misma
+  fila puede aterrizar en Por cobrar, Por pagar, Inventario o Ventas por producto: el dueño
+  aprobaba su archivo viendo una parte de lo que hace.
+  No hubo que inventar nada, **el destino ya estaba determinado en la fila**: `targetEntity`
+  decide la tabla, `type` el rubro y `product` si alimenta Ventas por producto. Lo que faltaba
+  era decirlo.
+  - **Los casos que importan son los que llegan a MÁS de una pantalla**, que es justo lo que
+    faltaba: una factura emitida va a Por cobrar **y** a Ingresos (emitirla devenga); una cuenta
+    por pagar va a Por pagar **y** a Costos. Listar solo la cuenta escondía la mitad que el
+    cliente ve en su dashboard.
+  - ⚠️ **`other` se declara SIN PANTALLA y eso es el punto**: `rollups.ts` suma
+    revenue/cogs/opex, así que esa fila se guarda y no aparece en ninguna cifra. Jose preguntó
+    por escrito dónde caía y la respuesta honesta es "en ningún lado que se vea". Se muestra en
+    tono de AVISO y no como un destino más, porque es lo único de la lista que hay que corregir.
+    Verificado de punta a punta: una hoja `other` de GTQ 6.300 se reclasificó desde el portón y
+    el opex subió exactamente esa cifra.
+  - ⚠️ De paso: **los TIPOS por hoja salían del mismo `limit(400)` que las tres filas de
+    ejemplo**. Eso es una afirmación sobre toda la hoja calculada con las primeras 400 filas del
+    DOCUMENTO — en un archivo grande la última hoja no aportaba ni un tipo y la pantalla decía
+    "entró como ingreso" sin haberla mirado. Ahora es una consulta agregada.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
@@ -1392,6 +1415,33 @@ Conventions & gotchas:
     montaba la pantalla y espiaba `globalThis.fetch`: **`pedidos` se contamina entre tests**
     —los efectos del render anterior siguen disparando tras `cleanup()`— así que fallaba con el
     arreglo ya puesto. Sacar la decisión del componente la hace comprobable de verdad.
+- ⚠️ **`tailwind-merge` BORRABA TODOS LOS TAMAÑOS DE TEXTO DEL PROYECTO** (2026-09-01). Su tabla
+  de grupos es la de Tailwind por defecto, así que un `text-body` no le consta como tamaño: lo
+  mete en el grupo de COLOR junto a `text-muted-foreground` y **descarta el primero**.
+      twMerge('text-body text-muted-foreground')  →  'text-muted-foreground'
+      twMerge('text-sm   text-muted-foreground')  →  las dos sobreviven
+  Pasa en CUALQUIER componente que combine un tamaño propio con un color en un `cn()`, y no
+  falla nada: el elemento se queda con el **16px del navegador**. Medido en producción: los tabs
+  de Analítica declaran `text-body` (14px) y llegaban al DOM sin esa clase. El reporte de Jose
+  era *"siento que los tabs son demasiado grandes, aunque la letra y las gráficas son bastante
+  grandes"* y **la causa no era de diseño: el tamaño nunca se aplicó**. Tras el arreglo, 60
+  elementos de esa sola pantalla recuperaron su tamaño.
+  Es el mismo modo de fallo que `chart-theme.ts` documenta con las clases de Tremor: la clase se
+  escribe, no llega, y nadie lo nota porque no hay error. El arreglo va en `lib/cn.ts`
+  (`extendTailwindMerge` con la escala del proyecto) y no en el componente que lo destapó —
+  arreglar solo los tabs habría dejado el resto de la escala roto y sin nadie mirándolo. Hay
+  test que compara la lista contra `fontSize` de `tailwind.config.ts`, porque un token nuevo
+  que no se sume ahí se empieza a perder en silencio.
+- **La rampa de marca no estaba donde el reporte la buscaba** (mismo día). El ticket de colores
+  se cerró aplicando `chartCategorico` a los dos donuts de Ventas por producto; las barras de
+  participación de "Ingreso por producto" en Analítica seguían en tinta plana — y esa es la
+  pantalla que Jose estaba mirando cuando dijo *"el ticket fue completado y no veo el cambio"*.
+  La propia documentación de `chartCategorico` nombra "top de productos" explícitamente.
+  `chartCategoricoClase` es la MISMA rampa como clases de Tailwind, para las barras que no son
+  de Tremor. Dos tests la protegen: el mismo ORDEN y los mismos tonos que la de Tremor (si
+  divergen, una categoría sale de un color en el donut y de otro en la lista), y que las clases
+  estén escritas **literales** — una construida por concatenación la purga Tailwind, que es el
+  fallo de los ticks negros ya documentado.
 - Do **not** use `localStorage`/`sessionStorage` in artifacts/prototypes; use React state.
 
 Rough layout: `app/(app)/` (customer), `app/admin/` (backoffice), `components/ui/` (shadcn), `components/charts/` (Tremor), `lib/format/`, `lib/i18n/`, `styles/globals.css` (tokens).
