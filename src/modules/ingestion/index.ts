@@ -1,6 +1,6 @@
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, sql as rawSql } from 'drizzle-orm';
 import { tenantDerive } from '@/guards/tenant.derive';
 import { assertClientCapability } from '@/guards/require-capability';
 import { intakeConfig } from '@/config/intake';
@@ -17,6 +17,7 @@ import {
   esTipoDeEgreso,
   yaTieneSuCosto,
 } from '@/lib/derivacion-de-costo';
+import { destinosDeLaFila, type Destino } from '@/lib/destinos-de-la-fila';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
 import { checkQueueGate, enforceTokenBucket, reportRateLimited } from '@/lib/rate-limit';
@@ -1096,15 +1097,71 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         .orderBy(asc(stagingRows.id))
         .limit(400);
 
-      const porHoja = new Map<string, { muestra: unknown[]; tipos: Record<string, number> }>();
-      for (const m of muestras) {
-        const clave = m.hoja!;
-        const e = porHoja.get(clave) ?? { muestra: [], tipos: {} };
-        const p = m.payload as Record<string, unknown>;
+      /*
+       * ⚠️ LOS TIPOS Y LOS DESTINOS SE CUENTAN SOBRE LA HOJA ENTERA, NO SOBRE LA MUESTRA.
+       *
+       * Salían del mismo `limit(400)` que las tres filas de ejemplo, y eso es una afirmación
+       * sobre TODA la hoja calculada con las primeras 400 filas del DOCUMENTO: en un archivo
+       * grande, la última hoja no aportaba ni un tipo —o quedaba fuera del todo— y la pantalla
+       * decía "esta hoja entró como ingreso" sin haberla mirado. El agregado es una consulta
+       * más y no crece con el archivo.
+       */
+      const combinaciones = await db
+        .select({
+          hoja: stagingRows.sheetName,
+          entidad: stagingRows.targetEntity,
+          tipo: rawSql<string | null>`${stagingRows.payload}->>'type'`,
+          conProducto: rawSql<boolean>`coalesce(${stagingRows.payload}->>'product', '') <> ''`,
+          filas: rawSql<string>`count(*)`,
+        })
+        .from(stagingRows)
+        .where(
+          and(
+            eq(stagingRows.companyId, companyId),
+            eq(stagingRows.documentId, params.id),
+            isNotNull(stagingRows.sheetName),
+          ),
+        )
+        .groupBy(
+          stagingRows.sheetName,
+          stagingRows.targetEntity,
+          rawSql`${stagingRows.payload}->>'type'`,
+          rawSql`coalesce(${stagingRows.payload}->>'product', '') <> ''`,
+        );
+
+      const porHoja = new Map<
+        string,
+        { muestra: unknown[]; tipos: Record<string, number>; destinos: Destino[] }
+      >();
+      const deLaHoja = (hoja: string) =>
+        porHoja.get(hoja) ?? { muestra: [], tipos: {}, destinos: [] };
+
+      for (const c of combinaciones) {
+        const clave = c.hoja!;
+        const e = deLaHoja(clave);
         // El TIPO con el que entró cada fila, contado por hoja: es lo que permite decir "esta
         // hoja entró como ingreso" y ofrecer cambiarla entera.
+        const tipo = c.tipo ?? c.entidad;
+        e.tipos[tipo] = (e.tipos[tipo] ?? 0) + Number(c.filas);
+        /*
+         * A QUÉ PANTALLAS LLEGA ESTA HOJA (reporte de Jose, 2026-09-01): *"la data no va
+         * únicamente al dashboard… si el campo va a cuentas por pagar, no lo estamos
+         * registrando"*. El destino ya está determinado en la fila; lo que faltaba era
+         * decirlo. Ver `lib/destinos-de-la-fila.ts`.
+         */
+        const destinos = destinosDeLaFila({
+          targetEntity: c.entidad,
+          payload: { type: c.tipo, product: c.conProducto ? 'x' : '' },
+        });
+        for (const d of destinos) if (!e.destinos.includes(d)) e.destinos.push(d);
+        porHoja.set(clave, e);
+      }
+
+      for (const m of muestras) {
+        const clave = m.hoja!;
+        const e = deLaHoja(clave);
+        const p = m.payload as Record<string, unknown>;
         const tipo = typeof p.type === 'string' ? p.type : m.entidad;
-        e.tipos[tipo] = (e.tipos[tipo] ?? 0) + 1;
         if (e.muestra.length < 3) {
           e.muestra.push({
             fecha: (p.date ?? p.issueDate ?? null) as string | null,
