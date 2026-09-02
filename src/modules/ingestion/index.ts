@@ -17,6 +17,7 @@ import {
   esTipoDeEgreso,
   yaTieneSuCosto,
 } from '@/lib/derivacion-de-costo';
+import { camposDeLaFila } from '@/lib/campos-de-la-fila';
 import { destinosDeLaFila, type Destino } from '@/lib/destinos-de-la-fila';
 import { refreshExistingRollups } from '@/lib/rollups';
 import { getActiveCreditRule, getCreditBalance, estimateRequiredCredits } from '@/lib/credits';
@@ -1170,6 +1171,14 @@ export const ingestion = new Elysia({ prefix: '/documents' })
             moneda: typeof p.originalCurrency === 'string' ? p.originalCurrency : null,
             tipo,
             categoria: typeof p.category === 'string' ? p.category : null,
+            /*
+             * TODOS los campos que la fila trae, no los seis del estado de resultados (reporte
+             * de Jose): *"no solo los campos del dashboard, sino los campos de analítica y los
+             * campos de inventario"*. El que más faltaba es `dueDate`, que decide el tramo de
+             * antigüedad de Por cobrar y Por pagar y no se enseñaba en absoluto. Ver
+             * `lib/campos-de-la-fila.ts`.
+             */
+            campos: camposDeLaFila(p),
           });
         }
         porHoja.set(clave, e);
