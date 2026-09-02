@@ -657,6 +657,13 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           payload: stagingRows.payload,
           targetEntity: stagingRows.targetEntity,
           flagReason: stagingRows.flagReason,
+          /*
+           * DE QUÉ HOJA VIENE (reporte de Jose, 2026-09-01). Hace falta para poder ofrecerle al
+           * cliente "esto es una cuenta por cobrar" desde acá: cambiar la ENTIDAD exige releer
+           * el archivo —el payload de una `transaction` no guarda `counterparty` ni `dueDate`—
+           * y el reproceso es por HOJA. Sin saber cuál, la opción no se puede ofrecer.
+           */
+          sheetName: stagingRows.sheetName,
         })
         .from(stagingRows)
         .where(
@@ -683,6 +690,15 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           ejemplo: string;
           filas: number;
           entity: string;
+          /**
+           * Las hojas de las que salen sus filas.
+           *
+           * ⚠️ Es un CONJUNTO y no una sola: un concepto agrupa por texto, y el mismo proveedor
+           * puede aparecer en dos hojas del libro. Ofrecer "esto es una cuenta por pagar" ahí
+           * cambiaría las DOS hojas enteras, que no es lo que el cliente está pidiendo — así
+           * que con más de una, la opción no se ofrece.
+           */
+          hojas: Set<string>;
           /** Totales POR MONEDA. Ver la nota de abajo: sumarlas juntas daría una cifra falsa. */
           montos: Map<string, number>;
         }
@@ -736,6 +752,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         const actual = porConcepto.get(clave);
         if (actual) {
           actual.filas++;
+          if (f.sheetName) actual.hojas.add(f.sheetName);
           actual.montos.set(moneda, (actual.montos.get(moneda) ?? 0) + monto);
         } else {
           porConcepto.set(clave, {
@@ -747,6 +764,7 @@ export const ingestion = new Elysia({ prefix: '/documents' })
             ejemplo: String(texto),
             filas: 1,
             entity: f.targetEntity,
+            hojas: new Set(f.sheetName ? [f.sheetName] : []),
             montos: new Map([[moneda, monto]]),
           });
         }
@@ -768,6 +786,12 @@ export const ingestion = new Elysia({ prefix: '/documents' })
           ejemplo: c.ejemplo,
           filas: c.filas,
           entity: c.entity,
+          /*
+           * Solo se nombra la hoja cuando es UNA. Ver la nota de `hojas`: con dos, cambiar la
+           * entidad tocaría las dos hojas enteras y eso no es lo que el cliente está pidiendo,
+           * así que la pantalla no ofrece la opción — `null` es la señal de "acá no".
+           */
+          hoja: c.hojas.size === 1 ? [...c.hojas][0]! : null,
           montos: [...c.montos.entries()]
             .map(([currency, total]) => ({ currency, total }))
             .sort((a, b) => b.total - a.total),
