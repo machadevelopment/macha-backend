@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { assemblePayload } from './row-assembly';
 
 process.env.DATABASE_URL ??= 'postgres://smoke:smoke@localhost:5432/smoke';
 
@@ -566,5 +567,58 @@ describe('mapaDelLote: de dónde sale el mapa con el que se arman las filas', ()
 
   test('sin ninguna de las dos, se usa el del lote tal cual', () => {
     expect(mapaDelLote({ sheetName: 'X', delLote: BASE })).toEqual(BASE);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * "ESTA HOJA SON CUENTAS POR COBRAR" (reporte de Jose, 2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * *"Si ponemos solo los del dashboard y el campo va a cuentas por pagar, no lo estamos
+ * registrando."*
+ *
+ * Las cuatro opciones que el cliente veía son los `type` del estado de resultados. La ENTIDAD
+ * —movimiento / cuenta por cobrar / cuenta por pagar— la decidía solo la estructura de la hoja,
+ * y cuando se equivocaba **no había forma de corregirla**: una hoja de cobros leída como ventas
+ * mete el ingreso al dashboard y deja la cartera en CERO, sin explicación y sin salida.
+ *
+ * ⚠️ Lo que este test fija es POR QUÉ es un reproceso y no un `UPDATE`: la fila convertida tiene
+ * que traer `counterparty` y `dueDate`, y el payload de una `transaction` **no los guarda**
+ * (`assemblePayload`). Editar la fila ya guardada perdería los dos campos con los que se lee Por
+ * cobrar — y el aging se calcula con el vencimiento.
+ */
+describe('forzar la entidad de una hoja', () => {
+  const MAPA = {
+    date: 0, amount: 3, currency: null, description: null, counterparty: 1, product: null,
+    quantity: null, productCategory: null, store: null, dueDate: 2, costTotal: null,
+    costUnit: null,
+  }; // prettier-ignore
+  const FILA = ['2026-01-07', 'Cliente 2', '2026-02-06', 1290];
+
+  test('una fila forzada a `invoice` trae contraparte y VENCIMIENTO', () => {
+    const p = assemblePayload({
+      verdict: { i: 0, targetEntity: 'invoice', type: 'revenue', category: 'x', confidence: 1 },
+      row: FILA,
+      columns: MAPA as never,
+      baseCurrency: 'GTQ',
+    }) as Record<string, unknown>;
+    expect(p.counterparty).toBe('Cliente 2');
+    expect(p.dueDate).toBe('2026-02-06');
+  });
+
+  test('⚠️ la MISMA fila como `transaction` NO los guarda — de ahí el reproceso', () => {
+    /*
+     * Es la prueba de que convertir desde staging es imposible: los campos no están en el
+     * payload, así que no hay de dónde sacarlos sin volver a leer el archivo.
+     */
+    const p = assemblePayload({
+      verdict: { i: 0, targetEntity: 'transaction', type: 'revenue', category: 'x', confidence: 1 },
+      row: FILA,
+      columns: MAPA as never,
+      baseCurrency: 'GTQ',
+    }) as Record<string, unknown>;
+    expect(p.counterparty).toBeUndefined();
+    expect(p.dueDate).toBeUndefined();
   });
 });

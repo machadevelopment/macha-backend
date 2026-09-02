@@ -251,6 +251,27 @@ export type VeredictoCrudo = {
  * datos, y esa declaración es justamente lo que las distingue de una fila perdida. No
  * generan fila de staging, pero SÍ cuentan como cubiertas.
  */
+/**
+ * Pisa la entidad de todos los veredictos de una hoja con la que dijo el dueño.
+ *
+ * Es una función exportada y no tres líneas dentro de `classifySheetRows` por el mismo motivo
+ * medido que `mapaDelLote`: **los tests e2e doblan `classifySheetRows` entera**, así que
+ * cualquier decisión que viva ahí adentro no la ejecuta ninguna prueba y la mutación pasa en
+ * verde. Acá el doble llama al MISMO código, así que el e2e la ejercita de verdad.
+ *
+ * `skip` no se toca: el modelo dijo que esa fila no es un movimiento —un renglón de TOTAL, un
+ * título— y forzarle una entidad la convertiría en dinero.
+ */
+export function aplicarEntidadForzada(
+  porIndice: Map<number, VeredictoCrudo>,
+  entidad: 'transaction' | 'invoice' | 'bill',
+): void {
+  for (const v of porIndice.values()) {
+    if (v.e === 'skip') continue;
+    v.e = entidad;
+  }
+}
+
 export function construirFilas(
   porIndice: Map<number, VeredictoCrudo>,
   params: {
@@ -1152,6 +1173,17 @@ export async function classifySheetRows(params: {
    * el estado que acumula es POR HOJA y la política vive en `lib/sheet-consensus.ts`.
    */
   nivelarConfianza?: (veredictos: VeredictoCrudo[]) => void;
+  /**
+   * "Esta hoja son cuentas por cobrar" — el dueño corrigiendo DÓNDE se registra, no qué es.
+   *
+   * Reporte de Jose (2026-09-01): las cuatro opciones que veía son los `type` del estado de
+   * resultados, y la entidad la decidía solo la estructura de la hoja. Cuando se equivocaba no
+   * había forma de arreglarlo: una hoja de cobros leída como ventas deja la cartera en cero.
+   *
+   * Llega por `sheet_overrides.destino` y solo en una corrida de reproceso. Ver el bloque de
+   * `forzarEntidad` más abajo para por qué esto no puede ser un `UPDATE` sobre staging.
+   */
+  forzarEntidad?: 'transaction' | 'invoice' | 'bill';
 }): Promise<ClassifySheetResult> {
   assertZdrModel(anthropicIntakeModel);
   const anthropic = getClient();
@@ -1244,6 +1276,31 @@ export async function classifySheetRows(params: {
    * Va antes de `construirFilas` y no después para que la fila de `cogs` que se DERIVA de una
    * venta —con su `costo_de_ventas` fijo— no participe del renombrado.
    */
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * EL DUEÑO DIJO DÓNDE SE REGISTRA ESTA HOJA (reporte de Jose, 2026-09-01)
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * *"Si ponemos solo los del dashboard y el campo va a cuentas por pagar, no lo estamos
+   * registrando."*
+   *
+   * Las cuatro opciones que el cliente veía —ingreso, costo, gasto, otro— son los `type` del
+   * estado de resultados. La ENTIDAD (movimiento / cuenta por cobrar / cuenta por pagar) la
+   * decidía solo la estructura de la hoja, y cuando se equivocaba **no había forma de
+   * corregirla**: una hoja de cobros leída como ventas mete el ingreso al dashboard y deja la
+   * cartera en CERO, sin explicación y sin salida.
+   *
+   * ⚠️ SE FUERZA ACÁ, ANTES DE `construirFilas`, y no editando la fila ya guardada. Es la
+   * razón por la que esto es un REPROCESO y no un `UPDATE`: el payload de una `transaction`
+   * **no guarda `counterparty` ni `dueDate`** (ver `assemblePayload`), así que convertirla en
+   * factura desde staging perdería los dos campos con los que se lee Por cobrar — y el aging
+   * se calcula con el vencimiento. Re-leyendo el archivo salen de sus columnas de verdad.
+   *
+   * `skip` no se toca: el modelo dijo que esa fila no es un movimiento —un TOTAL, un título— y
+   * forzarle una entidad la convertiría en dinero.
+   */
+  if (params.forzarEntidad) aplicarEntidadForzada(porIndice, params.forzarEntidad);
+
   if (params.canonizarCategoria) {
     for (const v of porIndice.values()) {
       if (v.e === 'skip') continue;

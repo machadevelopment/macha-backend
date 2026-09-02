@@ -81,7 +81,11 @@ const MAPA_CARTERA = { ...MAPA_VENTAS, date: null, amount: 4, counterparty: 0 };
 const anthropicReal = await import('@/lib/anthropic');
 mock.module('@/lib/anthropic', () => ({
   ...anthropicReal,
-  classifySheetRows: async (params: { rows: unknown[][]; sheetName: string }) => {
+  classifySheetRows: async (params: {
+    rows: unknown[][];
+    sheetName: string;
+    forzarEntidad?: 'transaction' | 'invoice' | 'bill';
+  }) => {
     const cartera = params.sheetName === 'CarteraClientes';
     const columns = cartera ? MAPA_CARTERA : MAPA_VENTAS;
     /*
@@ -102,6 +106,15 @@ mock.module('@/lib/anthropic', () => ({
     const porIndice = new Map(
       veredictos.map((v, i) => [i, { i, e: v.e, t: v.t, c: v.c, cf: v.cf }]),
     );
+    /*
+     * ⚠️ El doble llama a la función REAL, no reimplementa la decisión. Es la única forma de que
+     * este e2e ejercite el forzado de entidad: `classifySheetRows` está doblada entera, así que
+     * lo que vive dentro no lo corre ninguna prueba — la lección que `mapaDelLote` ya dejó
+     * escrita hoy. Con esto, mutar `aplicarEntidadForzada` pone el test en rojo.
+     */
+    if (params.forzarEntidad) {
+      anthropicReal.aplicarEntidadForzada(porIndice as never, params.forzarEntidad);
+    }
     return {
       model: 'claude-sonnet-5',
       inputTokens: 100,
@@ -311,3 +324,73 @@ describe('una hoja descartada se puede rescatar', () => {
  * e2e doblan no lo comprueba nadie. Dejar acá un test que pasa sin medir nada habría sido peor
  * que no tenerlo.
  */
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * "ESTA HOJA SON CUENTAS POR COBRAR" (reporte de Jose, 2026-09-01)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * *"Si ponemos solo los del dashboard y el campo va a cuentas por pagar, no lo estamos
+ * registrando."*
+ *
+ * Las cuatro opciones del cliente son los `type` del estado de resultados; la ENTIDAD la
+ * decidía solo la estructura de la hoja, y cuando se equivocaba **no había salida**: una hoja de
+ * cobros leída como ventas mete el ingreso al dashboard y deja la cartera en CERO.
+ *
+ * ⚠️ Es de INTEGRACIÓN porque lo que hay que probar es que la hoja CAMBIA DE TABLA. El unitario
+ * cubre que la conversión recupera contraparte y vencimiento (que es por qué esto es un
+ * reproceso), pero el destino real —`invoices` en vez de `transactions`— solo se ve corriendo
+ * el worker contra Postgres.
+ */
+describe('el dueño corrige DÓNDE se registra una hoja', () => {
+  test('forzar `invoice` la manda a Por cobrar con su vencimiento', async () => {
+    const [u] = await owner`
+      insert into users (workos_user_id, email)
+      values (${`wos_destino_${SUFIJO}`}, ${`destino-${SUFIJO}@test.local`}) returning id`;
+    const [d] = await owner`
+      insert into documents (company_id, uploaded_by, s3_key, original_filename,
+                             file_size_bytes, mime_type, status)
+      values (${companyId}, ${u!.id}, ${`${companyId}/destino.xlsx`}, 'destino.xlsx',
+              100, 'text/csv', 'queued')
+      returning id`;
+    const doc = d!.id as string;
+
+    /*
+     * El dueño dice que `Ventas` son cuentas por cobrar. Es el caso real: una hoja de cobros
+     * con fecha, cliente y monto que el modelo clasifica como `transaction/revenue` porque su
+     * forma es idéntica a la de una venta.
+     */
+    await owner`
+      update documents
+         set sheet_overrides = ${owner.json({ destino: { Ventas: 'invoice' } })}
+       where id = ${doc}`;
+
+    await handler!({ documentId: doc, companyId });
+
+    const filas = await owner`
+      select target_entity as e, payload from staging_rows
+       where document_id = ${doc} and sheet_name = 'Ventas'`;
+    const facturas = filas.filter((f) => f.e === 'invoice');
+    // Guardia del test: sin filas no se prueba nada.
+    expect(facturas.length).toBe(VENTAS.length);
+
+    /*
+     * Y son EL DOBLE de filas, que es lo correcto y vale afirmarlo: una factura emitida produce
+     * su cuenta por cobrar **y** su ingreso devengado (regla del 2026-08-19). Si solo hubiera 10,
+     * el dinero estaría en Por cobrar y el dashboard en cero — el bug de U3TECH.
+     */
+    expect(filas.length).toBe(VENTAS.length * 2);
+    expect(filas.filter((f) => f.e === 'transaction').length).toBe(VENTAS.length);
+
+    /*
+     * Y con CONTRAPARTE, que es lo que hace legible la pantalla de Por cobrar. Este es el
+     * campo que un `UPDATE` sobre staging no podría recuperar: el payload de una transacción
+     * no lo guarda.
+     */
+    const p = facturas[0]!.payload as Record<string, unknown>;
+    expect(typeof p.counterparty).toBe('string');
+    expect(String(p.counterparty)).toContain('Cliente');
+    // Y la fecha de emisión, que es la que devenga el ingreso.
+    expect(p.issueDate).toBeTruthy();
+  });
+});

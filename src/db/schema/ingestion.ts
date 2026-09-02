@@ -193,6 +193,18 @@ export const documents = pgTable(
     sheetOverrides: jsonb('sheet_overrides').$type<{
       forzar?: string[];
       columnas?: Record<string, Record<string, number>>;
+      /**
+       * "Esta hoja son cuentas por cobrar" — el dueño corrigiendo DÓNDE se registra.
+       *
+       * Reporte de Jose (2026-09-01): las cuatro opciones que veía son los `type` del estado de
+       * resultados; la ENTIDAD la decidía solo la estructura de la hoja y no había forma de
+       * corregirla. Una hoja de cobros leída como ventas deja la cartera en CERO.
+       *
+       * Va acá y no como un `UPDATE` sobre staging porque el payload de una `transaction` no
+       * guarda `counterparty` ni `dueDate`: convertirla desde la fila ya guardada perdería los
+       * dos campos con los que se lee Por cobrar. Re-leer el archivo es la única forma.
+       */
+      destino?: Record<string, 'transaction' | 'invoice' | 'bill'>;
     } | null>(),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
     /** Quién confirmó. Sin FK, igual que `staging_rows.reviewed_by`. */

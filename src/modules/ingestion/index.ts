@@ -1461,11 +1461,24 @@ export const ingestion = new Elysia({ prefix: '/documents' })
       if (body.columnas) {
         columnas[body.hoja] = { ...(columnas[body.hoja] ?? {}), ...body.columnas };
       }
+      /*
+       * "Esta hoja son cuentas por cobrar" (reporte de Jose, 2026-09-01). Es el tercer caso que
+       * el portón mostraba sin salida: las cuatro opciones del cliente son los `type` del
+       * estado de resultados y la ENTIDAD no se podía corregir, así que una hoja de cobros
+       * leída como ventas dejaba la cartera en CERO sin explicación.
+       *
+       * Va por el mismo camino que el rescate y la corrección de columna —un reproceso— y no
+       * por un `UPDATE`: el payload de una `transaction` no guarda `counterparty` ni `dueDate`,
+       * así que convertirla desde staging perdería los dos campos con los que se lee Por
+       * cobrar, y el aging se calcula con el vencimiento. Hay test unitario que lo fija.
+       */
+      const destino = { ...(previo.destino ?? {}) };
+      if (body.destino) destino[body.hoja] = body.destino;
 
       await db
         .update(documents)
         .set({
-          sheetOverrides: { forzar: [...forzar], columnas },
+          sheetOverrides: { forzar: [...forzar], columnas, destino },
           // Vuelve a procesarse: el estado lo fija el worker al terminar.
           status: 'processing',
         })
@@ -1513,6 +1526,16 @@ export const ingestion = new Elysia({ prefix: '/documents' })
         forzar: t.Optional(t.Boolean()),
         /** "El monto está en esta otra columna": índice 0-based por campo. */
         columnas: t.Optional(t.Record(t.String(), t.Number())),
+        /**
+         * "Esto son cuentas por cobrar/pagar": DÓNDE se registra la hoja entera.
+         *
+         * Es una pregunta distinta de "qué es" (`type`) y no una opción más de la misma lista:
+         * una factura emitida es a la vez un INGRESO y una CUENTA POR COBRAR, así que
+         * mezclarlas obligaría al dueño a elegir entre dos respuestas que ambas son ciertas.
+         */
+        destino: t.Optional(
+          t.Union([t.Literal('transaction'), t.Literal('invoice'), t.Literal('bill')]),
+        ),
       }),
     },
   );

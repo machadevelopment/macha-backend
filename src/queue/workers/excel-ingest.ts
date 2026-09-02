@@ -1465,6 +1465,13 @@ export function startExcelIngestWorker(): Promise<string> {
              * producción — "amount: 3 vs 4", 0 filas, sin más rastro que el `errorReason`.
              */
             columnsSemilla: perfilesPorHoja.get(sheetName)?.columnMap,
+            /*
+             * "Esta hoja son cuentas por cobrar": el dueño corrigiendo DÓNDE se registra, no
+             * qué es. Ver `forzarEntidad` en `lib/anthropic.ts` — es un reproceso y no un
+             * `UPDATE` porque el payload de una transacción no guarda contraparte ni
+             * vencimiento, y sin ellos la pantalla de Por cobrar no se puede leer.
+             */
+            forzarEntidad: overrides?.destino?.[sheetName],
             // Ver el bloque de `ordenDeFechaPorHoja`: se decide por HOJA, no por lote.
             ordenDeFecha: ordenDeFechaPorHoja.get(sheetName),
             /*

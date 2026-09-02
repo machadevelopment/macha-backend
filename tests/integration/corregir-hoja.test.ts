@@ -150,7 +150,7 @@ describe('POST /documents/:id/corregir-hoja', () => {
      * La clave del objeto es el contrato con el worker: `forzar` es lo que `hojasForzadas` lee
      * antes del bucle de hojas. Un nombre distinto acá sería un 200 que no arregla nada.
      */
-    expect(fila!.o).toEqual({ forzar: ['Clientes'], columnas: {} });
+    expect(fila!.o).toEqual({ forzar: ['Clientes'], columnas: {}, destino: {} });
     // Vuelve a procesarse: el estado terminal lo fija el worker al terminar.
     expect(fila!.status).toBe('processing');
 
@@ -177,7 +177,7 @@ describe('POST /documents/:id/corregir-hoja', () => {
     expect(await contar(doc, 'Clientes', 'document_ingest_batches')).toBe(1);
 
     const [fila] = await owner`select sheet_overrides as o from documents where id = ${doc}`;
-    expect(fila!.o).toEqual({ forzar: [], columnas: { Ventas: { amount: 6 } } });
+    expect(fila!.o).toEqual({ forzar: [], columnas: { Ventas: { amount: 6 } }, destino: {} });
   });
 
   test('dos correcciones se ACUMULAN en vez de pisarse', async () => {
@@ -204,7 +204,11 @@ describe('POST /documents/:id/corregir-hoja', () => {
      * primera, la hoja rescatada se volvería a descartar sin que nada lo dijera — y el síntoma
      * sería "a veces funciona", que es el más caro de diagnosticar.
      */
-    expect(fila!.o).toEqual({ forzar: ['Clientes'], columnas: { Ventas: { amount: 4 } } });
+    expect(fila!.o).toEqual({
+      forzar: ['Clientes'],
+      columnas: { Ventas: { amount: 4 } },
+      destino: {},
+    });
   });
 
   test('⚠️ una segunda corrección mientras se procesa se RECHAZA, no se encola', async () => {
@@ -240,6 +244,29 @@ describe('POST /documents/:id/corregir-hoja', () => {
     expect(encolados.filter((e) => e.queue === 'excel.ingest')).toHaveLength(1);
     // La hoja de la segunda tampoco se tocó: sus filas siguen ahí para cuando pueda pedirla.
     expect(await contar(doc, 'Clientes', 'staging_rows')).toBe(1);
+  });
+
+  test('"esta hoja son cuentas por cobrar" se guarda donde el worker la lee', async () => {
+    /*
+     * Reporte de Jose (2026-09-01): las cuatro opciones del cliente son los `type` del estado de
+     * resultados, y la ENTIDAD no se podía corregir. Una hoja de cobros leída como ventas mete
+     * el ingreso al dashboard y deja la cartera en CERO, sin salida.
+     *
+     * Va por reproceso y no por `UPDATE` porque el payload de una `transaction` no guarda
+     * `counterparty` ni `dueDate` — hay test unitario que lo fija en `row-coverage.test.ts`.
+     */
+    const doc = await crearCarga('destino.xlsx');
+    const res = await pedir(`/${doc}/corregir-hoja`, {
+      method: 'POST',
+      body: JSON.stringify({ hoja: 'Ventas', destino: 'invoice' }),
+    });
+    expect(res.status).toBe(200);
+
+    const [fila] = await owner`select sheet_overrides as o from documents where id = ${doc}`;
+    // La clave es el contrato con el worker: un nombre distinto sería un 200 que no hace nada.
+    expect(fila!.o).toEqual({ forzar: [], columnas: {}, destino: { Ventas: 'invoice' } });
+    // Y sus filas se borran, como en toda corrección: si no, la hoja quedaría duplicada.
+    expect(await contar(doc, 'Ventas', 'staging_rows')).toBe(0);
   });
 
   test('una carga YA publicada no se corrige: reprocesar encima la duplicaría', async () => {
