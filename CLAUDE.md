@@ -1200,6 +1200,27 @@ Conventions & gotchas:
     ejemplo**. Eso es una afirmación sobre toda la hoja calculada con las primeras 400 filas del
     DOCUMENTO — en un archivo grande la última hoja no aportaba ni un tipo y la pantalla decía
     "entró como ingreso" sin haberla mirado. Ahora es una consulta agregada.
+- **Y LA MUESTRA ENSEÑA TODOS LOS CAMPOS, NO LOS DEL ESTADO DE RESULTADOS**
+  (`lib/campos-de-la-fila.ts`, mismo reporte). *"Los campos realmente cabal son los campos que
+  vos ya tenés en la base de datos, o sea que sólo con agregarlos ahí deberíamos estar check."*
+  Los destinos por hoja fueron la mitad; esta es la otra. La muestra pintaba **seis campos
+  elegidos a mano** —fecha, concepto, monto, moneda, tipo, categoría— que son justo los que
+  alimentan el estado de resultados. El pipeline extrae ONCE, y los cinco que faltaban son los
+  que mandan en las otras pantallas:
+  - ⚠️ **`dueDate` es el más grave y no se enseñaba EN ABSOLUTO.** Decide el TRAMO DE ANTIGÜEDAD
+    de Por cobrar y Por pagar (corriente, 1-30, 31-60, 61-90, 90+), o sea cómo se ve esa
+    pantalla entera. Un vencimiento mal leído manda la cartera al tramo equivocado **sin cambiar
+    un solo total**, así que ni el cuadre lo detecta ni el dueño lo veía: aprobaba su cartera
+    sin ver el campo que la ordena.
+  - `counterparty` (quién debe o a quién se le debe), `product` y `productCategory` (Ventas por
+    producto) iban COLAPSADOS dentro de "concepto", y solo si la fila no traía descripción.
+    `quantity` y `store` (Inventario, Ventas por tienda) no aparecían.
+  - **Se pintan los que la fila TRAE, no una lista fija**: una hoja de gastos no tiene producto
+    ni tienda, y seis renglones vacíos convierten la pantalla en ruido — que es lo que hace que
+    el dueño deje de leerla.
+  - ⚠️ **Una cantidad de CERO sí se pinta.** Es un valor legítimo del inventario y significa
+    algo (no hay existencia); tratarlo como ausente escondería justo la fila que hay que mirar.
+    Hay test y la mutación `if (!v) continue` lo pone en rojo.
 - **Rate limiting**: per-company token-bucket in Redis + queue-depth gate reading pg-boss's own tables. No custom rate-limit table.
 - **Every Claude call inserts one `ai_usage_events` row** tagged `kind` (`excel`/`chat`/`insight`/`report_generation`/`excel_correction`). `insight` debits credits; `excel_correction` never does. **Los tokens de caché van en columnas aparte** (`cache_read_input_tokens`/`cache_creation_input_tokens`, migración `0025`): la API NO los incluye en `input_tokens`, así que omitirlos subestimaba `cost_usd` — se cobran a 0,1x (lectura) y 1,25x (escritura) de la tarifa de entrada.
 - **S3 stores binaries; DB stores only keys** (`documents.s3_key`, `report_versions.s3_render_key`). Access via short-lived presigned URLs after tenant/role check. Prefix keys by `company_id`.
