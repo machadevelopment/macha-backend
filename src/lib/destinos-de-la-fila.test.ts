@@ -225,3 +225,74 @@ describe('opcionesParaConcepto', () => {
     expect(o.find((x) => x.clave === 'other')!.destinos).toEqual(['sinPantalla']);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL RUBRO SALE DE LA DERIVACIÓN REAL, NO DEL `type` DE LA FILA (2026-09-02)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Corregido VIENDO LA PROMESA FALSA EN PRODUCCIÓN: para un concepto que ya es cuenta por
+ * pagar, la opción "Un ingreso" mostraba `Por pagar · Ingresos · Flujo de caja`. Los chips
+ * existen para que el dueño decida informado; uno que miente es peor que no ponerlo.
+ *
+ * `rollups.ts` suma revenue/cogs/opex **solo de `transactions`**, así que una factura aparece
+ * en el estado de resultados únicamente si `construirFilas` derivó su transacción — y esa
+ * derivación tiene reglas propias y DISTINTAS para cada entidad.
+ */
+describe('el rubro reproduce lo que `construirFilas` deriva de verdad', () => {
+  const fila = (targetEntity: 'transaction' | 'invoice' | 'bill', payload: object) =>
+    destinosDeLaFila({ targetEntity, payload: payload as Record<string, unknown> }).sort();
+
+  test('⚠️ una `bill` con `revenue` NO llega a Ingresos', () => {
+    /*
+     * La derivación de una `bill` exige `cogs` u `opex`: *"si el modelo no lo dio, no se
+     * inventa… es preferible un costo ausente y visible en revisión a un margen falso que
+     * nadie puede desmentir"*. Con `revenue` no se deriva nada, así que la fila entra a Por
+     * pagar y no suma en ninguna cifra. Este es el caso exacto que se vio mal en producción.
+     */
+    expect(fila('bill', { type: 'revenue' })).toEqual(['porPagar']);
+  });
+
+  test('…y tampoco con `other`, pero SÍ sigue apareciendo en Por pagar', () => {
+    /*
+     * No lleva `sinPantalla`: esa etiqueta significa "no aparece en ningún lado", y una cuenta
+     * por pagar aparece en Por pagar. Decir lo contrario sería la misma mentira del otro lado.
+     */
+    expect(fila('bill', { type: 'other' })).toEqual(['porPagar']);
+  });
+
+  test('una `invoice` devenga su ingreso SEA CUAL SEA el tipo de la fila', () => {
+    /*
+     * `construirFilas` arma el ingreso con `type: 'revenue'` FIJO — no mira el que dio el
+     * modelo. Emitirla devenga, y eso no depende de cómo se rotule la fila. Mostrar `Costos`
+     * porque el `type` diga `cogs` prometería un rubro que el ledger nunca va a tener.
+     */
+    for (const t of ['revenue', 'cogs', 'opex', 'other']) {
+      expect(fila('invoice', { type: t })).toEqual(['flujo', 'ingresos', 'porCobrar']);
+    }
+  });
+
+  test('una `transaction` con `other` no aparece en ninguna pantalla', () => {
+    // Acá sí: no hay cuenta que la sostenga, así que el conjunto queda vacío de verdad.
+    expect(fila('transaction', { type: 'other' })).toEqual(['sinPantalla']);
+  });
+
+  test('⚠️ sin tipo NO se dice "no aparece en ningún lado"', () => {
+    /*
+     * Esa fila está sin clasificar y va a revisión: no es que no tenga pantalla, es que
+     * todavía no se sabe. Decirlo al revés le diría al dueño que su dato se perdió cuando lo
+     * que falta es su propia respuesta.
+     */
+    expect(fila('transaction', {})).toEqual([]);
+    expect(fila('bill', {})).toEqual(['porPagar']);
+  });
+
+  test('el producto solo cuenta si de verdad hay ingreso derivado', () => {
+    // Una `bill` con producto y `cogs` mueve Costos, nunca Ventas por producto.
+    expect(fila('bill', { type: 'cogs', product: 'Aceite 1 L' })).toEqual([
+      'costos',
+      'flujo',
+      'porPagar',
+    ]);
+  });
+});

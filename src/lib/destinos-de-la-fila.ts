@@ -114,12 +114,39 @@ export function destinosDe(params: {
   if (entity === 'bill') out.add('porPagar');
 
   /*
-   * El rubro del estado de resultados. Va para las tres entidades y no solo para `transaction`:
-   * la factura emitida devenga su ingreso y la recibida produce su costo, así que las dos
-   * aparecen en el estado de resultados además de en su cuenta.
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   * EL RUBRO SALE DE LA DERIVACIÓN REAL, NO DEL `type` DE LA FILA
+   * ═══════════════════════════════════════════════════════════════════════════════════════
+   *
+   * `rollups.ts` suma revenue/cogs/opex **solo de `transactions`**, así que una `invoice` o
+   * una `bill` aparecen en el estado de resultados únicamente si `construirFilas` derivó su
+   * transacción. Y esa derivación NO es "el tipo de la fila": tiene reglas propias, distintas
+   * para cada una, que este módulo tiene que reproducir o promete pantallas que no ocurren.
+   *
+   * ⚠️ Se corrigió el 2026-09-02 **viendo la promesa falsa en producción**: para un concepto
+   * que ya es cuenta por pagar, la opción "Un ingreso" mostraba `Por pagar · Ingresos · Flujo
+   * de caja`. Es falso — la derivación de una `bill` exige `cogs` u `opex` (*"si el modelo no
+   * lo dio, no se inventa… es preferible un costo ausente y visible en revisión a un margen
+   * falso que nadie puede desmentir"*), así que con `revenue` esa fila entra a Por pagar y no
+   * suma en ninguna cifra. Los chips existen exactamente para que el dueño decida informado;
+   * uno que miente es peor que no ponerlo.
    */
-  if (type === 'revenue') out.add('ingresos');
-  if (type === 'cogs' || type === 'opex') out.add('costos');
+  if (entity === 'invoice') {
+    /*
+     * La factura emitida deriva su ingreso con `type: 'revenue'` FIJO — `construirFilas` no
+     * mira el tipo que dio el modelo. Emitirla devenga, y eso no depende de cómo se rotule la
+     * fila. O sea que su rubro es el mismo pase lo que pase, y decirlo así es más honesto que
+     * reflejar un `type` que no cambia nada.
+     */
+    out.add('ingresos');
+  } else if (entity === 'bill') {
+    // La factura recibida deriva su costo SOLO con `cogs` u `opex`. Ver el bloque de arriba.
+    if (type === 'cogs' || type === 'opex') out.add('costos');
+  } else {
+    // Una `transaction` es su propia fila del ledger: su tipo ES el rubro.
+    if (type === 'revenue') out.add('ingresos');
+    if (type === 'cogs' || type === 'opex') out.add('costos');
+  }
 
   /*
    * Flujo de caja es la MISMA serie mensual que alimentan los rubros de arriba, así que se
@@ -130,10 +157,16 @@ export function destinosDe(params: {
   if (out.has('ingresos') || out.has('costos')) out.add('flujo');
 
   /*
-   * `other` entra al ledger y NO lo suma ninguna pantalla. Se dice explícitamente en vez de
-   * omitirlo: una fila sin destino visible es lo que el dueño necesita ver antes de publicar.
+   * "No suma en ninguna pantalla" solo cuando de verdad no queda NINGUNA, y con el tipo ya
+   * decidido. Dos precisiones que importan:
+   *
+   *  · Una `bill` con `revenue` tampoco suma en el estado de resultados, pero SÍ aparece en
+   *    Por cobrar/Por pagar — decirle al dueño que no aparece en ningún lado sería la misma
+   *    clase de mentira que esto viene a corregir, del otro lado.
+   *  · Con `type` en `null` la fila está sin clasificar y va a revisión: no es que no tenga
+   *    pantalla, es que todavía no se sabe. Por eso la condición exige un tipo.
    */
-  if (type === 'other') out.add('sinPantalla');
+  if (type !== null && out.size === 0) out.add('sinPantalla');
 
   /*
    * Ventas por producto agrupa por `product` sobre los INGRESOS. Una compra con producto no
