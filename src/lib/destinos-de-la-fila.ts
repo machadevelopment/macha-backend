@@ -236,7 +236,20 @@ export function destinosDeLaHoja(
  */
 
 /** Cada respuesta que el cliente puede dar, con el efecto que tiene. */
-export type ClaveDeOpcion = 'revenue' | 'cogs' | 'opex' | 'other' | 'invoice' | 'bill';
+export type ClaveDeOpcion = 'revenue' | 'cogs' | 'opex' | 'other' | DestinoDeHoja;
+
+/**
+ * Las respuestas que se aplican REPROCESANDO la hoja.
+ *
+ * ⚠️ `inventario` no es una entidad del ledger como las otras dos: esa hoja no va al modelo, va
+ * a `inventory-import`. Se ofrece igual porque la pregunta que contesta el dueño es la misma
+ * —"esto no es un movimiento"— y el mecanismo también. Y porque si una hoja de existencias
+ * llegó hasta la tarjeta de conceptos, AHÍ es donde el dueño está mirando el código que no
+ * reconoce: mandarlo al portón a buscar la hoja es pedirle que resuelva en otra pantalla el
+ * problema que tiene delante. Es además la única salida al hueco medido del inventario
+ * serializado que ninguna hoja referencia (Q 1.864.500 de egreso que nadie desembolsó).
+ */
+export type DestinoDeHoja = 'invoice' | 'bill' | 'inventario';
 
 export type OpcionDeRespuesta = {
   clave: ClaveDeOpcion;
@@ -286,28 +299,45 @@ export function opcionesParaConcepto(params: {
     disponible: true,
   }));
 
-  const deEntidad: OpcionDeRespuesta[] = (['invoice', 'bill'] as const).map((clave) => {
-    /*
-     * El tipo que va a tener después del reproceso lo decide el modelo al releer la hoja, así
-     * que acá se declara el que la regla contable GARANTIZA: una factura emitida devenga
-     * ingreso (2026-08-19) y una recibida produce su costo (2026-08-30). Es lo único que se
-     * puede prometer sin adivinar.
-     */
-    const tipo = clave === 'invoice' ? 'revenue' : 'cogs';
-    /*
-     * `yaEsAsi` gana a `variasHojas`: si el concepto YA es una cuenta por cobrar, el motivo
-     * útil es ese y no de cuántas hojas sale. Al revés, un concepto que ya está donde debe
-     * mostraría un impedimento que no le importa a nadie.
-     */
-    const motivo = entity === clave ? 'yaEsAsi' : hoja === null ? 'variasHojas' : undefined;
-    return {
-      clave,
-      aplica: 'entidad',
-      destinos: destinosDe({ entity: clave, type: tipo, senales }),
-      disponible: motivo === undefined,
-      ...(motivo ? { motivo } : {}),
-    };
-  });
+  const deEntidad: OpcionDeRespuesta[] = (['invoice', 'bill', 'inventario'] as const).map(
+    (clave) => {
+      /*
+       * El tipo que va a tener después del reproceso lo decide el modelo al releer la hoja, así
+       * que acá se declara el que la regla contable GARANTIZA: una factura emitida devenga
+       * ingreso (2026-08-19) y una recibida produce su costo (2026-08-30). Es lo único que se
+       * puede prometer sin adivinar.
+       */
+      /*
+       * `yaEsAsi` gana a `variasHojas`: si el concepto YA es una cuenta por cobrar, el motivo
+       * útil es ese y no de cuántas hojas sale. Al revés, un concepto que ya está donde debe
+       * mostraría un impedimento que no le importa a nadie.
+       *
+       * ⚠️ `inventario` nunca cae en `yaEsAsi` y no es un olvido: una hoja que ya está en el
+       * inventario no produce filas de staging, así que sus conceptos no llegan a esta pantalla.
+       * La comparación con `entity` da falso siempre, que es lo correcto.
+       */
+      const motivo = entity === clave ? 'yaEsAsi' : hoja === null ? 'variasHojas' : undefined;
+
+      /*
+       * A dónde llega si el dueño la elige. Para las dos cuentas es el tipo que la REGLA CONTABLE
+       * garantiza tras el reproceso —la factura emitida devenga su ingreso (2026-08-19), la
+       * recibida produce su costo (2026-08-30)—; el inventario no pasa por el ledger, así que su
+       * único destino es la pantalla de Inventario y decirlo así es exacto.
+       */
+      const destinos: Destino[] =
+        clave === 'inventario'
+          ? ['inventario']
+          : destinosDe({ entity: clave, type: clave === 'invoice' ? 'revenue' : 'cogs', senales });
+
+      return {
+        clave,
+        aplica: 'entidad',
+        destinos,
+        disponible: motivo === undefined,
+        ...(motivo ? { motivo } : {}),
+      };
+    },
+  );
 
   return [...deTipo, ...deEntidad];
 }

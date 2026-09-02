@@ -127,16 +127,56 @@ describe('el desglose por TIENDA', () => {
 describe('opcionesParaConcepto', () => {
   const claves = (o: ReturnType<typeof opcionesParaConcepto>) => o.map((x) => x.clave);
 
-  test('SIEMPRE son las seis, en el mismo orden', () => {
+  test('SIEMPRE son las SIETE, en el mismo orden', () => {
     /*
      * Esto es el pedido literal, y el motivo es más profundo que la estética: una lista que
      * cambia de largo según la fila no se puede aprender. Antes las dos de cuenta aparecían
      * "solo a veces" y el dueño lo reportó como inconsistente.
+     *
+     * ⚠️ `inventario` se sumó el 2026-09-02 por el mismo reporte, una vuelta después: el
+     * portón ofrecía cuatro destinos y esta tarjeta seis SIN inventario, así que la lista de
+     * "dónde puede ir mi data" era distinta según dónde mirara el dueño — la misma
+     * inconsistencia, movida de sitio.
      */
-    const seis: ClaveDeOpcion[] = ['revenue', 'cogs', 'opex', 'other', 'invoice', 'bill'];
-    expect(claves(opcionesParaConcepto({ entity: 'transaction', hoja: 'Ventas' }))).toEqual(seis);
-    expect(claves(opcionesParaConcepto({ entity: 'invoice', hoja: null }))).toEqual(seis);
-    expect(claves(opcionesParaConcepto({ entity: 'bill', hoja: 'Compras' }))).toEqual(seis);
+    const todas: ClaveDeOpcion[] = [
+      'revenue',
+      'cogs',
+      'opex',
+      'other',
+      'invoice',
+      'bill',
+      'inventario',
+    ];
+    expect(claves(opcionesParaConcepto({ entity: 'transaction', hoja: 'Ventas' }))).toEqual(todas);
+    expect(claves(opcionesParaConcepto({ entity: 'invoice', hoja: null }))).toEqual(todas);
+    expect(claves(opcionesParaConcepto({ entity: 'bill', hoja: 'Compras' }))).toEqual(todas);
+  });
+
+  test('«mi inventario» promete SOLO la pantalla de Inventario', () => {
+    /*
+     * Esa hoja no pasa por el ledger: el worker la desvía a `inventory-import` arriba de todos
+     * los filtros. Prometerle un rubro del estado de resultados sería exactamente al revés de
+     * lo que hace — su razón de ser es sacar de los costos algo que no es un gasto.
+     */
+    const o = opcionesParaConcepto({ entity: 'transaction', hoja: 'Vehiculos' });
+    const inv = o.find((x) => x.clave === 'inventario')!;
+    expect(inv.destinos).toEqual(['inventario']);
+    expect(inv.aplica).toBe('entidad');
+    expect(inv.disponible).toBe(true);
+  });
+
+  test('⚠️ `inventario` nunca dice «Ya está aquí»', () => {
+    /*
+     * No es un olvido: una hoja que ya está en el inventario no produce filas de staging, así
+     * que sus conceptos no llegan a esta pantalla. El único motivo que puede tener es venir de
+     * varias hojas.
+     */
+    for (const entity of ['transaction', 'invoice', 'bill'] as const) {
+      const o = opcionesParaConcepto({ entity, hoja: 'Una' });
+      expect(o.find((x) => x.clave === 'inventario')!.motivo).toBeUndefined();
+    }
+    const o = opcionesParaConcepto({ entity: 'transaction', hoja: null });
+    expect(o.find((x) => x.clave === 'inventario')!.motivo).toBe('variasHojas');
   });
 
   test('lo que no se puede elegir se APAGA con su motivo, no desaparece', () => {
@@ -156,7 +196,7 @@ describe('opcionesParaConcepto', () => {
      * desaparecer sin explicación.
      */
     const o = opcionesParaConcepto({ entity: 'transaction', hoja: null });
-    for (const k of ['invoice', 'bill'] as const) {
+    for (const k of ['invoice', 'bill', 'inventario'] as const) {
       const x = o.find((y) => y.clave === k)!;
       expect(x.disponible).toBe(false);
       expect(x.motivo).toBe('variasHojas');
