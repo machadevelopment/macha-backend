@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { medirFilas } from './reconciliation';
+import { medirFilas, medirHoja } from './reconciliation';
 import type { ColumnMap } from './row-assembly';
 
 const MAPA_VACIO: ColumnMap = {
@@ -241,5 +241,85 @@ describe('⚠️ el renglón de TOTAL no se mide', () => {
     const m = medirFilas(filas, columnas({ amount: 2, costTotal: 3 }), 'USD');
     expect(m.montos[0]?.total).toBe(500);
     expect(m.costos[0]?.total).toBe(300);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL CONSOLIDADO AL FINAL DE LA HOJA TAMPOCO SE MIDE (2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La otra puerta del mismo ×2. `Operating Expenses` de `Jewelry_Store_Template11` termina con
+ * un bloque `EXPENSES BY CATEGORY` que suma exactamente lo mismo que su detalle. En el archivo
+ * tal cual no llegó a duplicar porque sus cifras caen en otra columna, pero basta alinearlo
+ * bajo la de montos —que es lo natural al escribirlo— para que la hoja reporte 54.123,86 sobre
+ * 27.061,93 reales.
+ *
+ * ⚠️ ESTE TEST EXISTE PORQUE EL DE `inicioDelResumenAlFinal` NO ALCANZABA. Mutar `medirHoja`
+ * para que no recorte nada dejaba la suite en VERDE: los tests cubrían la DETECCIÓN y ninguno
+ * la CONEXIÓN con la medición, que es la mitad que le llega al cliente. Es el mismo error que
+ * este repo ya pagó con `mapaDelLote` y con `aplicarEntidadForzada`.
+ */
+describe('⚠️ medirHoja descuenta el consolidado del final', () => {
+  const columnas = (over: Partial<ColumnMap>): ColumnMap => ({ ...MAPA_VACIO, ...over });
+
+  const ENCABEZADO = ['Date', 'Category', 'Description', 'Amount', 'Payment Method'];
+  const DETALLE: unknown[][] = [
+    [46023, 'Rent', 'January rent', 700, 'Bank Transfer'],
+    [46027, 'Professional Fees', 'January accounting', 80, 'Bank Transfer'],
+    [46032, 'Utilities', 'January electricity', 147.62, 'Bank Transfer'],
+    [46040, 'Marketing', 'Local ads', 200, 'Credit Card'],
+    [46050, 'Rent', 'February rent', 700, 'Bank Transfer'],
+    [46062, 'Salaries & Wages', 'February payroll', 1911.08, 'Bank Transfer'],
+  ];
+  const REAL = 3738.7;
+
+  test('el consolidado alineado bajo la columna de montos NO duplica', () => {
+    const filas: unknown[][] = [
+      ...DETALLE,
+      ['', '', 'TOTAL OPERATING EXPENSES', REAL],
+      ['EXPENSES BY CATEGORY'],
+      ['Category', '', '', 'Total'],
+      ['Rent', '', '', 1400],
+      ['Salaries & Wages', '', '', 1911.08],
+      ['Utilities', '', '', 147.62],
+      ['Marketing', '', '', 200],
+      ['Professional Fees', '', '', 80],
+    ];
+    const m = medirHoja(ENCABEZADO, filas, columnas({ amount: 3, date: 0 }), 'USD');
+    expect(m.montos[0]?.total).toBeCloseTo(REAL, 2);
+  });
+
+  test('⚠️ el corte es EXACTO: la primera fila del consolidado no se cuela', () => {
+    /*
+     * Sin este caso el `-1` del índice no está cubierto. `inicio` se calcula sobre la hoja CON
+     * encabezado y `filas` no lo tiene, así que equivocarse en uno deja pasar la primera fila
+     * del bloque. En el test de arriba esa fila es el renglón de total, que ya se excluye por
+     * su cuenta — o sea que el error queda TAPADO y la mutación pasa en verde.
+     *
+     * Acá el consolidado empieza directo con una categoría, que es como lo escribe quien no le
+     * pone título. Si el corte se corre uno, se cuelan 1.400 de más.
+     */
+    const filas: unknown[][] = [
+      ...DETALLE,
+      ['Rent', '', '', 1400],
+      ['Salaries & Wages', '', '', 1911.08],
+      ['Utilities', '', '', 147.62],
+      ['Marketing', '', '', 200],
+      ['Professional Fees', '', '', 80],
+    ];
+    const m = medirHoja(ENCABEZADO, filas, columnas({ amount: 3, date: 0 }), 'USD');
+    expect(m.montos[0]?.total).toBeCloseTo(REAL, 2);
+  });
+
+  test('⚠️ y una hoja SIN consolidado se mide entera', () => {
+    /*
+     * La guarda del otro lado, y la que de verdad protege al cliente: si `medirHoja` recortara
+     * de más, el portón mostraría MENOS dinero del que la hoja trae. Eso es peor que el ×2 —
+     * el doble se ve, lo que falta no.
+     */
+    const m = medirHoja(ENCABEZADO, DETALLE, columnas({ amount: 3, date: 0 }), 'USD');
+    expect(m.montos[0]?.total).toBeCloseTo(REAL, 2);
+    expect(m.filasEnviadas).toBe(DETALLE.length);
   });
 });

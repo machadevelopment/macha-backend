@@ -1,5 +1,5 @@
 import { asNumber, costoDeLaFila, type ColumnMap } from './row-assembly';
-import { filaEsRenglonDeTotal } from './sheet-unpivot';
+import { filaEsRenglonDeTotal, inicioDelResumenAlFinal } from './sheet-unpivot';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -157,4 +157,44 @@ export function medirFilas(
     montos: [...montos.values()],
     costos: [...costos.values()],
   };
+}
+
+/**
+ * Lo que traía una HOJA, descontando lo que no es un dato nuevo.
+ *
+ * ═══ POR QUÉ EXISTE, SI YA ESTÁ `medirFilas` ═══
+ *
+ * `medirFilas` mide un LOTE y no puede ver más allá de él. Un consolidado al final de la hoja
+ * —`EXPENSES BY CATEGORY` y sus once categorías— solo se reconoce mirando la hoja ENTERA: la
+ * señal es que sus etiquetas ya están escritas arriba, en una columna del cuerpo.
+ *
+ * Contarlo reporta el DOBLE del dinero de la hoja, porque un consolidado es por definición la
+ * suma de lo que agrupa. Medido sobre `Jewelry_Store_Template11` con el resumen alineado bajo
+ * la columna de montos —que es como lo escribiría cualquiera—: 54.123,86 sobre 27.061,93.
+ *
+ * ⚠️ Es la MISMA cifra que el portón le enseña al dueño, así que un ×2 acá lo deja eligiendo
+ * entre aprobar una facturación falsa o no aprobar la suya. Ver la nota del renglón de total
+ * en `medirFilas`, que es este mismo bug por la otra puerta.
+ *
+ * ⚠️ NO decide qué entra al ledger. Esto MIDE: lo que se descuenta es lo que ya está contado
+ * una vez en las filas de arriba.
+ *
+ * @param encabezado La fila de encabezado real de la hoja.
+ * @param filas Sus filas de datos, sin el encabezado.
+ */
+export function medirHoja(
+  encabezado: readonly unknown[],
+  filas: readonly unknown[][],
+  columns: ColumnMap,
+  baseCurrency: string,
+): MedicionDeFilas {
+  const conEncabezado = [encabezado as unknown[], ...(filas as unknown[][])];
+  const inicio = inicioDelResumenAlFinal(conEncabezado);
+  /*
+   * `inicio` es un índice sobre la hoja CON encabezado, y `filas` no lo tiene: de ahí el −1.
+   * Equivocarse en ese uno recortaría una fila buena o dejaría pasar una del resumen, y las
+   * dos mueven la cifra que el dueño está por aprobar.
+   */
+  const utiles = inicio === null ? filas : filas.slice(0, inicio - 1);
+  return medirFilas(utiles as unknown[][], columns, baseCurrency);
 }

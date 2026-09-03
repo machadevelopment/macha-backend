@@ -233,6 +233,127 @@ export function filaEsRenglonDeTotal(fila: readonly unknown[]): boolean {
   return typeof primera === 'string' && esRenglonDeTotal(primera);
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL RESUMEN POR CATEGORÍA AL FINAL DE LA MISMA HOJA (2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La otra mitad de lo que trae `Jewelry_Store_Template11`. Después del detalle y de su renglón
+ * de total, la hoja sigue con un bloque más:
+ *
+ *     46262 | Salaries & Wages | August payroll | 1911.08 | Bank Transfer   ← el detalle
+ *        '' |               '' | TOTAL OPERATING EXPENSES | 27061.93        ← el total
+ *     EXPENSES BY CATEGORY                                                  ← título de sección
+ *     Category | Total                                                      ← OTRO encabezado
+ *     Rent | 5600                                                           ← el resumen
+ *     Salaries & Wages | 15596.32
+ *     …
+ *
+ * Ese bloque suma **exactamente lo mismo** que el detalle, porque es su consolidación. En el
+ * archivo que lo destapó no llegó a duplicar por casualidad —sus cifras caen en la columna 1 y
+ * la de monto de la hoja es la 3—, pero basta con que alguien alinee el resumen bajo la
+ * columna de montos, que es lo natural al escribirlo, para que la hoja reporte el DOBLE.
+ * Medido sobre esa variante del archivo real: 54.123,86 sobre 27.061,93. Es el mismo ×2 del
+ * renglón de total, por la otra puerta.
+ *
+ * ═══ LA SEÑAL ES QUE EL RESUMEN REPITE LAS CATEGORÍAS DEL DETALLE ═══
+ *
+ * No la forma —un bloque angosto al final puede ser cualquier cosa— sino que sus etiquetas ya
+ * están escritas arriba, en una columna del cuerpo. Un consolidado por definición reusa los
+ * valores que agrupa; un dato nuevo no. Es la misma idea que la cuarta guarda del despivotado
+ * ("sus conceptos no son ya las categorías de otra hoja"), aplicada DENTRO de una hoja.
+ *
+ * ⚠️ Tres condiciones juntas, y cada una tiene su contraejemplo si va sola:
+ *
+ *  1. **Bloque angosto al final**: sus filas llenan a lo sumo la mitad de las columnas del
+ *     encabezado. Sola no alcanza — una hoja con filas incompletas al final las tiene igual.
+ *  2. **Al menos 3 filas**: con una o dos, "coincide con una categoría de arriba" pasa por
+ *     azar en cualquier hoja, y el precio de equivocarse es esconder plata del cliente.
+ *  3. **≥70 % de sus etiquetas aparecen como valores de UNA MISMA columna del cuerpo.** Es la
+ *     que de verdad lo identifica. Se exige la misma columna porque un consolidado agrupa por
+ *     un campo, no por varios a la vez.
+ *
+ * ⚠️ Devuelve `null` ante cualquier duda y el peor caso es no excluir nada — o sea, lo que
+ * pasaba antes. Y NO decide qué entra al ledger: eso lo siguen decidiendo el modelo y
+ * `staging-rules`. Acá solo se deja de contar dos veces lo que se cuenta una.
+ *
+ * @param rows La hoja con su encabezado real en la posición 0.
+ * @returns El índice (dentro de `rows`) donde empieza el resumen, o `null` si no hay.
+ */
+export function inicioDelResumenAlFinal(rows: readonly unknown[][]): number | null {
+  if (rows.length < 6) return null;
+  const encabezado = rows[0] ?? [];
+  const anchoCuerpo = encabezado.filter((c) => c !== null && c !== undefined && c !== '').length;
+  // Con dos o tres columnas no hay "angosto" que valga: el resumen tiene la misma forma.
+  if (anchoCuerpo < 4) return null;
+
+  const llenas = (f: readonly unknown[]) =>
+    f.filter((c) => c !== null && c !== undefined && c !== '').length;
+
+  /*
+   * Se sube desde el final mientras las filas sean angostas o estén vacías. El renglón de
+   * total también es angosto y queda dentro del bloque, lo cual es correcto: ya se excluía por
+   * su cuenta y acá no molesta.
+   */
+  let inicio = rows.length;
+  while (inicio > 1) {
+    const f = rows[inicio - 1] ?? [];
+    const n = llenas(f);
+    if (n > anchoCuerpo / 2) break;
+    inicio--;
+  }
+  if (inicio <= 1 || inicio >= rows.length) return null;
+
+  /*
+   * ⚠️ Solo las filas del bloque que APORTAN UNA CIFRA, y sin el renglón de total.
+   *
+   * El bloque real trae además su título de sección (`EXPENSES BY CATEGORY`), su propio
+   * encabezado (`Category | Total`) y el renglón de total de la tabla de arriba. Contando
+   * esas tres, la coincidencia real —cuatro categorías de cuatro— caía a 4/7 = 57 % y el
+   * bloque no se reconocía. Lo destapó el test antes de salir.
+   *
+   * Y la corrección no es bajar el umbral, que es lo que parecía: es preguntar sobre las
+   * filas correctas. Lo que importa es si las que SUMAN DINERO son un consolidado; un título
+   * sin cifra no aporta ni resta, y bajar el umbral para acomodarlo dejaría entrar bloques
+   * que de verdad son datos nuevos.
+   */
+  const bloque = rows
+    .slice(inicio)
+    .filter((f) => llenas(f) > 0)
+    .filter((f) => !filaEsRenglonDeTotal(f))
+    .filter((f) => f.some((c) => typeof c === 'number' && Number.isFinite(c)));
+  if (bloque.length < 3) return null;
+
+  const etiquetas = bloque
+    .map((f) => f.find((c) => typeof c === 'string' && c.trim() !== ''))
+    .filter((c): c is string => typeof c === 'string')
+    .map(claveDeConceptoAncho)
+    .filter((c) => c !== '');
+  if (etiquetas.length < 3) return null;
+
+  /*
+   * Los valores de texto del CUERPO, columna por columna. Se compara contra una sola columna a
+   * la vez: un consolidado agrupa por un campo (`Category`), y mezclar todas las columnas haría
+   * que coincidir fuera trivial en cualquier hoja con texto repetido.
+   */
+  const cuerpo = rows.slice(1, inicio);
+  const ancho = Math.max(0, ...rows.map((f) => f.length));
+  for (let c = 0; c < ancho; c++) {
+    const valores = new Set<string>();
+    for (const f of cuerpo) {
+      const v = f[c];
+      if (typeof v !== 'string') continue;
+      const k = claveDeConceptoAncho(v);
+      if (k !== '') valores.add(k);
+    }
+    if (valores.size === 0) continue;
+    const cubiertas = etiquetas.filter((e) => valores.has(e)).length;
+    if (cubiertas / etiquetas.length >= 0.7) return inicio;
+  }
+
+  return null;
+}
+
 function esLineaDeEstado(etiqueta: string): boolean {
   const t = sinAcentos(etiqueta);
   return PALABRAS_DE_AGREGADO.some((p) => t.includes(p));

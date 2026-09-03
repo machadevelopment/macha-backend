@@ -5,6 +5,7 @@ import {
   esRenglonDeTotal,
   inferirAnio,
   mesDeEncabezado,
+  inicioDelResumenAlFinal,
 } from './sheet-unpivot';
 import { pareceNombreDePeriodo } from './sheet-shape';
 
@@ -563,5 +564,97 @@ describe('una hoja que YA es tabla no se despivota, aunque tenga columnas de mes
       [46144, 'Fundación Semilla', 500, 510, 520, 530],
     ]; // prettier-ignore
     expect(despivotarReporte(conSerial, { anioPorDefecto: 2026 })).toBeNull();
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL RESUMEN POR CATEGORÍA AL FINAL DE LA MISMA HOJA (2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * La otra mitad de lo que trae `Jewelry_Store_Template11`: después del detalle y de su renglón
+ * de total, un bloque `EXPENSES BY CATEGORY` que suma exactamente lo mismo. En ese archivo no
+ * llegó a duplicar por casualidad —sus cifras caen en otra columna— pero basta con alinearlo
+ * bajo la de montos, que es lo natural al escribirlo, para que la hoja reporte el DOBLE.
+ * Medido sobre esa variante: 54.123,86 sobre 27.061,93.
+ */
+describe('inicioDelResumenAlFinal', () => {
+  /** El detalle real de `Operating Expenses`, recortado a lo que hace falta. */
+  const detalle = (): unknown[][] => [
+    ['Date', 'Category', 'Description', 'Amount', 'Payment Method'],
+    [46023, 'Rent', 'January rent', 700, 'Bank Transfer'],
+    [46027, 'Professional Fees', 'January accounting', 80, 'Bank Transfer'],
+    [46032, 'Utilities', 'January electricity', 147.62, 'Bank Transfer'],
+    [46040, 'Marketing', 'Local ads', 200, 'Credit Card'],
+    [46050, 'Rent', 'February rent', 700, 'Bank Transfer'],
+    [46062, 'Salaries & Wages', 'February payroll', 1911.08, 'Bank Transfer'],
+  ];
+
+  test('reconoce el bloque que repite las categorías del detalle', () => {
+    const rows = [
+      ...detalle(),
+      ['', '', 'TOTAL OPERATING EXPENSES', 3738.7],
+      ['EXPENSES BY CATEGORY'],
+      ['Category', 'Total'],
+      ['Rent', 1400],
+      ['Salaries & Wages', 1911.08],
+      ['Utilities', 147.62],
+      ['Marketing', 200],
+    ];
+    const i = inicioDelResumenAlFinal(rows);
+    expect(i).not.toBeNull();
+    // Corta en el renglón de total, que también es angosto: todo lo de ahí abajo ya está
+    // contado en las filas de arriba.
+    expect(rows.slice(i!).some((f) => String(f[0]) === 'Rent')).toBe(true);
+    expect(rows.slice(0, i!).length).toBe(detalle().length);
+  });
+
+  test('⚠️ NO corta una hoja cuyas últimas filas son datos nuevos', () => {
+    /*
+     * El modo de fallo caro. Un bloque angosto al final puede ser cualquier cosa; lo que
+     * identifica a un consolidado es que sus etiquetas YA están escritas arriba. Estas no, así
+     * que son filas del cliente y recortarlas escondería su plata — peor que el bug original,
+     * porque el doble se ve y lo que falta no.
+     */
+    const rows = [
+      ...detalle(),
+      ['', 'Legal Fees', '', 900],
+      ['', 'Travel', '', 450],
+      ['', 'Training', '', 300],
+    ];
+    expect(inicioDelResumenAlFinal(rows)).toBeNull();
+  });
+
+  test('con MENOS de tres filas no se afirma nada', () => {
+    /*
+     * Con una o dos, "coincide con una categoría de arriba" pasa por azar en cualquier hoja, y
+     * el precio de equivocarse es esconder plata.
+     */
+    const rows = [...detalle(), ['Rent', 1400], ['Utilities', 147.62]];
+    expect(inicioDelResumenAlFinal(rows)).toBeNull();
+  });
+
+  test('la coincidencia se exige contra UNA MISMA columna del cuerpo', () => {
+    /*
+     * Un consolidado agrupa por un campo. Repartir las etiquetas entre columnas distintas
+     * —una que coincide con la categoría, otra con la descripción— no es un consolidado de
+     * nada, y aceptarlo haría que coincidir fuera trivial en cualquier hoja con texto.
+     */
+    const rows = [...detalle(), ['Rent', 1400], ['January accounting', 80], ['Local ads', 200]];
+    expect(inicioDelResumenAlFinal(rows)).toBeNull();
+  });
+
+  test('una hoja angosta de por sí no se toca', () => {
+    // Con dos o tres columnas no hay "angosto" que distinga: el resumen tiene la misma forma
+    // que el cuerpo, así que la señal no existe y afirmarla sería inventar.
+    const rows: unknown[][] = [
+      ['Concepto', 'Monto'],
+      ['Rent', 700],
+      ['Utilities', 147.62],
+      ['Rent', 700],
+      ['Utilities', 150],
+      ['Rent', 700],
+    ];
+    expect(inicioDelResumenAlFinal(rows)).toBeNull();
   });
 });

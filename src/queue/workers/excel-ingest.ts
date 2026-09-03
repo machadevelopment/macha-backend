@@ -39,7 +39,7 @@ import {
   type VeredictoDominante,
 } from '@/lib/sheet-consensus';
 import { fingerprintSheet, findSeenFingerprints } from '@/lib/row-fingerprint';
-import { medirFilas } from '@/lib/reconciliation';
+import { medirFilas, medirHoja } from '@/lib/reconciliation';
 import { mapaDeDineroProbable } from '@/lib/sheet-money';
 import { avisarConceptosPendientes } from '@/lib/aviso-de-revision';
 import {
@@ -368,7 +368,12 @@ export function startExcelIngestWorker(): Promise<string> {
           rows: unknown[][],
         ): { moneda: string; total: number; filas: number }[] | undefined => {
           try {
-            const medicion = medirFilas(rows.slice(1), mapaDeDineroProbable(rows), baseCurrency);
+            const medicion = medirHoja(
+              rows[0] ?? [],
+              rows.slice(1),
+              mapaDeDineroProbable(rows),
+              baseCurrency,
+            );
             return medicion.montos.length > 0 ? medicion.montos : undefined;
           } catch {
             return undefined;
@@ -2204,7 +2209,8 @@ export function startExcelIngestWorker(): Promise<string> {
            * reconoce o desmiente de un vistazo — ver `lib/reconciliation.ts` para el caso que
            * la motivó y para por qué esto MIDE y no bloquea la promoción.
            */
-          const medicion = medirFilas(
+          const medicion = medirHoja(
+            headerRow,
             filasCrudasPorHoja.get(sheetName) ?? [],
             mapaFinal,
             baseCurrency,
