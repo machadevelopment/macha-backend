@@ -920,6 +920,57 @@ Conventions & gotchas:
     el mismo error que `read-summary.ts` documenta haber corregido para los datos de lectura
     ("hoy va a console.info y rota con los logs de Railway"): la lección estaba aprendida en un
     módulo y sin aplicar en el que más la necesitaba.
+- ⚠️ **EL ×2 DEL PORTÓN: UN RENGLÓN DE TOTAL SE CONTABA COMO UN MOVIMIENTO** (reporte de
+  Keneth con un archivo real de cliente, `Jewelry_Store_Template11`, 2026-09-03). *"En el primer
+  Excel me dice que son 140 pero en la web me salía 280."* Las **cinco** hojas de dinero
+  mostraban ×2 EXACTO en el resumen del portón, reproducido al centavo: facturación 280.090,00
+  sobre 140.045,00; cartera 256.300,00 sobre 128.150,00; gastos 54.123,86 sobre 27.061,93. Un
+  total es POR DEFINICIÓN la suma de las filas de arriba, así que medirlo reporta el doble — y
+  **que sea ×2 exacto en las cinco es la firma del bug**: una expansión legítima tocaría las
+  facturas, no los gastos operativos.
+  - ⚠️ **El daño es específico del PORTÓN y por eso es grave.** Esa pantalla (0042) existe para
+    que el dueño pueda DESMENTIRNOS antes de publicar; enseñarle el doble de su facturación lo
+    deja eligiendo entre aprobar una cifra falsa o no aprobar su contabilidad correcta, y la
+    única herramienta que tiene para controlarnos es la que miente. El ledger no se toca: el
+    renglón no trae fecha, así que `staging-rules` lo marca por `invalid_date`.
+  - **Dos fallos encadenados, y hacían falta los dos.** (1) `medirFilas` no consultaba nada:
+    `sheet-classifier` y `sheet-duplication` ya excluían el renglón de total de SUS mediciones
+    y ésta era la tercera; ahora las tres consumen `filaEsRenglonDeTotal`. (2) **`TOTALS`, el
+    plural INGLÉS, no matcheaba** — el regex tenía `totales` (el plural español) y el `\b` hacía
+    que `total` seguido de `s` no cerrara palabra, así que el rótulo más común de una plantilla
+    en inglés era invisible para los tres filtros.
+  - ⚠️ **La guarda mira la PRIMERA CELDA NO VACÍA, no cualquier celda.** El rótulo no está en la
+    columna 0 —está alineado a la derecha, pegado a la cifra— pero buscarlo en toda la fila es
+    más laxo sin cubrir un caso que ocurra: un movimiento cuya descripción diga "Pago total a
+    proveedor" es plata del cliente, y esconderla es peor que el bug original — **el doble se
+    ve, lo que falta no**. Hay test de ese caso.
+- ⚠️ **Y EL CONSOLIDADO AL FINAL DE LA MISMA HOJA, QUE ES LA OTRA PUERTA DEL MISMO ×2**
+  (`inicioDelResumenAlFinal` + `medirHoja`, mismo día). El mismo archivo termina `Operating
+  Expenses` con un bloque `EXPENSES BY CATEGORY` de once categorías que suma exactamente lo
+  mismo que su detalle. No llegó a duplicar por casualidad —sus cifras caen en la columna 1 y la
+  de monto es la 3— pero basta alinearlo bajo la columna de montos, que es lo natural al
+  escribirlo: medido, 54.123,86 sobre 27.061,93.
+  - **La señal es que el resumen REPITE LAS CATEGORÍAS del detalle**, no su forma: un bloque
+    angosto al final puede ser cualquier cosa, pero un consolidado reusa por definición los
+    valores que agrupa. Es la cuarta guarda del despivotado ("sus conceptos no son ya las
+    categorías de otra hoja") aplicada DENTRO de una hoja. Tres condiciones juntas: bloque
+    angosto, **≥3 filas** (con una o dos, coincidir pasa por azar) y **≥70 % de las etiquetas en
+    UNA MISMA columna** del cuerpo (un consolidado agrupa por un campo, no por varios).
+  - ⚠️ **Se cuentan solo las filas del bloque que APORTAN UNA CIFRA.** Con el título de sección,
+    el encabezado nuevo y el renglón de total, la coincidencia real —cuatro de cuatro— caía a
+    4/7 = 57 % y el bloque no se reconocía. La corrección NO era bajar el umbral, que es lo que
+    parecía, sino preguntar sobre las filas correctas: bajarlo dejaría entrar bloques que sí son
+    datos nuevos.
+  - **`medirHoja` existe porque `medirFilas` mide un LOTE** y no puede ver más allá de él; un
+    consolidado solo se reconoce mirando la hoja entera.
+  - ⚠️ **DOS DE LAS TRES MUTACIONES NO SE DETECTABAN, y la lección vale más que el arreglo.**
+    Mutar `medirHoja` para que no recorte dejaba la suite en VERDE: los tests cubrían la
+    DETECCIÓN y ninguno la CONEXIÓN con la medición, que es la mitad que le llega al cliente
+    (mismo error que `mapaDelLote` y `aplicarEntidadForzada`). Y el off-by-one del índice
+    tampoco —`inicio` se calcula sobre la hoja CON encabezado y `filas` no lo tiene—, porque en
+    el primer test la fila que se colaba era el renglón de total, **que ya se excluye por su
+    cuenta**: el error quedaba TAPADO por la otra guarda. Hace falta un consolidado que empiece
+    directo con una categoría, que es como lo escribe quien no le pone título.
 - **EL CUADRE DEJÓ DE GRITAR SOBRE LO CORRECTO** (2026-09-01). Dos falsos positivos medidos
   sobre libros cuyas TRES cifras salieron exactas contra su verdad de campo — y un detector que
   se equivoca en lo correcto enseña a ignorarlo, que es lo único que este mecanismo no puede
