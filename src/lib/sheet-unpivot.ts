@@ -186,10 +186,51 @@ function esLineaDePlan(etiqueta: string): boolean {
   return PALABRAS_DE_PLAN.some((p) => t.includes(p));
 }
 
-/** Un renglón de TOTAL. Se excluye del despivotado, no descalifica a la hoja. */
+/**
+ * Un renglón de TOTAL, por su ETIQUETA. Se excluye del despivotado, no descalifica a la hoja.
+ *
+ * ⚠️ `totals?` con la `s` opcional, y esa letra costó una medición en producción: el plural que
+ * estaba escrito era `totales`, el ESPAÑOL. Una plantilla en inglés escribe `TOTALS`, y el
+ * `\b` de después hacía que `total` seguido de `s` no cerrara palabra — o sea que el rótulo
+ * más común de una hoja en inglés no se reconocía. Es la mitad del ×2 de
+ * `Jewelry_Store_Template11` (2026-09-03).
+ */
 export function esRenglonDeTotal(etiqueta: string): boolean {
   const t = sinAcentos(etiqueta);
-  return /^[^a-z0-9]*(total|totales|suma|sumatoria|gran total|acumulado)\b/.test(t);
+  return /^[^a-z0-9]*(totals?|totales|sumatoria|suma|gran total|acumulado)\b/.test(t);
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA MISMA PREGUNTA SOBRE UNA FILA ENTERA — Y AHORA CON TRES CONSUMIDORES (2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `esRenglonDeTotal` juzga UNA etiqueta. Preguntárselo a una FILA tiene un matiz que los dos
+ * filtros que ya lo hacían habían resuelto bien y por separado: **el rótulo no está en la
+ * columna 0, está en la primera celda NO VACÍA**. Así es como una persona escribe un total en
+ * Excel — alineado a la derecha, pegado a la cifra, con todo lo de la izquierda en blanco:
+ *
+ *     ['', '', '', '', '', '', '', 'TOTAL SALES', 140045]      ← columna 7
+ *     ['', '', 'TOTAL OPERATING EXPENSES', 27061.93]           ← columna 2
+ *     ['', '', '', 'TOTALS', 128150, 113350, 14800]            ← columna 3
+ *
+ * Las tres son de un archivo real de cliente. `sheet-classifier` y `sheet-duplication` ya
+ * escribían este mismo `find` cada uno por su lado; ahora vive una vez y lo comparten con el
+ * tercero, que es el que faltaba y el que costó la medición: `medirFilas`.
+ *
+ * ⚠️ NO se busca el rótulo en CUALQUIER celda, aunque sea la implementación obvia. La primera
+ * celda no vacía es el rótulo de la fila; una celda cualquiera puede ser la descripción de un
+ * movimiento real que empiece con esa palabra, y un falso positivo acá esconde plata del
+ * cliente. Fue mi primer intento y es más laxo sin cubrir un caso que ocurra.
+ *
+ * ⚠️ Y esto NO decide si una fila entra al ledger — eso lo siguen decidiendo el modelo y
+ * `staging-rules` con toda la fila delante. Se usa donde una fila de total ENVENENA UNA
+ * MEDICIÓN: el denominador del filtro de supervivencia, la suma que compara dos hojas, y el
+ * dinero que el portón le enseña al dueño.
+ */
+export function filaEsRenglonDeTotal(fila: readonly unknown[]): boolean {
+  const primera = fila.find((c) => c !== null && c !== undefined && c !== '');
+  return typeof primera === 'string' && esRenglonDeTotal(primera);
 }
 
 function esLineaDeEstado(etiqueta: string): boolean {

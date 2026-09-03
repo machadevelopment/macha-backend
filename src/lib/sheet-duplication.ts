@@ -1,5 +1,5 @@
 import { pareceResumenPorPeriodo } from './sheet-shape';
-import { esRenglonDeTotal } from './sheet-unpivot';
+import { filaEsRenglonDeTotal } from './sheet-unpivot';
 /**
  * Detecta cuando DOS hojas del mismo libro describen EL MISMO DINERO.
  *
@@ -171,13 +171,10 @@ function sumasDeColumnasDeDinero(rows: unknown[][]): number[] {
    *
    * Es la misma familia que el arreglo del filtro de supervivencia del mismo día: la suciedad
    * más común de un Excel hecho a mano envenenando una medición que el resto del pipeline sí
-   * sabe tolerar. `esRenglonDeTotal` se consume de `sheet-unpivot` — una sola definición, o la
-   * misma fila se excluiría de un lado y no del otro.
+   * sabe tolerar. `filaEsRenglonDeTotal` se consume de `sheet-unpivot` — una sola definición, o
+   * la misma fila se excluiría de un lado y no del otro.
    */
-  const datos = rows.slice(1).filter((f) => {
-    const primera = f.find((c) => c !== null && c !== undefined && c !== '');
-    return !(typeof primera === 'string' && esRenglonDeTotal(primera));
-  });
+  const datos = rows.slice(1).filter((f) => !filaEsRenglonDeTotal(f));
   if (datos.length === 0) return [];
 
   const ancho = Math.max(...rows.map((f) => f.length));

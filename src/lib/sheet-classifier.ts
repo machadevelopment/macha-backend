@@ -1,4 +1,4 @@
-import { esRenglonDeTotal } from './sheet-unpivot';
+import { filaEsRenglonDeTotal } from './sheet-unpivot';
 /**
  * Decide POR REGLA, leyendo los encabezados, si una hoja contiene movimientos financieros.
  *
@@ -629,16 +629,15 @@ export function noPuedeProducirMovimientos(
    *
    * El resto del pipeline ya tolera las dos: el modelo declara `skip` sobre un TOTAL y
    * `sheet-header` sabe que un pie de página no es un encabezado. Lo que faltaba era que este
-   * filtro no las contara como evidencia EN CONTRA. `esRenglonDeTotal` se consume de
-   * `sheet-unpivot` en vez de reescribirse: si los dos juzgaran distinto qué es un total, la
+   * filtro no las contara como evidencia EN CONTRA. `filaEsRenglonDeTotal` se consume de
+   * `sheet-unpivot` en vez de reescribirse: si los tres juzgaran distinto qué es un total, la
    * misma fila se excluiría de un lado y no del otro.
    *
    * ⚠️ Solo se excluyen del DENOMINADOR. No se descartan ni se marcan acá — eso lo decide
    * `staging-rules` con toda la fila delante.
    */
   const esSuciedad = (f: unknown[]): boolean => {
-    const primera = f.find((c) => c !== null && c !== undefined && c !== '');
-    if (typeof primera === 'string' && esRenglonDeTotal(primera)) return true;
+    if (filaEsRenglonDeTotal(f)) return true;
     // Un pie de página rotula la hoja, no la tabla: ocupa mucho menos que el encabezado.
     const llenas = f.filter((c) => c !== null && c !== undefined && c !== '').length;
     const anchoEncabezado = encabezado.filter(

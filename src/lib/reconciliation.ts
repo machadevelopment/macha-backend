@@ -1,4 +1,5 @@
 import { asNumber, costoDeLaFila, type ColumnMap } from './row-assembly';
+import { filaEsRenglonDeTotal } from './sheet-unpivot';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -116,6 +117,30 @@ export function medirFilas(
   const costos = new Map<string, MontoPorMoneda>();
 
   for (const row of batch) {
+    /*
+     * ═══ EL RENGLÓN DE TOTAL NO SE MIDE, Y ESTA LÍNEA VALE UNA MEDICIÓN ═══
+     *
+     * Un total es POR DEFINICIÓN la suma de las filas de arriba, así que contarlo acá reporta
+     * exactamente el DOBLE del dinero de la hoja. Medido sobre un archivo real de cliente
+     * (`Jewelry_Store_Template11`, 2026-09-03): las CINCO hojas de dinero mostraban ×2 exacto
+     * en el resumen del portón — 280.090,00 de facturación sobre 140.045,00 reales, 256.300,00
+     * de cartera sobre 128.150,00, y así las cinco.
+     *
+     * ⚠️ Y el daño es específico de ESTA pantalla, que es lo que lo hace grave: el portón
+     * (migración 0042) existe para que el dueño pueda DESMENTIRNOS antes de publicar. Si le
+     * enseñamos el doble de su facturación, o aprueba una cifra falsa o no aprueba su
+     * contabilidad correcta — y en los dos casos la única herramienta que tiene para
+     * controlarnos es la que está mintiendo.
+     *
+     * `sheet-classifier` y `sheet-duplication` ya excluían estas filas de SUS mediciones por
+     * este mismo motivo; esta era la tercera y no lo hacía. Ahora las tres consumen
+     * `filaEsRenglonDeTotal`, o la misma fila se excluye de un lado y no del otro.
+     *
+     * NO afecta al ledger: qué filas entran lo deciden el modelo y `staging-rules` con la fila
+     * entera delante. Acá solo se deja de contar dos veces lo que se cuenta una.
+     */
+    if (filaEsRenglonDeTotal(row)) continue;
+
     const moneda = monedaDeLaFila(row, columns, baseCurrency);
 
     if (columns.amount !== null) {

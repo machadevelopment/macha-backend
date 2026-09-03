@@ -169,3 +169,77 @@ describe('el costo se mide aparte', () => {
     expect(m.costos).toEqual([{ moneda: 'GTQ', total: 27, filas: 1 }]);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL RENGLÓN DE TOTAL DUPLICABA EL DINERO DEL PORTÓN (reporte de Keneth, 2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * *"En el primer Excel me dice que son 140 pero en la web me salía 280."*
+ *
+ * Un total es POR DEFINICIÓN la suma de las filas de arriba, así que medirlo reporta
+ * exactamente el DOBLE. Reproducido al centavo sobre `Jewelry_Store_Template11.xlsx`, un
+ * archivo real de cliente: las CINCO hojas de dinero daban ×2 exacto.
+ *
+ * ⚠️ El daño es específico del PORTÓN, y eso es lo que lo hace grave: esa pantalla existe para
+ * que el dueño pueda DESMENTIRNOS antes de publicar. Enseñarle el doble de su facturación lo
+ * deja eligiendo entre aprobar una cifra falsa o no aprobar su contabilidad correcta.
+ *
+ * Las filas son las del archivo real, con su forma exacta — el rótulo alineado a la derecha,
+ * pegado a la cifra, con todo lo de la izquierda en blanco. Escribirlas "prolijas" (rótulo en
+ * la columna 0) haría pasar el test sin cubrir el caso que ocurrió.
+ */
+describe('⚠️ el renglón de TOTAL no se mide', () => {
+  const columnas = (over: Partial<ColumnMap>): ColumnMap => ({ ...MAPA_VACIO, ...over });
+
+  test('`TOTAL SALES` en la columna 7 no suma (era ×2 exacto)', () => {
+    const filas: unknown[][] = [
+      ['SO-2001', 46027, 'CU-005', 'Corporate Gifts LLC', 'JW-1013', 'Rose Gold Bangle', 1, 440, 440],
+      ['SO-2002', 46027, 'CU-002', 'James Whitfield', 'JW-1007', 'Charm Bracelet', 1, 130, 130],
+      // La fila real del archivo: siete celdas vacías, el rótulo, la cifra.
+      ['', '', '', '', '', '', '', 'TOTAL SALES', 570],
+    ]; // prettier-ignore
+    const m = medirFilas(filas, columnas({ amount: 8 }), 'USD');
+    expect(m.montos[0]?.total).toBe(570);
+  });
+
+  test('⚠️ `TOTALS` en PLURAL INGLÉS tampoco: era la otra mitad del bug', () => {
+    /*
+     * El regex tenía `totales` —el plural ESPAÑOL— y el `\b` hacía que `total` seguido de `s`
+     * no cerrara palabra. O sea que el rótulo más común de una plantilla en inglés no se
+     * reconocía, ni acá ni en los otros dos filtros que comparten la función. Es lo que dejaba
+     * pasar `Accounts Receivable` y `Accounts Payable` del archivo real.
+     */
+    const filas: unknown[][] = [
+      ['INV-6001', 'CU-005', 46027, 46072, 440, 440, 0],
+      ['INV-6002', 'CU-002', 46027, 46087, 130, 130, 0],
+      ['', '', '', 'TOTALS', 570, 570, 0],
+    ];
+    const m = medirFilas(filas, columnas({ amount: 4 }), 'USD');
+    expect(m.montos[0]?.total).toBe(570);
+  });
+
+  test('una fila normal cuyo TEXTO menciona un total SÍ se mide', () => {
+    /*
+     * La guarda mira la primera celda NO VACÍA, no cualquier celda, y esta es la diferencia
+     * que eso protege: un movimiento real cuya descripción diga "Pago total a proveedor" es
+     * plata del cliente. Un falso positivo acá la esconde, que es peor que el bug original —
+     * el doble se ve, lo que falta no.
+     */
+    const filas: unknown[][] = [['2026-01-05', 'Pago total a proveedor', 1200]];
+    const m = medirFilas(filas, columnas({ amount: 2 }), 'USD');
+    expect(m.montos[0]?.total).toBe(1200);
+  });
+
+  test('el COSTO de la fila de total tampoco se cuenta', () => {
+    // `medirFilas` mide dos cosas y la exclusión tiene que alcanzar a las dos, o la hoja de
+    // ventas con costo en la línea seguiría reportando el doble por la otra mitad.
+    const filas: unknown[][] = [
+      ['V-1', 46027, 500, 300],
+      ['', 'TOTALES', 500, 300],
+    ];
+    const m = medirFilas(filas, columnas({ amount: 2, costTotal: 3 }), 'USD');
+    expect(m.montos[0]?.total).toBe(500);
+    expect(m.costos[0]?.total).toBe(300);
+  });
+});
