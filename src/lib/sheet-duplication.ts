@@ -560,3 +560,190 @@ export function detectarDetalleDuplicado(hojas: HojaParaComparar[]): Map<string,
   }
   return aOmitir;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════
+ * CUANDO DOS HOJAS SON LOS MISMOS HECHOS, FILA POR FILA
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Encontrado probando de punta a punta en producción con un archivo real de cliente
+ * (`Jewelry_Store_Template11`, 2026-09-03). Su `Accounts Receivable` son **las mismas ventas**
+ * de `Sales Orders`, facturadas:
+ *
+ *     SO-2001  CU-005   440   |   INV-6001  CU-005   440
+ *     SO-2002  CU-002   130   |   INV-6002  CU-002   130
+ *     SO-2003  CU-004   950   |   INV-6003  CU-004   950
+ *
+ * Medido: **154 de 154** pares (contraparte, monto) de la cartera existen igual en las ventas.
+ * Cada venta se contaba DOS veces —una como venta y otra como factura devengando su ingreso—
+ * y el dashboard mostró **268.195 sobre 140.045 reales, un +91 %**.
+ *
+ * ═══ POR QUÉ NINGUNA GUARDA EXISTENTE LO ATRAPA ═══
+ *
+ *  · `ventaYaRegistradaEnOtraHoja` se apoya en el ESQUEMA del libro: necesita una columna de la
+ *    cartera cuyos valores existan en las ventas. Esta plantilla **no vincula la factura con su
+ *    orden** —lleva `Invoice #` y `Cust. ID`, nunca `Order #`— así que no hay referencia que
+ *    detectar, y no la hay ni en principio.
+ *  · `detectarDetalleDuplicado` compara TOTALES, y acá no empatan: 140.045 contra 128.150,
+ *    porque no todas las ventas llegaron a facturarse. Bajar ese umbral para acomodarlo sería
+ *    exactamente lo que la nota de ese módulo advierte que no se haga.
+ *
+ * ═══ LA SEÑAL: CADA FILA TIENE SU GEMELA EXACTA EN LA OTRA HOJA ═══
+ *
+ * No el total —que es agregado y se deja engañar— sino la coincidencia **fila por fila** del
+ * par (contraparte, monto). Con 154 filas eso no ocurre por azar: dos hojas de movimientos
+ * distintos no coinciden en quién y cuánto una y otra vez.
+ *
+ * ⚠️ ES LA REGLA MÁS PELIGROSA DE ESTE MÓDULO Y SUS GUARDAS SON DELIBERADAMENTE DURAS. Un
+ * falso positivo no muestra una cifra de más —que se ve— sino que BORRA el ingreso de un
+ * cliente, que no se ve. Por eso:
+ *
+ *  1. **≥95 % de cobertura**, no una mayoría. Un solape parcial entre dos hojas legítimas es
+ *     normal (el mismo cliente compra dos veces lo mismo); que casi TODAS coincidan, no.
+ *  2. **≥8 filas**, el mismo piso que el resto del módulo: con tres, coincidir se explica por
+ *     azar tan bien como por duplicación.
+ *  3. **Con MULTIPLICIDAD.** Si la cartera trae tres filas de (CU-001, 440) y las ventas una
+ *     sola, no es la misma plata: dos de esas tres son dinero que nadie registró. Se consume
+ *     una coincidencia por fila, no se pregunta "¿existe?".
+ *  4. **Las dos hojas tienen que traer CONTRAPARTE.** Sin ella la comparación sería solo por
+ *     monto, y dos hojas de gastos de la misma PYME comparten importes redondos todo el tiempo.
+ *  5. **La contenida NO puede ser más grande.** Se suprime la que está dentro de la otra; si
+ *     las dos se contienen (son idénticas), esto no decide y lo resuelve el dedup por totales,
+ *     que ya sabe cuál conservar.
+ *
+ * ⚠️ Y lo que devuelve NO es "descartá esta hoja". Es la misma bandera que ya usa la hoja de
+ * cobros: la factura **se crea igual** —el cliente necesita su cartera en Por cobrar— y lo
+ * único que no ocurre es que devengue el ingreso por segunda vez. Descartar la hoja dejaría
+ * Por cobrar en cero, que es el bug de U3TECH.
+ */
+
+/** Cobertura mínima para afirmar que una hoja repite los hechos de otra. */
+const COBERTURA_PARA_REPETICION = 0.95;
+
+/**
+ * La columna de dinero con la suma más grande, POR ÍNDICE.
+ *
+ * ⚠️ No se puede usar `sumasDeColumnasDeDinero` para esto y me costó una vuelta: esa función
+ * devuelve las sumas COMPACTADAS —solo las columnas que son dinero, en orden— así que el
+ * índice del array no es el de la columna. Leerlo como si lo fuera hacía que la contraparte se
+ * buscara en `Cust. ID` y el monto en la columna 2, que es `Cust. ID` otra vez: ningún par
+ * coincidía y la regla no detectaba nada.
+ *
+ * Los criterios son los mismos que allá —mayoría de celdas numéricas, y una columna de FECHAS
+ * no es dinero por más que sume— porque un serial de Excel vale ~45.000 y ganaría siempre.
+ */
+function columnaDeMontoPrincipal(rows: unknown[][], evitar: number): number | null {
+  const datos = rows.slice(1).filter((f) => !filaEsRenglonDeTotal(f));
+  if (datos.length === 0) return null;
+  const ancho = Math.max(0, ...rows.map((f) => f.length));
+
+  let mejor: number | null = null;
+  let mayor = 0;
+  for (let c = 0; c < ancho; c++) {
+    if (c === evitar) continue;
+    let suma = 0;
+    let cuantos = 0;
+    let fechas = 0;
+    for (const f of datos) {
+      const bruto = f[c];
+      if (!pareceCifra(bruto)) continue;
+      const n = aNumero(bruto);
+      if (n === null) continue;
+      cuantos++;
+      suma += Math.abs(n);
+      if (ES_SERIAL_DE_FECHA(n) || asDate(bruto) !== null) fechas++;
+    }
+    if (cuantos < datos.length * 0.6) continue;
+    if (fechas > cuantos * 0.8) continue;
+    if (suma > mayor) {
+      mayor = suma;
+      mejor = c;
+    }
+  }
+  return mejor;
+}
+
+/** Los pares (contraparte, monto) de una hoja, con su multiplicidad. */
+function paresDeHecho(rows: unknown[][]): Map<string, number> | null {
+  /*
+   * ⚠️ `Array.from` y no `.map`: XLSX devuelve arrays DISPERSOS cuando la fila tiene huecos, y
+   * `.map` los salta dejando `undefined` en el resultado — el `startsWith` de abajo revienta.
+   * Un encabezado con celdas vacías es lo más común de un archivo real.
+   */
+  const fila0 = rows[0] ?? [];
+  const encabezado = Array.from({ length: fila0.length }, (_, i) => normalizar(fila0[i]));
+  const datos = rows.slice(1).filter((f) => !filaEsRenglonDeTotal(f));
+  if (datos.length < MIN_FILAS_PARA_AFIRMAR) return null;
+
+  /*
+   * La columna de contraparte por vocabulario, igual que el resto del pipeline. Si la hoja no
+   * la trae, esta regla no aplica — ver la guarda 4. `Cust. ID` y `Supp. ID` cuentan: un
+   * identificador de cliente es tan buena contraparte como su nombre, y es lo que traen las
+   * plantillas que normalizan el cliente a otra hoja.
+   */
+  const PISTAS = ['cliente', 'customer', 'proveedor', 'supplier', 'contraparte', 'custid', 'suppid', 'vendor', 'razonsocial']; // prettier-ignore
+  const col = encabezado.findIndex((h) => PISTAS.some((p) => h.startsWith(p)));
+  if (col === -1) return null;
+
+  /*
+   * El monto: la columna de dinero con la suma más grande. Es la misma heurística del resto
+   * del módulo, y acá además da igual cuál se elija con tal de que sea LA MISMA idea en las dos
+   * hojas — lo que se compara son pares, y un par con la columna equivocada no coincide con
+   * nada, así que el peor caso es no detectar.
+   */
+  const colMonto = columnaDeMontoPrincipal(rows, col);
+  if (colMonto === null) return null;
+
+  const pares = new Map<string, number>();
+  for (const f of datos) {
+    const quien = f[col];
+    const monto = aNumero(f[colMonto]);
+    if (monto === null || quien === null || quien === undefined || quien === '') continue;
+    const k = `${normalizar(quien)}|${Math.round(Math.abs(monto) * 100)}`;
+    pares.set(k, (pares.get(k) ?? 0) + 1);
+  }
+  return pares.size === 0 ? null : pares;
+}
+
+/** Qué proporción de los hechos de `a` están también en `b`, consumiendo multiplicidad. */
+function cobertura(a: Map<string, number>, b: Map<string, number>): number {
+  let total = 0;
+  let cubiertos = 0;
+  const restante = new Map(b);
+  for (const [k, n] of a) {
+    total += n;
+    const hay = restante.get(k) ?? 0;
+    const usa = Math.min(n, hay);
+    cubiertos += usa;
+    restante.set(k, hay - usa);
+  }
+  return total === 0 ? 0 : cubiertos / total;
+}
+
+/**
+ * Las hojas cuyos movimientos ya están registrados, fila por fila, en otra hoja del libro.
+ *
+ * El valor del mapa es la hoja que los contiene, para poder decirlo en el log y en el resumen:
+ * un descarte silencioso es lo que este pipeline pasó meses corrigiendo.
+ */
+export function detectarHechosRepetidos(hojas: HojaParaComparar[]): Map<string, string> {
+  const conPares = hojas
+    .map((h) => ({ nombre: h.nombre, pares: paresDeHecho(h.rows) }))
+    .filter((h): h is { nombre: string; pares: Map<string, number> } => h.pares !== null);
+
+  const out = new Map<string, string>();
+  for (const a of conPares) {
+    for (const b of conPares) {
+      if (a.nombre === b.nombre) continue;
+      if (cobertura(a.pares, b.pares) < COBERTURA_PARA_REPETICION) continue;
+      /*
+       * Guarda 5: si las dos se contienen son la MISMA tabla dos veces, y cuál conservar lo
+       * decide `detectarDetalleDuplicado`, que sabe distinguir una cabecera de un resumen.
+       * Elegir acá al azar podría quedarse con la copia y tirar el original.
+       */
+      if (cobertura(b.pares, a.pares) >= COBERTURA_PARA_REPETICION) continue;
+      out.set(a.nombre, b.nombre);
+      break;
+    }
+  }
+  return out;
+}

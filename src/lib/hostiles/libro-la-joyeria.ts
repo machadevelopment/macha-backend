@@ -58,7 +58,7 @@ export function libroLaJoyeria(): LibroHostil {
     ventas.push([
       `SO-${2001 + i}`,
       serial(`2026-0${(i % 8) + 1}-${String(3 + (i % 24)).padStart(2, '0')}`),
-      `CU-00${(i % 5) + 1}`,
+      `CU-00${(i % 3) + 1}`,
       ['Corporate Gifts LLC', 'James Whitfield', 'Sarah Chen'][i % 3],
       `JW-10${String(13 - (i % 9)).padStart(2, '0')}`,
       ['Rose Gold Bangle', 'Charm Bracelet', 'Solitaire Diamond Ring'][i % 3],
@@ -78,22 +78,32 @@ export function libroLaJoyeria(): LibroHostil {
   ]; // prettier-ignore
   let totalCartera = 0;
   let totalPagado = 0;
+  /*
+   * ⚠️ LA CARTERA REPITE LAS VENTAS, como en el archivo real: `INV-6001` es la factura de
+   * `SO-2001`, mismo cliente y mismo monto. Es el caso que costó **+91 % de ingreso** en
+   * producción (268.195 sobre 140.045), y no lo atrapaba nada: el esquema del libro necesita
+   * una columna de referencia y esta plantilla lleva `Invoice #` y `Cust. ID`, nunca
+   * `Order #`; el dedup por totales no empata porque no todas las ventas se facturaron.
+   *
+   * Se facturan 14 de las 24 ventas, así que los totales difieren y solo la comparación FILA
+   * POR FILA puede verlo.
+   */
   for (let i = 0; i < 14; i++) {
-    const monto = 440 + i * 55;
+    const precio = [440, 130, 950, 275, 1850][i % 5]!;
+    const monto = precio;
     const pagado = i < 9 ? monto : 0;
     totalCartera = r2(totalCartera + monto);
     totalPagado = r2(totalPagado + pagado);
     /*
-     * La cartera DEVENGA su ingreso además de crear la cuenta por cobrar (regla del
-     * 2026-08-19). Sus clientes y sus importes son propios —no son las mismas ventas de
-     * `Sales Orders`— así que acá el devengo es legítimo y suma. Escribirlo de otro modo
-     * metería en este libro el debate del doble conteo entre facturación y ventas, que es un
-     * tema aparte y no es lo que vino a medir.
+     * ⚠️ NO suma a la verdad. Estas facturas son las ventas de arriba, así que su ingreso YA
+     * está contado: devengarlo otra vez es el +91 % que se midió en producción. La factura
+     * sí se crea —el cliente necesita su cartera en Por cobrar— y lo único que no ocurre es
+     * el devengo por segunda vez. Ver `detectarHechosRepetidos`.
      */
-    mas('revenue', monto);
     cartera.push([
       `INV-${6001 + i}`,
-      `CU-00${(i % 5) + 1}`,
+      // El MISMO cliente que su venta: es lo que hace comparables las dos hojas.
+      `CU-00${(i % 3) + 1}`,
       serial(`2026-0${(i % 7) + 1}-${String(2 + (i % 22)).padStart(2, '0')}`),
       serial(`2026-0${(i % 7) + 2}-${String(2 + (i % 22)).padStart(2, '0')}`),
       monto,

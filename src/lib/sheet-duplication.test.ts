@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detectarDetalleDuplicado } from './sheet-duplication';
+import { detectarDetalleDuplicado, detectarHechosRepetidos } from './sheet-duplication';
 
 /**
  * La garantía: las compras del cliente no se cuentan dos veces.
@@ -492,5 +492,137 @@ describe('un consolidado por período chico también se descarta', () => {
       { nombre: 'Ventas', rows: ventas },
       { nombre: 'Resumen_Mensual', rows: otro },
     ]).size).toBe(0); // prettier-ignore
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA CARTERA QUE REPITE LAS VENTAS, FILA POR FILA (2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Encontrado probando de punta a punta en producción con un archivo real de cliente. Su
+ * `Accounts Receivable` son las MISMAS ventas de `Sales Orders`, facturadas:
+ *
+ *     SO-2001  CU-005   440   |   INV-6001  CU-005   440
+ *
+ * Medido: 154 de 154 pares (cliente, monto) coinciden, y el dashboard mostró **268.195 sobre
+ * 140.045 reales, +91 %** — cada venta contada dos veces, una como venta y otra como factura
+ * devengando su ingreso.
+ *
+ * No lo atrapaba nada: el esquema del libro necesita una columna de referencia y esa plantilla
+ * lleva `Invoice #` y `Cust. ID`, nunca `Order #`; y el dedup por TOTALES no empata (140.045
+ * contra 128.150, porque no todo se facturó).
+ *
+ * ⚠️ Y lo que devuelve NO es "descartá la hoja". Es la misma bandera de la hoja de cobros: la
+ * factura se crea igual —el cliente necesita su cartera— y lo único que no ocurre es el
+ * devengo por segunda vez. Descartarla dejaría Por cobrar en cero, que es el bug de U3TECH.
+ */
+describe('detectarHechosRepetidos', () => {
+  const CLIENTES = ['CU-005', 'CU-002', 'CU-004', 'CU-006', 'CU-010'];
+  const MONTOS = [440, 130, 950, 585, 1850, 275, 690, 1120, 340, 2100, 505, 780];
+
+  /** `Sales Orders`: 12 ventas. */
+  const ventas = (): unknown[][] => [
+    ['Order #', 'Order Date', 'Cust. ID', 'Customer Name', 'Total'],
+    ...MONTOS.map((m, i) => [`SO-${2001 + i}`, 46027 + i, CLIENTES[i % 5], `Cliente ${i % 5}`, m]),
+  ];
+
+  /** `Accounts Receivable`: las MISMAS ventas facturadas, menos las tres últimas sin facturar. */
+  const cartera = (): unknown[][] => [
+    ['Invoice #', 'Cust. ID', 'Invoice Date', 'Due Date', 'Invoice Amount'],
+    ...MONTOS.slice(0, 9).map((m, i) => [
+      `INV-${6001 + i}`,
+      CLIENTES[i % 5],
+      46027 + i,
+      46057 + i,
+      m,
+    ]),
+  ];
+
+  test('la cartera se marca como repetición de las ventas', () => {
+    const r = detectarHechosRepetidos([
+      { nombre: 'Sales Orders', rows: ventas() },
+      { nombre: 'Accounts Receivable', rows: cartera() },
+    ]);
+    expect(r.get('Accounts Receivable')).toBe('Sales Orders');
+    // ⚠️ Y NUNCA al revés: suprimir las ventas dejaría el dashboard sin su ingreso real.
+    expect(r.has('Sales Orders')).toBe(false);
+  });
+
+  test('⚠️ los TOTALES no empatan, y por eso el dedup viejo no podía verlo', () => {
+    // Es la razón por la que hace falta esta segunda vía y no bastaba bajar un umbral.
+    const tv = MONTOS.reduce((s, m) => s + m, 0);
+    const tc = MONTOS.slice(0, 9).reduce((s, m) => s + m, 0);
+    expect(tc / tv).toBeLessThan(0.95);
+  });
+
+  test('dos hojas de movimientos DISTINTOS no se tocan', () => {
+    /*
+     * El modo de fallo caro: un falso positivo no muestra una cifra de más —que se ve— sino
+     * que BORRA el ingreso de un cliente. Estas dos comparten forma y clientes, y sus montos
+     * son otros.
+     */
+    const otras: unknown[][] = [
+      ['Order #', 'Order Date', 'Cust. ID', 'Customer Name', 'Total'],
+      ...MONTOS.map((m, i) => [`SO-${9001 + i}`, 46200 + i, CLIENTES[i % 5], `C${i}`, m + 7]),
+    ];
+    const r = detectarHechosRepetidos([
+      { nombre: 'Ventas Q1', rows: ventas() },
+      { nombre: 'Ventas Q2', rows: otras },
+    ]);
+    expect(r.size).toBe(0);
+  });
+
+  test('⚠️ la MULTIPLICIDAD cuenta: tres filas iguales no las cubre una sola', () => {
+    /*
+     * Si la cartera trae tres facturas de (CU-001, 440) y las ventas una sola, dos de esas
+     * tres son dinero que nadie registró. Preguntar "¿existe?" en vez de consumir una
+     * coincidencia por fila las daría por cubiertas y se perderían.
+     */
+    const repetidas: unknown[][] = [
+      ['Invoice #', 'Cust. ID', 'Invoice Date', 'Invoice Amount'],
+      ...Array.from({ length: 12 }, (_, i) => [`INV-${i}`, 'CU-005', 46027 + i, 440]),
+    ];
+    const r = detectarHechosRepetidos([
+      { nombre: 'Sales Orders', rows: ventas() },
+      { nombre: 'Cartera', rows: repetidas },
+    ]);
+    expect(r.has('Cartera')).toBe(false);
+  });
+
+  test('sin columna de CONTRAPARTE la regla no aplica', () => {
+    /*
+     * Sin ella la comparación sería solo por monto, y dos hojas de gastos de la misma PYME
+     * comparten importes redondos todo el tiempo.
+     */
+    const sinQuien = cartera().map((f, i) => (i === 0 ? ['Invoice #', 'X', 'Invoice Date', 'Due Date', 'Invoice Amount'] : f)); // prettier-ignore
+    const r = detectarHechosRepetidos([
+      { nombre: 'Sales Orders', rows: ventas() },
+      { nombre: 'Cartera', rows: sinQuien },
+    ]);
+    expect(r.size).toBe(0);
+  });
+
+  test('con POCAS filas no se afirma nada', () => {
+    // Con tres, coincidir se explica por azar tan bien como por duplicación.
+    const corta = (rows: unknown[][]) => [rows[0]!, ...rows.slice(1, 4)];
+    const r = detectarHechosRepetidos([
+      { nombre: 'Sales Orders', rows: corta(ventas()) },
+      { nombre: 'Cartera', rows: corta(cartera()) },
+    ]);
+    expect(r.size).toBe(0);
+  });
+
+  test('⚠️ dos hojas IDÉNTICAS no las decide esta regla', () => {
+    /*
+     * Si cada una contiene a la otra son la misma tabla dos veces, y cuál conservar lo sabe
+     * `detectarDetalleDuplicado`, que distingue una cabecera de un resumen. Elegir acá al azar
+     * podría quedarse con la copia y tirar el original.
+     */
+    const r = detectarHechosRepetidos([
+      { nombre: 'Ventas', rows: ventas() },
+      { nombre: 'Ventas (2)', rows: ventas() },
+    ]);
+    expect(r.size).toBe(0);
   });
 });

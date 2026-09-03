@@ -52,7 +52,7 @@ import {
 } from '@/lib/cuadre';
 import { detectarFilaDeEncabezado } from '@/lib/sheet-header';
 import { analizarFormaDeHoja } from '@/lib/sheet-shape';
-import { detectarDetalleDuplicado } from '@/lib/sheet-duplication';
+import { detectarDetalleDuplicado, detectarHechosRepetidos } from '@/lib/sheet-duplication';
 import { claveDeConceptoAncho, despivotarReporte, inferirAnio } from '@/lib/sheet-unpivot';
 import {
   canSkipSheet,
@@ -792,8 +792,31 @@ export function startExcelIngestWorker(): Promise<string> {
          * la venta ya estuviera registrada. Es el mismo error de "parchar solo un consumidor"
          * que ya costó una vez con `esquema.entidades`.
          */
+        /*
+         * ═══ SEGUNDA VÍA: LA HOJA REPITE LOS HECHOS DE OTRA, FILA POR FILA ═══
+         *
+         * El esquema del libro exige una REFERENCIA —una columna cuyos valores existan en la
+         * otra hoja— y hay plantillas donde esa columna no existe ni puede existir. Medido en
+         * producción con un archivo real (`Jewelry_Store_Template11`, 2026-09-03): su
+         * `Accounts Receivable` son las MISMAS ventas de `Sales Orders` facturadas —154 de 154
+         * pares (cliente, monto) coinciden— pero la cartera lleva `Invoice #` y `Cust. ID`,
+         * nunca `Order #`. Sin referencia, cada venta devengaba dos veces: el dashboard mostró
+         * **268.195 sobre 140.045 reales, un +91 %**.
+         *
+         * Se calcula sobre `vivas` igual que el esquema y el dedup: contra TODAS las hojas, un
+         * catálogo de productos podría empatar con las ventas y suprimirlas.
+         */
+        const hechosRepetidos = detectarHechosRepetidos(vivas);
+        for (const [hoja, contenedora] of hechosRepetidos) {
+          console.log(
+            `[excel-ingest] company=${companyId} hoja "${hoja}": sus movimientos ya están ` +
+              `registrados en "${contenedora}" (mismos pares cliente+monto). No devenga de nuevo.`,
+          );
+        }
+
         const yaRegistradaEnOtraHoja = (hoja: string): boolean =>
-          esquema.referencias.some((r) => r.desde === hoja && !entidades.has(r.hacia));
+          esquema.referencias.some((r) => r.desde === hoja && !entidades.has(r.hacia)) ||
+          hechosRepetidos.has(hoja);
 
         if (esquema.referencias.length > 0) {
           console.log(

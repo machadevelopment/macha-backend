@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import { detectarFilaDeEncabezado } from '../sheet-header';
 import { analizarFormaDeHoja } from '../sheet-shape';
-import { detectarDetalleDuplicado } from '../sheet-duplication';
+import { detectarDetalleDuplicado, detectarHechosRepetidos } from '../sheet-duplication';
 import {
   canSkipSheet,
   firmaDeCatalogo,
@@ -321,8 +321,18 @@ export function correrPipeline(libro: LibroHostil): Corrida {
    * contado en otra si apunta a una hoja que PRODUCE movimientos. Apuntar a un catálogo no
    * cuenta — que una venta nombre un vehículo no significa que el ingreso esté registrado.
    */
+  /*
+   * ⚠️ Y LA SEGUNDA VÍA, que el worker también consulta: una hoja puede repetir los hechos de
+   * otra FILA POR FILA sin que exista ninguna columna de referencia entre ellas. Es el caso de
+   * la plantilla de la joyería (2026-09-03), donde la cartera son las mismas ventas facturadas
+   * y no hay `Order #` que las vincule. Sin esto acá, este doble mediría algo DISTINTO de lo
+   * que hace producción y el libro se pondría verde con el bug vivo.
+   */
+  const hechosRepetidos = detectarHechosRepetidos(vivas);
+
   const yaRegistradaEnOtraHoja = (hoja: string): boolean =>
-    esq.referencias.some((r) => r.desde === hoja && !entidades.has(r.hacia));
+    esq.referencias.some((r) => r.desde === hoja && !entidades.has(r.hacia)) ||
+    hechosRepetidos.has(hoja);
 
   /* ── Pasada 2: procesar ── */
   const totales: Verdad = { revenue: 0, cogs: 0, opex: 0 };
