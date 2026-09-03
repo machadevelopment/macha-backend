@@ -143,18 +143,29 @@ const SINONIMOS: Record<keyof ColumnMap, string[]> = {
    * de KapePrueba. Si el doble fuera más torpe que el modelo de verdad, este test se pondría
    * verde por una incapacidad del doble y el bug seguiría vivo en producción.
    */
-  date: ['fecha', 'fechadepago', 'fechaemision', 'fechadeemision', 'fechafactura', 'fechamovimiento', 'dia', 'date', 'ultimacompra', 'fechaingreso', 'mes'], // prettier-ignore
-  amount: ['monto', 'ventaneta', 'total', 'importe', 'valor', 'montoq', 'amount', 'montototal', 'preciototal', 'debe', 'saldo', 'saldoxcobrar', 'saldoporcobrar', 'ventanetaacumulada', 'costoadquisicion', 'totallinea', 'totalventas'], // prettier-ignore
+  /*
+   * ⚠️ Y el vocabulario en INGLÉS por el mismo motivo, agregado el 2026-09-03 con la plantilla
+   * de la joyería: sus encabezados son `Order Date`, `Invoice Amount`, `Supplier Name`. El
+   * doble no los leía, así que TODAS sus filas salían sin fecha, se marcaban `invalid_date` y
+   * el libro medía la incapacidad del doble en vez del pipeline. El modelo real las lee sin
+   * problema — un archivo de cliente en inglés es lo más normal del mundo.
+   *
+   * `unitprice` y `unitcost` NO entran en `amount`: son el precio de UNA unidad y la columna
+   * que importa es el total de la línea. Meterlos ahí obligaría a que el desempate por
+   * magnitud los descarte, que es apostar a que el total siempre sea mayor.
+   */
+  date: ['fecha', 'fechadepago', 'fechaemision', 'fechadeemision', 'fechafactura', 'fechamovimiento', 'dia', 'date', 'ultimacompra', 'fechaingreso', 'mes', 'orderdate', 'invoicedate', 'billdate', 'podate', 'transactiondate', 'paymentdate'], // prettier-ignore
+  amount: ['monto', 'ventaneta', 'total', 'importe', 'valor', 'montoq', 'amount', 'montototal', 'preciototal', 'debe', 'saldo', 'saldoxcobrar', 'saldoporcobrar', 'ventanetaacumulada', 'costoadquisicion', 'totallinea', 'totalventas', 'invoiceamount', 'billamount', 'pototal', 'linetotal', 'balancedue'], // prettier-ignore
   currency: ['moneda', 'divisa', 'currency'],
-  description: ['descripcion', 'concepto', 'detalle', 'glosa'],
-  counterparty: ['cliente', 'proveedor', 'colaborador', 'contraparte', 'razonsocial', 'empleado'], // prettier-ignore
-  product: ['producto', 'articulo', 'item', 'sku', 'descripcionproducto'],
-  quantity: ['cantidad', 'unidades', 'qty', 'cant'],
-  productCategory: ['categoria', 'rubro', 'clasificacion', 'tipodegasto'],
-  store: ['tienda', 'sucursal', 'local'],
-  dueDate: ['fechavencimiento', 'vencimiento', 'fechalimite'],
-  costTotal: ['costototal', 'costodeventa', 'costo'],
-  costUnit: ['costounitario', 'costounit'],
+  description: ['descripcion', 'concepto', 'detalle', 'glosa', 'description', 'memo', 'notes'],
+  counterparty: ['cliente', 'proveedor', 'colaborador', 'contraparte', 'razonsocial', 'empleado', 'customer', 'customername', 'supplier', 'suppliername', 'vendor', 'client'], // prettier-ignore
+  product: ['producto', 'articulo', 'item', 'sku', 'descripcionproducto', 'itemname', 'productname'], // prettier-ignore
+  quantity: ['cantidad', 'unidades', 'qty', 'cant', 'quantity', 'qtyordered', 'units'],
+  productCategory: ['categoria', 'rubro', 'clasificacion', 'tipodegasto', 'category'],
+  store: ['tienda', 'sucursal', 'local', 'store', 'branch', 'location'],
+  dueDate: ['fechavencimiento', 'vencimiento', 'fechalimite', 'duedate'],
+  costTotal: ['costototal', 'costodeventa', 'costo', 'totalcost', 'costofgoods'],
+  costUnit: ['costounitario', 'costounit', 'unitcost'],
 };
 
 /**

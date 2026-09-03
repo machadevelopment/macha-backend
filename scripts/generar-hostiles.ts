@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { LIBROS, libroInventarioAislado } from '../src/lib/hostiles/libros';
 import { libroElInfierno } from '../src/lib/hostiles/libro-el-infierno';
 import { libroElAbismo } from '../src/lib/hostiles/libro-el-abismo';
+import { libroLaJoyeria } from '../src/lib/hostiles/libro-la-joyeria';
 import { aWorkbook } from '../src/lib/hostiles/pipeline-doble';
 
 const destino = process.argv[2] ?? './exceles-hostiles';
@@ -27,7 +28,13 @@ const lineas: string[] = [
   '',
 ];
 
-for (const fabricar of [...LIBROS, libroInventarioAislado, libroElInfierno, libroElAbismo]) {
+for (const fabricar of [
+  ...LIBROS,
+  libroInventarioAislado,
+  libroElInfierno,
+  libroElAbismo,
+  libroLaJoyeria,
+]) {
   const libro = fabricar();
   const buf = XLSX.write(aWorkbook(libro), { type: 'buffer', bookType: 'xlsx' });
   writeFileSync(join(destino, libro.archivo), buf);

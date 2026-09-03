@@ -6,6 +6,7 @@ import * as schema from '@/db/schema';
 import { promoteDocument } from '@/lib/promotion';
 import { insertStagingRows } from '@/lib/staging';
 import { LIBROS } from '@/lib/hostiles/libros';
+import { libroLaJoyeria } from '@/lib/hostiles/libro-la-joyeria';
 import { correrPipeline } from '@/lib/hostiles/pipeline-doble';
 import type { DB } from '@/db/client';
 
@@ -77,7 +78,7 @@ describe('los libros hostiles llegan enteros al dashboard', () => {
     return out;
   }
 
-  for (const fabricar of LIBROS) {
+  for (const fabricar of [...LIBROS, libroLaJoyeria]) {
     const libro = fabricar();
 
     test(`${libro.archivo} — el dashboard muestra lo que trae el archivo`, async () => {

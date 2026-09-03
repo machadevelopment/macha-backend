@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { LIBROS, libroInventarioAislado } from './hostiles/libros';
 import { libroElInfierno } from './hostiles/libro-el-infierno';
+import { libroLaJoyeria } from './hostiles/libro-la-joyeria';
 import { correrPipeline } from './hostiles/pipeline-doble';
 
 /**
@@ -17,7 +18,7 @@ import { correrPipeline } from './hostiles/pipeline-doble';
  * vacían el libro, que es la clase de fallo de la que hay siete reportes.
  */
 
-for (const fabricar of LIBROS) {
+for (const fabricar of [...LIBROS, libroLaJoyeria]) {
   const libro = fabricar();
 
   describe(`${libro.archivo} — ${libro.titulo}`, () => {
