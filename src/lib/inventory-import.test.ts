@@ -363,3 +363,86 @@ describe('mapearInventarioForzado', () => {
     expect(m).toBeNull();
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA CANTIDAD SALÍA DE «STOCK STATUS» (archivo real de una joyería, 2026-09-03)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Encontrado probando de punta a punta en producción: la hoja se desviaba bien al inventario
+ * —el log decía "forzada a INVENTARIO por el dueño (43 filas)"— y terminaba en **"0 altas, 43
+ * omitidas"**, con el portón diciéndole al dueño "Actualizó tu inventario".
+ *
+ * La causa: `stock` estaba en las pistas de cantidad y `buscarColumna` acepta prefijos, así que
+ * `Stock Status` (con "OK", "Low") le ganaba a `Qty On Hand`, que no figuraba en la lista.
+ *
+ * Se arregla por DOS lados, y el segundo es el que generaliza: se agrega el vocabulario en
+ * inglés, y además se verifica que la columna elegida traiga NÚMEROS. Ninguna lista de
+ * palabras cubre todos los rótulos que a alguien se le ocurran; que la columna tenga números
+ * sí es verificable, y descarta de un golpe la clase entera de "eligió la columna de estado".
+ */
+describe('⚠️ la columna de cantidad tiene que traer NÚMEROS', () => {
+  const HEADER = ['SKU', 'Item Name', 'Location', 'Qty On Hand', 'Reorder Point', 'Unit Cost', 'Inventory Value', 'Stock Status']; // prettier-ignore
+  const FILAS: unknown[][] = [
+    ['JW-1001', 'Solitaire Diamond Ring', 'Main Showroom', 10, 3, 450, 4500, 'OK'],
+    ['JW-1002', 'Gold Tennis Bracelet', 'Main Showroom', 4, 2, 820, 3280, 'Low'],
+    ['JW-1003', 'Pearl Necklace', 'Vault', 0, 1, 310, 0, 'Out'],
+  ];
+
+  test('elige `Qty On Hand` y no `Stock Status`', () => {
+    const m = mapearColumnasDeInventario(HEADER, FILAS);
+    expect(m).not.toBeNull();
+    // 3 = Qty On Hand. Antes daba 7 = Stock Status, cuyo valor es "OK".
+    expect(m!.quantity).toBe(3);
+    // Y el estado va a su campo, que es donde sirve.
+    expect(m!.status).toBe(7);
+  });
+
+  test('y lee el resto de la hoja en inglés', () => {
+    const m = mapearColumnasDeInventario(HEADER, FILAS)!;
+    // `name` daba null: el cliente veía el SKU como nombre de cada artículo.
+    expect(m.name).toBe(1);
+    expect(m.unitCost).toBe(5);
+    expect(m.location).toBe(2);
+  });
+
+  test('⚠️ la guarda numérica actúa aunque el rótulo coincida EXACTO', () => {
+    /*
+     * El primer pase de `buscarColumna` busca coincidencia exacta, así que una hoja con una
+     * columna literalmente llamada `Stock` pero llena de texto la elegiría sin dudar. Es el
+     * mismo fallo con otro rótulo, y por eso la guarda va en los dos pases.
+     */
+    const m = mapearColumnasDeInventario(
+      ['SKU', 'Stock', 'Cantidad'],
+      [
+        ['A-1', 'Disponible', 12],
+        ['A-2', 'Agotado', 0],
+        ['A-3', 'Disponible', 7],
+      ],
+    );
+    expect(m!.quantity).toBe(2);
+  });
+
+  test('sin filas de muestra NO se descarta nada', () => {
+    /*
+     * Sin evidencia no se decide: es el mismo sesgo del resto del módulo. Y mantiene el
+     * comportamiento de quien llame con solo el encabezado.
+     */
+    const m = mapearColumnasDeInventario(['SKU', 'Producto', 'Existencia']);
+    expect(m!.quantity).toBe(2);
+  });
+
+  test('una columna con celdas vacías sigue sirviendo', () => {
+    // Un archivo real trae huecos. Se exige MAYORÍA, no perfección.
+    const m = mapearColumnasDeInventario(
+      ['SKU', 'Qty On Hand'],
+      [
+        ['A-1', 12],
+        ['A-2', ''],
+        ['A-3', 7],
+        ['A-4', 5],
+      ],
+    );
+    expect(m!.quantity).toBe(1);
+  });
+});

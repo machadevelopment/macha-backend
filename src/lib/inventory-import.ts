@@ -93,23 +93,41 @@ const PISTAS: Record<keyof MapaDeInventario, string[]> = {
     'insumo',
     'articulo',
     'descripcion',
+    'itemname',
+    'productname',
+    'description',
     'modelo',
     'marca',
   ],
+  /*
+   * ⚠️ El vocabulario en INGLÉS va PRIMERO cuando es más específico, y `qtyonhand` es el caso
+   * exacto que lo motivó (2026-09-03, archivo real de una joyería). Su hoja de inventario es
+   * `SKU | Item Name | Location | Qty On Hand | Reorder Point | Unit Cost | Inventory Value |
+   * Stock Status`, y la cantidad se mapeaba a **`Stock Status`**: `stock` estaba en la lista y
+   * `buscarColumna` acepta prefijos, así que `stockstatus` ganaba mientras `qtyonhand` no
+   * figuraba. La columna elegida traía "OK", así que las 43 filas se omitieron y el inventario
+   * del cliente quedó vacío — con el portón diciéndole "Actualizó tu inventario".
+   */
   quantity: [
+    'qtyonhand',
+    'quantityonhand',
+    'onhand',
     'cantidaddisponible',
     'stockactual',
     'existenciaactual',
     'existencias',
     'existencia',
+    'stockonhand',
     'stock',
     'cantidad',
+    'quantity',
+    'qty',
   ],
-  unitCost: ['costounitario', 'costopromedio', 'costo'],
-  reorderPoint: ['puntoreorden', 'stockminimo', 'cantidadreorden', 'existenciaminima', 'minimo'],
-  location: ['ubicacion', 'bodega', 'almacen', 'sucursal', 'tienda'],
-  supplier: ['proveedor'],
-  status: ['estado', 'status', 'situacion', 'condicion', 'disponibilidad', 'estatus'],
+  unitCost: ['costounitario', 'costopromedio', 'costo', 'unitcost', 'averagecost'],
+  reorderPoint: ['puntoreorden', 'stockminimo', 'cantidadreorden', 'existenciaminima', 'minimo', 'reorderpoint', 'reorderlevel'], // prettier-ignore
+  location: ['ubicacion', 'bodega', 'almacen', 'sucursal', 'tienda', 'location', 'warehouse', 'branch'], // prettier-ignore
+  supplier: ['proveedor', 'supplier', 'vendor'],
+  status: ['estado', 'status', 'situacion', 'condicion', 'disponibilidad', 'estatus', 'stockstatus'], // prettier-ignore
 };
 
 /**
@@ -181,10 +199,14 @@ export function cuentaComoExistencia(valor: unknown): boolean {
  * `nombre`). Con el orden invertido, una hoja que trae las dos columnas se quedaría con la
  * genérica.
  */
-export function mapearColumnasDeInventario(headerRow: unknown[]): MapaDeInventario | null {
+export function mapearColumnasDeInventario(
+  headerRow: unknown[],
+  /** Filas de datos, para verificar que la columna de cantidad traiga NÚMEROS. Ver arriba. */
+  muestras: unknown[][] = [],
+): MapaDeInventario | null {
   const normalizados = headerRow.map(normalizeHeader);
   const buscar = (pistas: string[], esCantidad = false) =>
-    buscarColumna(normalizados, pistas, esCantidad);
+    buscarColumna(normalizados, pistas, esCantidad, muestras);
 
   const mapa: MapaDeInventario = {
     sku: buscar(PISTAS.sku),
@@ -298,20 +320,57 @@ const CANTIDAD_QUE_NO_ES_EXISTENCIA = [
   'sold',
   'ordered',
 ];
+/**
+ * ⚠️ UNA COLUMNA DE CANTIDAD TIENE NÚMEROS, Y ESO SE VERIFICA (2026-09-03).
+ *
+ * Es la guarda que generaliza, y sin ella agregar vocabulario solo mueve el problema de sitio.
+ * El caso que la motivó: `Stock Status` (con "OK", "Low", "Out") ganaba sobre `Qty On Hand`
+ * porque `stock` estaba en las pistas y `buscarColumna` acepta prefijos. La cantidad salía de
+ * una columna de TEXTO, las 43 filas se omitían, y el inventario del cliente quedaba vacío
+ * mientras el portón le decía "Actualizó tu inventario".
+ *
+ * Ninguna lista de palabras puede cubrir todos los rótulos que a alguien se le ocurran. Que la
+ * columna traiga números sí es verificable, y descarta de un golpe la clase entera de errores
+ * "eligió una columna de estado / de nombre / de fecha".
+ *
+ * ⚠️ Se exige MAYORÍA y no todas: una hoja real trae celdas vacías y algún `#N/A`. Y si no hay
+ * filas de muestra la guarda no aplica — sin evidencia no se descarta nada, que es el mismo
+ * sesgo del resto del módulo.
+ */
+function mayoriaNumerica(muestras: unknown[][], col: number): boolean {
+  if (muestras.length === 0) return true;
+  let conValor = 0;
+  let numericas = 0;
+  for (const f of muestras) {
+    const v = f[col];
+    if (v === null || v === undefined || v === '') continue;
+    conValor++;
+    if (typeof v === 'number' ? Number.isFinite(v) : /^-?[\d.,\s]+$/.test(String(v).trim())) {
+      numericas++;
+    }
+  }
+  // Una columna íntegramente vacía no se puede desmentir: se deja pasar.
+  return conValor === 0 || numericas / conValor >= 0.6;
+}
+
 function buscarColumna(
   normalizados: string[],
   pistas: string[],
   esCantidad = false,
+  muestras: unknown[][] = [],
 ): number | null {
+  const sirve = (i: number) => !esCantidad || mayoriaNumerica(muestras, i);
+
   for (const pista of pistas) {
     const idx = normalizados.indexOf(pista);
-    if (idx !== -1) return idx;
+    if (idx !== -1 && sirve(idx)) return idx;
   }
   for (const pista of pistas) {
     const idx = normalizados.findIndex(
-      (h) =>
+      (h, i) =>
         h.startsWith(pista) &&
-        !(esCantidad && CANTIDAD_QUE_NO_ES_EXISTENCIA.some((mala) => h.includes(mala))),
+        !(esCantidad && CANTIDAD_QUE_NO_ES_EXISTENCIA.some((mala) => h.includes(mala))) &&
+        sirve(i),
     );
     if (idx !== -1) return idx;
   }
@@ -397,7 +456,9 @@ export async function importarInventario(
    * encabezados sino por el esquema del libro, y quien tiene esa información es el worker.
    * Cuando no viene, se resuelve como siempre por vocabulario.
    */
-  const mapa = params.mapa ?? mapearColumnasDeInventario(params.headerRow);
+  // Las filas van también: la columna de cantidad se verifica contra sus VALORES, no solo
+  // contra su rótulo. Ver `mayoriaNumerica`.
+  const mapa = params.mapa ?? mapearColumnasDeInventario(params.headerRow, params.rows);
   const out: ResultadoDeImportacion = {
     creados: 0,
     ajustados: 0,
@@ -646,7 +707,7 @@ export function mapearInventarioForzado(
   headerRow: unknown[],
   filas: unknown[][],
 ): MapaDeInventario | null {
-  const fungible = mapearColumnasDeInventario(headerRow);
+  const fungible = mapearColumnasDeInventario(headerRow, filas as unknown[][]);
   if (fungible) return fungible;
 
   /*
