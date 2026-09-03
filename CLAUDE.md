@@ -971,6 +971,62 @@ Conventions & gotchas:
     el primer test la fila que se colaba era el renglón de total, **que ya se excluye por su
     cuenta**: el error quedaba TAPADO por la otra guarda. Hace falta un consolidado que empiece
     directo con una categoría, que es como lo escribe quien no le pone título.
+- ⚠️ **UNA HOJA QUE REPITE LOS HECHOS DE OTRA, FILA POR FILA** (`detectarHechosRepetidos`,
+  2026-09-03). Encontrado **probando de punta a punta en producción**, no por un reporte: el
+  `Accounts Receivable` de `Jewelry_Store_Template11` son las MISMAS ventas de `Sales Orders`,
+  facturadas — `INV-6001` es la factura de `SO-2001`, mismo cliente y mismo monto. Medido:
+  **154 de 154** pares (cliente, monto) coinciden, y el dashboard mostró **268.195 sobre
+  140.045 reales, un +91 %**: cada venta contada dos veces, una como venta y otra como factura
+  devengando su ingreso.
+  - **No lo atrapaba NINGUNA de las dos guardas que existían, y por motivos distintos.**
+    `ventaYaRegistradaEnOtraHoja` se apoya en el ESQUEMA del libro, que necesita una columna de
+    la cartera cuyos valores existan en las ventas — esa plantilla lleva `Invoice #` y
+    `Cust. ID`, **nunca `Order #`**, así que no hay referencia que detectar ni la hay en
+    principio. Y `detectarDetalleDuplicado` compara TOTALES, que no empatan (140.045 contra
+    128.150, porque no todas las ventas se facturaron); bajar ese umbral es justo lo que la
+    nota de ese módulo advierte que no se haga.
+  - **La señal es la coincidencia FILA POR FILA del par (contraparte, monto)**, no el total. Un
+    agregado se deja engañar; que 154 filas coincidan en quién y cuánto no pasa por azar.
+  - ⚠️ **Es la regla más peligrosa del módulo y sus guardas son duras a propósito**: un falso
+    positivo no muestra una cifra de más —que se ve— sino que **BORRA el ingreso de un cliente**,
+    que no se ve. ≥95 % de cobertura (no una mayoría: un solape parcial entre dos hojas
+    legítimas es normal), ≥8 filas, con **MULTIPLICIDAD** (tres facturas de (CU-001, 440) no las
+    cubre una sola venta: dos son dinero que nadie registró), las dos hojas con contraparte
+    legible, y **si cada una contiene a la otra esto NO decide** — son la misma tabla dos veces
+    y eso lo resuelve el dedup por totales, que sabe distinguir una cabecera de un resumen.
+  - ⚠️ **NO descarta la hoja.** La factura se crea igual —el cliente necesita su cartera en Por
+    cobrar— y lo único que no ocurre es el devengo por segunda vez. Descartarla dejaría Por
+    cobrar en cero, que es el bug de U3TECH. Es la misma bandera de la hoja de cobros.
+  - Verificado sobre los 15 libros del corpus: detecta los tres casos correctos (dos hojas de
+    cobros que ya se suprimían por la vía estructural, más el nuevo) y **cero falsos positivos**
+    en los otros doce.
+  - ⚠️ **TRES COSAS QUE DESTAPÓ ESCRIBIR EL TEST, y valen más que el arreglo.** (1) El e2e de
+    integración era imprescindible: mutar el worker para que ignore la segunda vía dejaba la
+    suite ENTERA en verde, porque ningún test pasaba por el worker con esa forma de libro — la
+    lección de `mapaDelLote` otra vez. (2) El doble de `classifySheetRows` tiene que RECIBIR y
+    REENVIAR la bandera a `construirFilas`, o la cartera devenga igual **con el log diciendo
+    "No devenga de nuevo"**. (3) El primer fixture usaba 24 montos TODOS DISTINTOS y
+    `analizarEsquema` tomó la columna de dinero como CLAVE FORÁNEA (`Invoice Amount` → `Total`,
+    cobertura 1,00), declarando `Sales Orders` tabla de entidades: se iba entera al inventario.
+    Una joyería vende el mismo anillo varias veces; **un fixture con montos únicos no
+    representa ningún archivo**.
+- ⚠️ **LA CANTIDAD DEL INVENTARIO SALÍA DE «STOCK STATUS»** (2026-09-03, misma sesión de pruebas
+  de punta a punta). La hoja se desviaba BIEN al inventario —el log decía *"forzada a INVENTARIO
+  por el dueño (43 filas)"*— y terminaba en **"0 altas, 43 omitidas"**, con el portón diciéndole
+  al dueño *"Actualizó tu inventario"*. Su hoja es `SKU | Item Name | Location | Qty On Hand |
+  Reorder Point | Unit Cost | Inventory Value | Stock Status`: `stock` estaba en las pistas de
+  cantidad y `buscarColumna` acepta prefijos, así que **`Stock Status`** —cuyos valores son
+  "OK", "Low", "Out"— le ganaba a `Qty On Hand`, que no figuraba. De paso `name` daba null: el
+  cliente habría visto el SKU como nombre de cada artículo.
+  - Se arregla por dos lados y **el segundo es el que generaliza**: se agrega el vocabulario en
+    inglés, y además **se verifica que la columna elegida traiga NÚMEROS** (`mayoriaNumerica`).
+    Ninguna lista de palabras cubre todos los rótulos que a alguien se le ocurran; que la
+    columna tenga números sí es verificable, y descarta de un golpe la clase entera de "eligió
+    la columna de estado / de nombre / de fecha". Va en LOS DOS pases de `buscarColumna`: el
+    primero busca coincidencia exacta, así que una columna literalmente llamada `Stock` llena
+    de texto la elegiría sin dudar.
+  - Se exige MAYORÍA (60 %) y no perfección —un archivo real trae huecos y algún `#N/A`— y sin
+    filas de muestra la guarda no aplica: sin evidencia no se descarta nada.
 - **EL CUADRE DEJÓ DE GRITAR SOBRE LO CORRECTO** (2026-09-01). Dos falsos positivos medidos
   sobre libros cuyas TRES cifras salieron exactas contra su verdad de campo — y un detector que
   se equivoca en lo correcto enseña a ignorarlo, que es lo único que este mecanismo no puede
